@@ -270,54 +270,67 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
   }
 
-  // Builds the reply() closure shared by every context type: typing
-  // heartbeat + encrypt-for-every-recipient + post + drain this reply's
-  // delegation trail onto it + fire-and-forget metrics.
+  // Pings the typing indicator for the duration of `fn` -- callers wrap the
+  // WHOLE "decide what to say, then say it" arc with this (not just the
+  // final post), since that first part (asking a model) is almost always
+  // the slow one and is exactly when a human benefits from seeing
+  // "X is typing...". Rides the existing ephemeral typing channel
+  // (content-free, receivers self-expire after ~4s) on the same 2.5s
+  // cadence the human composer uses.
+  async function withTypingHeartbeat<T>(identity: AgentIdentity, chatId: number, fn: () => Promise<T>): Promise<T> {
+    void client.signalTyping(identity.apiKey, chatId);
+    const timer = setInterval(() => void client.signalTyping(identity.apiKey, chatId), 2500);
+    try {
+      return await fn();
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  // Builds the reply() closure shared by every context type:
+  // encrypt-for-every-recipient + post + drain this reply's delegation
+  // trail onto it + fire-and-forget metrics. Does NOT itself manage the
+  // typing indicator -- see withTypingHeartbeat, which wraps the whole
+  // callback (including whatever happens before reply() is even called).
   function makeReply(identity: AgentIdentity, chatId: number): (text: string) => Promise<void> {
     return async (text: string) => {
       const startedAt = Date.now();
-      void client.signalTyping(identity.apiKey, chatId);
-      const typingTimer = setInterval(() => void client.signalTyping(identity.apiKey, chatId), 2500);
+      let recipientKeys: string[];
       try {
-        let recipientKeys: string[];
-        try {
-          const members = await client.getChatMembers(identity.apiKey, chatId);
-          recipientKeys = members
-            .filter((u) => parseInt(String(u.id), 10) !== identity.saltAppId && u.public_key)
-            .map((u) => u.public_key as string);
-        } catch (err) {
-          logger.error(`[chat ${chatId}] fetching members failed: ${(err as Error).message}`);
-          return;
-        }
-        if (recipientKeys.length === 0) {
-          logger.error(`[chat ${chatId}] no recipient public keys; not sending.`);
-          return;
-        }
-
-        let encryptedMessage: string, senderMessage: string;
-        try {
-          encryptedMessage = await pgp.encryptFor(text, recipientKeys);
-          senderMessage = await pgp.encryptFor(text, [identity.publicKey]);
-        } catch (err) {
-          logger.error(`[chat ${chatId}] encryption failed: ${(err as Error).message}`);
-          return;
-        }
-
-        const trail = delegations.drainTrail(identity.saltAppId, chatId);
-        try {
-          await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail);
-        } catch (err) {
-          logger.error(`[chat ${chatId}] posting reply failed: ${(err as Error).message}`);
-          return;
-        }
-        client.trackEvent(identity.apiKey, "agent_reply_sent", {
-          chat_id: chatId,
-          latency_ms: Date.now() - startedAt,
-          delegation_count: (trail || []).length,
-        });
-      } finally {
-        clearInterval(typingTimer);
+        const members = await client.getChatMembers(identity.apiKey, chatId);
+        recipientKeys = members
+          .filter((u) => parseInt(String(u.id), 10) !== identity.saltAppId && u.public_key)
+          .map((u) => u.public_key as string);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] fetching members failed: ${(err as Error).message}`);
+        return;
       }
+      if (recipientKeys.length === 0) {
+        logger.error(`[chat ${chatId}] no recipient public keys; not sending.`);
+        return;
+      }
+
+      let encryptedMessage: string, senderMessage: string;
+      try {
+        encryptedMessage = await pgp.encryptFor(text, recipientKeys);
+        senderMessage = await pgp.encryptFor(text, [identity.publicKey]);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] encryption failed: ${(err as Error).message}`);
+        return;
+      }
+
+      const trail = delegations.drainTrail(identity.saltAppId, chatId);
+      try {
+        await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] posting reply failed: ${(err as Error).message}`);
+        return;
+      }
+      client.trackEvent(identity.apiKey, "agent_reply_sent", {
+        chat_id: chatId,
+        latency_ms: Date.now() - startedAt,
+        delegation_count: (trail || []).length,
+      });
     };
   }
 
@@ -413,7 +426,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       reply: makeReply(identity, chatId),
     };
     try {
-      await options.onMessage(ctx);
+      await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
     } catch (err) {
       logger.error(`[chat ${chatId}] onMessage failed: ${(err as Error).message}`);
       // Discard any trail entries a partial run recorded -- there's no
@@ -458,17 +471,18 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const identity = identities.get(parseInt(String(body.seller_id), 10));
     if (!identity || !body.chat_id || !options.onInvoicePaid) return;
     const chatId = body.chat_id;
+    const ctx: InvoicePaidContext = {
+      identity,
+      chatId,
+      buyer: body.buyer,
+      lineItems: body.line_items || [],
+      amount: body.amount,
+      isTopUp: !!body.billing_account_id,
+      transferRequestId: body.transfer_request_id,
+      reply: makeReply(identity, chatId),
+    };
     try {
-      await options.onInvoicePaid({
-        identity,
-        chatId,
-        buyer: body.buyer,
-        lineItems: body.line_items || [],
-        amount: body.amount,
-        isTopUp: !!body.billing_account_id,
-        transferRequestId: body.transfer_request_id,
-        reply: makeReply(identity, chatId),
-      });
+      await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
     } catch (err) {
       logger.error(`[chat ${chatId}] onInvoicePaid failed: ${(err as Error).message}`);
     }
@@ -477,10 +491,12 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   async function handleHandoffConfirmed(body: { from_agent_id: number | string; chat_id: number; reason?: string }): Promise<void> {
     const identity = identities.get(parseInt(String(body.from_agent_id), 10));
     if (!identity || !options.onHandoffConfirmed) return;
+    const chatId = body.chat_id;
+    const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, reply: makeReply(identity, chatId) };
     try {
-      await options.onHandoffConfirmed({ identity, chatId: body.chat_id, reason: body.reason, reply: makeReply(identity, body.chat_id) });
+      await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
     } catch (err) {
-      logger.error(`[chat ${body.chat_id}] onHandoffConfirmed failed: ${(err as Error).message}`);
+      logger.error(`[chat ${chatId}] onHandoffConfirmed failed: ${(err as Error).message}`);
     }
   }
 
@@ -500,8 +516,9 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       if (context.includes(HANDOFF_BRIEFING_MARKER)) break;
       await new Promise((r) => setTimeout(r, 2000));
     }
+    const ctx: HandoffReceivedContext = { identity, chatId, reason: body.reason, context, reply: makeReply(identity, chatId) };
     try {
-      await options.onHandoffReceived({ identity, chatId, reason: body.reason, context, reply: makeReply(identity, chatId) });
+      await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
     } catch (err) {
       logger.error(`[chat ${chatId}] onHandoffReceived failed: ${(err as Error).message}`);
     }
