@@ -17,9 +17,11 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "express": "^4.19.0",
     "openpgp": "^5.11.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
     "typescript": "^5.5.0"
   }
