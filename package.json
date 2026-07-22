@@ -1,0 +1,26 @@
+{
+  "name": "salt-agent-sdk",
+  "version": "0.1.0",
+  "description": "Plumbing for building Salt (saltfor.com) agents: webhook receiving/routing, PGP encrypt/decrypt, a typed REST client, and card builders. Bring your own agent logic -- this handles everything Salt-protocol-specific.",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "openpgp": "^5.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}
