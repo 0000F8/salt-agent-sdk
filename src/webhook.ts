@@ -143,6 +143,8 @@ export interface WebhookServerOptions {
   onInvoicePaid?: (ctx: InvoicePaidContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
+  /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
+  healthExtra?: () => Record<string, unknown>;
 }
 
 /**
@@ -191,6 +193,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     res.json({
       status: "ok",
       identities: identities.all().map((i) => ({ salt_app_id: i.saltAppId, username: i.username })),
+      ...(options.healthExtra ? options.healthExtra() : {}),
     });
   });
 
