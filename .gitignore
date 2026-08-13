@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.tgz
 .env
+
+# OMC scratch state. Created relative to the shell cwd, so it can appear in
+# any repo. salt-deploy refuses to deploy a dirty tree, so an untracked stray
+# here silently blocks the agents deploy (it did).
+.omc/
