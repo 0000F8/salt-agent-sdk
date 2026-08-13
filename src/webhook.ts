@@ -13,7 +13,8 @@
 // on top of this module, since it's specific to how one particular model
 // wants a situation framed.
 
-import express, { type Express } from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
+import express, { type Express, type Request } from "express";
 import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
@@ -127,12 +128,23 @@ export interface WebhookServerOptions {
   client: SaltClient;
   identities: IdentityStore;
   pgpPassphrase: string;
-  /** Required in production: must match the X-Salt-Webhook-Secret header
-   *  salt-api's jobs send. Unset (local dev) skips the check entirely --
-   *  encrypted-message webhooks fail safe regardless (forged ciphertext
-   *  never decrypts), but card_interaction/invoice_paid payloads are
-   *  plaintext and would otherwise be actable by anyone who can reach this server. */
-  webhookSharedSecret?: string;
+  /** Verify the HMAC signature salt-api sends on every callback.
+   *
+   *  Defaults ON. Each identity has its OWN signing key, fetched from salt-api
+   *  with that identity's api key and cached. This replaced a single fleet-wide
+   *  WEBHOOK_SHARED_SECRET: because anyone could register an agent pointing at
+   *  their own server, that secret leaked to any caller who asked for it, and a
+   *  secret shared with the parties you authenticate against cannot prove who
+   *  sent a request.
+   *
+   *  Encrypted-message webhooks fail safe regardless (forged ciphertext never
+   *  decrypts), but card_interaction/invoice_paid payloads are PLAINTEXT and
+   *  would otherwise be actable by anyone who can reach this server.
+   *
+   *  Set false only for local development against a dev salt-api. */
+  verifySignatures?: boolean;
+  /** Reject signatures older than this, so a captured POST can't be replayed. */
+  signatureToleranceSeconds?: number;
   /** This process's configured Mediator identity, if any -- enables the
    *  "observe the shared chat silently, only speak in private coaching
    *  chats" gate. */
@@ -153,11 +165,70 @@ export interface WebhookServerOptions {
  * to compose it into a bigger server).
  */
 export function createWebhookServer(options: WebhookServerOptions): { app: Express; listen: (port: number) => void } {
-  const { client, identities, pgpPassphrase, webhookSharedSecret, mediatorAgentId } = options;
+  const { client, identities, pgpPassphrase, mediatorAgentId } = options;
   const logger = options.logger ?? consoleLogger;
+  const verifySignatures = options.verifySignatures !== false;
+  const signatureTolerance = options.signatureToleranceSeconds ?? 300;
 
   const app = express();
-  app.use(express.json());
+  // Keep the raw bytes: the HMAC covers exactly what salt-api sent, and
+  // re-serialising the parsed object would digest different bytes (key order,
+  // whitespace, number formatting) and never match.
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as unknown as { rawBody?: string }).rawBody = buf.toString("utf8");
+      },
+    }),
+  );
+
+  // One signing key per identity, fetched lazily with that identity's own api
+  // key and cached. A miss is not fatal on its own -- verifyRequest decides.
+  const secretCache = new Map<number, string>();
+  async function secretForAgent(agentId: number): Promise<string | undefined> {
+    const cached = secretCache.get(agentId);
+    if (cached) return cached;
+    const identity = identities.get(agentId);
+    if (!identity) return undefined;
+    try {
+      const secret = await client.getWebhookSecret(identity.apiKey);
+      if (secret) secretCache.set(agentId, secret);
+      return secret;
+    } catch (err) {
+      logger.error(`[webhook] could not fetch signing key for agent ${agentId}: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  // Returns null when the request is authentic, or a reason string to reject.
+  async function rejectionReason(req: Request): Promise<string | null> {
+    if (!verifySignatures) return null;
+
+    const agentId = Number(req.get("X-Salt-Agent-Id"));
+    const signature = req.get("X-Salt-Signature");
+    if (!agentId || !signature) return "missing signature";
+
+    const t = /t=(\d+)/.exec(signature)?.[1];
+    const v1 = /v1=([0-9a-f]+)/.exec(signature)?.[1];
+    if (!t || !v1) return "malformed signature";
+
+    // Replay window. Also rejects a clock far in the future.
+    const age = Math.abs(Math.floor(Date.now() / 1000) - Number(t));
+    if (age > signatureTolerance) return `stale signature (${age}s old)`;
+
+    const secret = await secretForAgent(agentId);
+    if (!secret) return `no signing key for agent ${agentId}`;
+
+    const raw = (req as unknown as { rawBody?: string }).rawBody ?? "";
+    const expected = createHmac("sha256", secret).update(`${t}.${raw}`).digest("hex");
+
+    // Constant-time: a fast string compare leaks the digest a byte at a time.
+    const a = Buffer.from(v1, "utf8");
+    const b = Buffer.from(expected, "utf8");
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return "bad signature";
+
+    return null;
+  }
 
   // Salt fires one webhook per chat member with a callback URL
   // (Message#send_webhook in salt-api). When two or more identities THIS
@@ -540,19 +611,28 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // in the background so a slow agent-loop call can't make Salt's webhook
   // delivery time out.
   //
-  // WEBHOOK_SHARED_SECRET: when this server is publicly reachable, anyone
-  // can POST here. Encrypted-message webhooks fail safe (forged ciphertext
-  // never decrypts), but card_interaction/invoice_paid payloads are
-  // PLAINTEXT and would be acted on -- so when the secret is configured
-  // (production), every POST must carry the matching header salt-api's
-  // jobs send. Unset (local dev), the check is skipped entirely.
+  // When this server is publicly reachable, anyone can POST here. Encrypted-
+  // message webhooks fail safe (forged ciphertext never decrypts), but
+  // card_interaction/invoice_paid payloads are PLAINTEXT and would be acted
+  // on -- so every POST must carry a valid HMAC signed with the RECIPIENT
+  // identity's own key (see rejectionReason above).
   app.post("/", (req, res) => {
-    if (webhookSharedSecret && req.get("X-Salt-Webhook-Secret") !== webhookSharedSecret) {
-      res.status(401).json({ error: "invalid webhook secret" });
-      return;
-    }
-    res.status(200).json({ status: "accepted" });
-    dispatch(req.body).catch((err) => logger.error(`[webhook] unhandled error: ${(err as Error).message}`));
+    // Verify BEFORE acknowledging: an unsigned POST must never reach dispatch,
+    // because card_interaction/invoice_paid are plaintext and actionable.
+    rejectionReason(req)
+      .then((reason) => {
+        if (reason) {
+          logger.error(`[webhook] rejected: ${reason}`);
+          res.status(401).json({ error: "invalid signature" });
+          return;
+        }
+        res.status(200).json({ status: "accepted" });
+        dispatch(req.body).catch((err) => logger.error(`[webhook] unhandled error: ${(err as Error).message}`));
+      })
+      .catch((err) => {
+        logger.error(`[webhook] verification failed: ${(err as Error).message}`);
+        res.status(401).json({ error: "invalid signature" });
+      });
   });
 
   return {

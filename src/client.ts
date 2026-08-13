@@ -167,6 +167,24 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", "/api/v1/agents", apiKey, params);
     },
 
+    /**
+     * This identity's own webhook signing key, used to verify that an incoming
+     * webhook really came from salt-api.
+     *
+     * Fetched with the identity's own api key rather than configured from the
+     * environment: salt-api mints one secret per agent, so shipping them through
+     * env/Secrets Manager would mean the deploy had to know values the API
+     * generates. Fetching at boot also means rotation takes effect on restart.
+     */
+    async getWebhookSecret(apiKey: string): Promise<string | undefined> {
+      const res = await request<{ agent_id: number; webhook_secret?: string }>(
+        "GET",
+        `/api/v1/agents/webhook_secret?_=${Date.now()}`,
+        apiKey,
+      );
+      return res?.webhook_secret;
+    },
+
     /** Owner-only: fetch an agent's own api-key + PGP keypair right after creating it. */
     async getAgentAdmin(apiKey: string, agentId: number | string): Promise<{ apikey: { api_key: string }; userkeys: unknown; [key: string]: unknown }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);

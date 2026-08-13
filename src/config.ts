@@ -35,8 +35,12 @@ export interface SaltAgentConfig {
   /** The "front door" agent id for hand_back_to_concierge. */
   globalAgentId?: number;
 
-  /** Must match salt-api's WEBHOOK_SHARED_SECRET in production. */
-  webhookSharedSecret?: string;
+  /** Set SALT_VERIFY_SIGNATURES=false to skip webhook signature verification
+   *  (local dev only). Production verifies by default; each identity's signing
+   *  key is fetched from salt-api with its own api key, so nothing needs to be
+   *  configured here. Replaced WEBHOOK_SHARED_SECRET, a single fleet-wide value
+   *  that leaked to anyone who registered an agent. */
+  verifySignatures?: boolean;
 
   port: number;
   /** This webhook server's own public URL, given to agents created via create_salt_agent. */
@@ -67,7 +71,7 @@ export function loadSaltAgentConfig(env: NodeJS.ProcessEnv = process.env): SaltA
     mediatorAgentId: env.MEDIATOR_AGENT_ID != null ? parseInt(env.MEDIATOR_AGENT_ID, 10) : undefined,
     globalAgentId: env.GLOBAL_AGENT_ID != null ? parseInt(env.GLOBAL_AGENT_ID, 10) : undefined,
 
-    webhookSharedSecret: env.WEBHOOK_SHARED_SECRET || undefined,
+    verifySignatures: env.SALT_VERIFY_SIGNATURES !== "false",
 
     port,
     publicWebhookUrl: env.PUBLIC_WEBHOOK_URL || `http://localhost:${port}/`,
