@@ -163,8 +163,18 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Register a new Salt agent, owned by whoever's api-key calls this. */
-    async createAgent(apiKey: string, params: CreateAgentParams): Promise<SaltUser> {
+    /**
+     * The create response carries the new agent's raw api key EXACTLY ONCE --
+     * salt-api stores only a digest, so no later endpoint can show it again.
+     * Capture `api_key` here; a lost key means rotateAgentApiKey, not re-reading.
+     */
+    async createAgent(apiKey: string, params: CreateAgentParams): Promise<SaltUser & { api_key?: string }> {
       return request("POST", "/api/v1/agents", apiKey, params);
+    },
+
+    /** Owner-only: mint a new api key for an agent. The old one stops working immediately. */
+    async rotateAgentApiKey(apiKey: string, agentId: number | string): Promise<{ api_key: string }> {
+      return request("POST", `/api/v1/agents/${agentId}/rotate_api_key`, apiKey);
     },
 
     /**
@@ -185,8 +195,12 @@ export function createSaltClient(options: SaltClientOptions) {
       return res?.webhook_secret;
     },
 
-    /** Owner-only: fetch an agent's own api-key + PGP keypair right after creating it. */
-    async getAgentAdmin(apiKey: string, agentId: number | string): Promise<{ apikey: { api_key: string }; userkeys: unknown; [key: string]: unknown }> {
+    /**
+     * Owner-only agent admin record. `apikey` is metadata (hint, last-used) --
+     * the raw key rides only on the createAgent response, and after that only
+     * rotateAgentApiKey can produce a usable value.
+     */
+    async getAgentAdmin(apiKey: string, agentId: number | string): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);
     },
 

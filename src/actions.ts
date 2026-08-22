@@ -138,16 +138,18 @@ export function createActions(options: ActionsOptions) {
       public_fingerprint: keys.fingerprint,
     });
 
-    // The create response doesn't include an API key -- fetch it via the
-    // owner-only admin endpoint, callable immediately since `creator` is
-    // the new agent's owner.
-    const admin = await client.getAgentAdmin(creator.apiKey, created.id);
+    // The raw api key rides on the create response exactly once -- the server
+    // stores a digest, so the admin endpoint can no longer show it. The
+    // rotate fallback covers an older server that predates that change.
+    const childApiKey =
+      created.api_key ??
+      (await client.rotateAgentApiKey(creator.apiKey, created.id)).api_key;
 
     const childIdentity: AgentIdentity = {
       saltAppId: created.id,
       username: created.username,
       displayName: created.display_name,
-      apiKey: admin.apikey.api_key,
+      apiKey: childApiKey,
       publicKey: keys.publicKey,
       privateKey: keys.privateKey,
       systemPrompt: input.persona,
