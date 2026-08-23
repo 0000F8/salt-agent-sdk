@@ -56,6 +56,8 @@ export interface CreateInvoiceParams {
   lineItems: InvoiceLineItem[];
   message?: string;
   dueAt?: string;
+  /** See createInvoice's JSDoc for retry/reconciliation semantics. */
+  idempotencyKey?: string;
 }
 
 export interface AddUsageParams {
@@ -64,6 +66,8 @@ export interface AddUsageParams {
   qty: number;
   description?: string;
   payerId?: number;
+  /** See addUsage's JSDoc for retry/reconciliation semantics. */
+  idempotencyKey?: string;
 }
 
 export interface SaltClientOptions {
@@ -71,6 +75,69 @@ export interface SaltClientOptions {
   /** Override fetch (e.g. for tests). Defaults to global fetch. */
   fetchImpl?: typeof fetch;
 }
+
+/** One chain's governed-spend budget, applied over a rolling period. */
+export interface SpendingPolicyRule {
+  chain: string;
+  period: "daily" | "weekly" | "monthly";
+  /** HUMAN-DECIMAL string, e.g. "0.5" = half an ETH -- never base units (wei/satoshis). */
+  budget_amount: string;
+  /** HUMAN-DECIMAL string cap on a single send, if set. */
+  per_tx_max?: string;
+  /** Server-computed: HUMAN-DECIMAL string already spent in the current period. */
+  spent_this_period?: string;
+  /** Server-computed: HUMAN-DECIMAL string remaining in the current period. */
+  remaining?: string;
+}
+
+/**
+ * An agent's governed-spend policy, as returned by the API. `frozen: true`
+ * blocks every mainnet send regardless of `rules`; an agent with no policy
+ * at all is refused by default (salt-api default-denies agent mainnet
+ * sends until an owner sets one up) -- see getSpendingPolicy.
+ */
+export interface SpendingPolicy {
+  frozen: boolean;
+  rules: SpendingPolicyRule[];
+}
+
+/** Payload for updateSpendingPolicy -- same shape as SpendingPolicyRule minus the server-computed fields. */
+export interface UpdateSpendingPolicyParams {
+  frozen: boolean;
+  rules: Array<{
+    chain: string;
+    period: string;
+    /** HUMAN-DECIMAL string, e.g. "0.5" = half an ETH -- never base units. */
+    budget_amount: string;
+    /** HUMAN-DECIMAL string, if set. */
+    per_tx_max?: string;
+  }>;
+}
+
+/**
+ * Error codes salt-api can return for a governed-spend refusal. These ride
+ * in the response body as `{error: string, code: SpendGovernanceCode}` --
+ * check `SaltApiError.body.code` rather than parsing `.message`.
+ *
+ * - `spending_frozen` / `no_spending_policy` -- the agent's policy blocks all sends (see SpendingPolicy).
+ * - `per_tx_max_exceeded` / `budget_exceeded` -- the send exceeds a configured rule.
+ * - `spend_unconfirmed` -- the agent already has an unconfirmed governed send on this chain; wait for it to confirm, then retry.
+ * - `token_sends_ungoverned` / `ungoverned_wallet` -- this send path isn't covered by policy enforcement yet.
+ * - `invalid_amount` -- amount wasn't a valid human-decimal string.
+ * - `request_in_flight` / `request_failed_terminal` / `idempotency_key_reuse` -- see addUsage/createInvoice's JSDoc.
+ */
+export type SpendGovernanceCode =
+  | "spending_frozen"
+  | "no_spending_policy"
+  | "per_tx_max_exceeded"
+  | "budget_exceeded"
+  | "spend_unconfirmed"
+  | "token_sends_ungoverned"
+  | "ungoverned_wallet"
+  | "invalid_amount"
+  | "request_in_flight"
+  | "request_failed_terminal"
+  | "idempotency_key_reuse";
 
 export class SaltApiError extends Error {
   status: number;
@@ -99,11 +166,12 @@ export function createSaltClient(options: SaltClientOptions) {
     path: string,
     apiKey: string,
     body?: unknown,
-    extraHeaders?: Record<string, string>
+    opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
   ): Promise<T> {
     const url = `${host}${path}`;
-    const headers: Record<string, string> = { "api-key": apiKey, ...extraHeaders };
+    const headers: Record<string, string> = { "api-key": apiKey, ...opts?.extraHeaders };
     if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (opts?.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
     const res = await doFetch(url, {
       method,
       headers,
@@ -247,21 +315,48 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", `/api/v1/products/${productId}/share`, apiKey, { chat_id: chatId });
     },
 
-    /** Send an itemized invoice on the TransferRequest rail. Server re-validates all the math. */
+    /**
+     * Send an itemized invoice on the TransferRequest rail. Server
+     * re-validates all the math.
+     *
+     * Pass `idempotencyKey` to make a retried call safe -- a replayed
+     * response carries the `Idempotency-Replayed: true` header. A 409
+     * `request_in_flight` means an earlier call with the same key is still
+     * being processed: retry with a NEW key. A 409 `request_failed_terminal`
+     * means the invoice was already created under that key and failed
+     * afterwards -- do NOT retry with a new key, reconcile against the
+     * existing invoice instead (a second key would double-send it).
+     */
     async createInvoice(apiKey: string, params: CreateInvoiceParams): Promise<unknown> {
-      return request("POST", "/api/v1/transfer_requests", apiKey, {
-        chat_id: params.chatId,
-        receiver_id: params.receiverId,
-        wallet_id: params.walletId,
-        amount: params.amount,
-        message: params.message,
-        request_type: "invoice",
-        line_items: params.lineItems,
-        due_at: params.dueAt,
-      });
+      return request(
+        "POST",
+        "/api/v1/transfer_requests",
+        apiKey,
+        {
+          chat_id: params.chatId,
+          receiver_id: params.receiverId,
+          wallet_id: params.walletId,
+          amount: params.amount,
+          message: params.message,
+          request_type: "invoice",
+          line_items: params.lineItems,
+          due_at: params.dueAt,
+        },
+        { idempotencyKey: params.idempotencyKey }
+      );
     },
 
-    /** Record metered usage against the payer's prepaid credits. */
+    /**
+     * Record metered usage against the payer's prepaid credits.
+     *
+     * Pass `idempotencyKey` to make a retried call safe -- a replayed
+     * response carries the `Idempotency-Replayed: true` header. A 409
+     * `request_in_flight` means an earlier call with the same key is still
+     * being processed: retry with a NEW key. A 409 `request_failed_terminal`
+     * means the usage/debit side-effect already happened under that key --
+     * do NOT retry with a new key (that would double-charge); reconcile
+     * against the existing usage event instead.
+     */
     async addUsage(apiKey: string, params: AddUsageParams): Promise<unknown> {
       const body: Record<string, unknown> = {
         product_id: params.productId,
@@ -270,7 +365,43 @@ export function createSaltClient(options: SaltClientOptions) {
         description: params.description,
       };
       if (params.payerId) body.payer_id = params.payerId;
-      return request("POST", "/api/v1/usage_events", apiKey, body);
+      return request("POST", "/api/v1/usage_events", apiKey, body, { idempotencyKey: params.idempotencyKey });
+    },
+
+    // --- Spending policy (governed agent mainnet sends) ---
+
+    /**
+     * Owner-only: an agent's governed-spend policy. Call with the OWNER's
+     * api-key/JWT, not the agent's own key.
+     *
+     * Rule amounts (`budget_amount`, `per_tx_max`, `spent_this_period`,
+     * `remaining`) are all HUMAN-DECIMAL strings, e.g. "0.5" = half an ETH --
+     * never base units (wei/satoshis).
+     *
+     * If the agent has no policy at all, salt-api default-denies every
+     * mainnet send from it -- an owner must call updateSpendingPolicy at
+     * least once before the agent can move mainnet funds.
+     */
+    async getSpendingPolicy(apiKey: string, agentId: number | string): Promise<SpendingPolicy> {
+      return request("GET", `/api/v1/agents/${agentId}/spending_policy`, apiKey);
+    },
+
+    /**
+     * Owner-only: replace an agent's governed-spend policy. Call with the
+     * OWNER's api-key/JWT, not the agent's own key.
+     *
+     * `rules[].budget_amount` and `rules[].per_tx_max` are HUMAN-DECIMAL
+     * strings, e.g. "0.5" = half an ETH -- never base units. `frozen: true`
+     * blocks all mainnet sends regardless of `rules`. Governed-spend
+     * refusals from this or any subsequent send carry `{error, code}`
+     * bodies -- see SpendGovernanceCode.
+     */
+    async updateSpendingPolicy(
+      apiKey: string,
+      agentId: number | string,
+      policy: UpdateSpendingPolicyParams
+    ): Promise<SpendingPolicy> {
+      return request("PUT", `/api/v1/agents/${agentId}/spending_policy`, apiKey, policy);
     },
 
     /** The caller's credit relationships, both directions. */
