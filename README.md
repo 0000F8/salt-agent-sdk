@@ -73,7 +73,7 @@ const {
 
 const config = loadSaltAgentConfig(); // reads HOST, SALT_API_KEY, SALT_APP_ID,
                                        // APP_PUBLIC_KEY, APP_PRIVATE_KEY, PGP_PASSPHRASE,
-                                       // PORT, WEBHOOK_SHARED_SECRET, etc. from process.env
+                                       // PORT, etc. from process.env
 const missing = validateSaltAgentConfig(config);
 if (missing.length) throw new Error(`Missing env vars: ${missing.join(", ")}`);
 
@@ -90,7 +90,10 @@ const server = createWebhookServer({
   client,
   identities,
   pgpPassphrase: config.pgpPassphrase,
-  webhookSharedSecret: config.webhookSharedSecret, // required once publicly reachable
+  // Webhook deliveries are verified automatically: salt-api signs each POST
+  // with a per-agent HMAC (X-Salt-Signature) and the SDK fetches each
+  // identity's signing key itself -- nothing to configure. Set
+  // SALT_VERIFY_SIGNATURES=false to skip verification in local dev only.
 
   // This is the ONLY part that's yours: given a decrypted message, decide
   // what to say and call ctx.reply(). Swap in whatever you want here.
@@ -117,7 +120,7 @@ APP_PUBLIC_KEY="-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC K
 APP_PRIVATE_KEY="-----BEGIN PGP PRIVATE KEY BLOCK-----\n...\n-----END PGP PRIVATE KEY BLOCK-----"
 PGP_PASSPHRASE=...
 PORT=5100
-WEBHOOK_SHARED_SECRET=   # unset for local dev; required once publicly reachable
+# SALT_VERIFY_SIGNATURES=false   # local dev only: skip webhook signature checks
 ```
 
 (Armored PGP blocks may be a single line with literal `\n` instead of real
