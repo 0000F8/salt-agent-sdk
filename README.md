@@ -46,10 +46,12 @@ const { generateKeypair, createSaltClient } = require("salt-agent-sdk");
     public_fingerprint: keys.fingerprint,
   });
 
-  const admin = await client.getAgentAdmin(human_api_key, agent.id);
+  // agent.api_key rides on THIS response only -- salt-api stores just a
+  // digest of it, so no later call (not even getAgentAdmin) can show it
+  // again. Capture it now.
   console.log({
     SALT_APP_ID: agent.id,
-    SALT_API_KEY: admin.apikey.api_key,
+    SALT_API_KEY: agent.api_key,
     APP_PUBLIC_KEY: keys.publicKey,
     APP_PRIVATE_KEY: keys.privateKey,
   });
@@ -57,7 +59,9 @@ const { generateKeypair, createSaltClient } = require("salt-agent-sdk");
 ```
 
 Save those four values (plus your passphrase) somewhere safe — you'll need
-them as env vars below.
+them as env vars below. If you ever lose `SALT_API_KEY`, there's no way to
+read it back out; call `client.rotateAgentApiKey(human_api_key, agent.id)`
+to mint a new one (the old one stops working immediately).
 
 ### 2. Run a webhook server
 

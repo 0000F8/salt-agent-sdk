@@ -114,6 +114,81 @@ export interface UpdateSpendingPolicyParams {
   }>;
 }
 
+export interface ReceiptParty {
+  id: number;
+  username: string;
+}
+
+/** Only present when the settled transfer paid a TransferRequest (a regular send has no `request`). */
+export interface ReceiptRequestSummary {
+  id: number;
+  request_type: string;
+  status: string;
+  line_items: InvoiceLineItem[] | null;
+}
+
+export interface ReceiptPayload {
+  transfer_id: number;
+  /** HUMAN-DECIMAL string, the declared send amount. */
+  amount: string;
+  /** HUMAN-DECIMAL string, the value the chain actually moved -- absent until/unless verified; authoritative over `amount` where they disagree. */
+  settled_amount?: string;
+  chain?: string;
+  testnet?: boolean;
+  token_contract_address?: string;
+  tx_id?: string;
+  sender?: ReceiptParty;
+  receiver?: ReceiptParty;
+  settled_at: string;
+  /**
+   * The sending agent's budget internals at enforcement time. Redacted
+   * (key absent) unless the caller is the sending agent itself or its root
+   * human owner -- a counterparty never sees the agent's per-tx/budget
+   * limits, only that the send was governed.
+   */
+  policy_snapshot?: unknown;
+  request?: ReceiptRequestSummary;
+}
+
+/** A tamper-evident settlement record, minted once a Transfer confirms on-chain. */
+export interface Receipt {
+  transfer_id: number;
+  payload: ReceiptPayload;
+  /** SHA-256 over sorted-key canonical JSON of the FULL (unredacted) payload -- still verifiable even when `policy_snapshot` was redacted for this viewer. */
+  digest: string;
+  created_at: string;
+}
+
+export interface BillingAccountParty {
+  id: number;
+  username: string;
+  display_name: string;
+  account_type: "User" | "Agent";
+}
+
+export interface BillingAccountCreditEntry {
+  id: number;
+  kind: "deposit" | "usage" | "refund";
+  /** HUMAN-DECIMAL string. */
+  amount: string;
+  qty?: string;
+  description?: string;
+  created_at: string;
+}
+
+/** A pair-scoped prepaid credit relationship: payer deposits with payee, payee's metered usage draws it down. */
+export interface BillingAccount {
+  id: number;
+  payer_id: number;
+  payee_id: number;
+  payer: BillingAccountParty;
+  payee: BillingAccountParty;
+  /** HUMAN-DECIMAL string: deposits + refunds - usage. This IS the payer's spend cap on this payee's metered products. */
+  balance: string;
+  /** Most recent 10 ledger entries, newest first. */
+  recent_entries: BillingAccountCreditEntry[];
+}
+
 /**
  * Error codes salt-api can return for a governed-spend refusal. These ride
  * in the response body as `{error: string, code: SpendGovernanceCode}` --
@@ -124,7 +199,9 @@ export interface UpdateSpendingPolicyParams {
  * - `spend_unconfirmed` -- the agent already has an unconfirmed governed send on this chain; wait for it to confirm, then retry.
  * - `token_sends_ungoverned` / `ungoverned_wallet` -- this send path isn't covered by policy enforcement yet.
  * - `invalid_amount` -- amount wasn't a valid human-decimal string.
- * - `request_in_flight` / `request_failed_terminal` / `idempotency_key_reuse` -- see addUsage/createInvoice's JSDoc.
+ * - `unverifiable_tx` -- the signed transaction couldn't be decoded at all; a governed send must be a standard signed transfer.
+ * - `declaration_mismatch` -- the signed transaction's destination, amount, or call data doesn't match what was declared.
+ * - `request_in_flight` / `request_failed_terminal` / `idempotency_key_reuse` -- see addUsage's JSDoc (the invoice rail does not implement these -- see createInvoice's JSDoc).
  */
 export type SpendGovernanceCode =
   | "spending_frozen"
@@ -135,6 +212,8 @@ export type SpendGovernanceCode =
   | "token_sends_ungoverned"
   | "ungoverned_wallet"
   | "invalid_amount"
+  | "unverifiable_tx"
+  | "declaration_mismatch"
   | "request_in_flight"
   | "request_failed_terminal"
   | "idempotency_key_reuse";
@@ -264,6 +343,15 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * Owner-only: mint a new webhook signing secret for an agent. The old
+     * secret stops verifying immediately, so the agent must re-fetch via
+     * getWebhookSecret before it can validate any further deliveries.
+     */
+    async rotateWebhookSecret(apiKey: string, agentId: number | string): Promise<{ agent_id: number; webhook_secret: string }> {
+      return request("POST", `/api/v1/agents/${agentId}/rotate_webhook_secret`, apiKey);
+    },
+
+    /**
      * Owner-only agent admin record. `apikey` is metadata (hint, last-used) --
      * the raw key rides only on the createAgent response, and after that only
      * rotateAgentApiKey can produce a usable value.
@@ -319,13 +407,14 @@ export function createSaltClient(options: SaltClientOptions) {
      * Send an itemized invoice on the TransferRequest rail. Server
      * re-validates all the math.
      *
-     * Pass `idempotencyKey` to make a retried call safe -- a replayed
-     * response carries the `Idempotency-Replayed: true` header. A 409
-     * `request_in_flight` means an earlier call with the same key is still
-     * being processed: retry with a NEW key. A 409 `request_failed_terminal`
-     * means the invoice was already created under that key and failed
-     * afterwards -- do NOT retry with a new key, reconcile against the
-     * existing invoice instead (a second key would double-send it).
+     * `idempotencyKey` is sent as an `Idempotency-Key` header, but
+     * `transfer_requests_controller` does NOT include salt-api's `Idempotent`
+     * concern (unlike addUsage/createTransfer paths) -- the server currently
+     * ignores it entirely. A retried call with the same key still creates a
+     * second invoice; there is no dedup, no replay, and none of the 409
+     * `request_in_flight` / `request_failed_terminal` behavior described for
+     * addUsage applies here. Retries of createInvoice are the caller's own
+     * responsibility to guard against for now.
      */
     async createInvoice(apiKey: string, params: CreateInvoiceParams): Promise<unknown> {
       return request(
@@ -404,9 +493,54 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("PUT", `/api/v1/agents/${agentId}/spending_policy`, apiKey, policy);
     },
 
+    /**
+     * The settlement record for a transfer the caller was party to (sender
+     * or receiver) -- 404 for anyone else, or if the transfer hasn't
+     * confirmed on-chain yet (receipts are minted only at confirmation).
+     */
+    async getReceipt(apiKey: string, transferId: number | string): Promise<Receipt> {
+      return request("GET", `/api/v1/receipts/${transferId}`, apiKey);
+    },
+
     /** The caller's credit relationships, both directions. */
     async getBillingAccounts(apiKey: string): Promise<unknown> {
       return request("GET", `/api/v1/billing_accounts?_=${Date.now()}`, apiKey);
+    },
+
+    /**
+     * Payer-initiated deposit: drops a "Credits top-up" invoice into
+     * `chatId` for `payeeId` to receive. Nothing is credited by this call
+     * itself -- the deposit lands only once that invoice is paid (see
+     * onInvoicePaid's `isTopUp`).
+     */
+    async topUpBillingAccount(
+      apiKey: string,
+      params: { chatId: number | string; payeeId: number | string; amount: string | number }
+    ): Promise<{ ok: true; transfer_request_id: number; billing_account: BillingAccount }> {
+      return request("POST", "/api/v1/billing_accounts/top_up", apiKey, {
+        chat_id: params.chatId,
+        payee_id: params.payeeId,
+        amount: params.amount,
+      });
+    },
+
+    /**
+     * Payee-only: return value onto the credits ledger. Capped at net usage
+     * (Σusage - Σrefunds) so a refund can only give back credits that were
+     * actually consumed -- it can never mint new balance. A 422
+     * `refund_exceeds_usage` means `amount` is above what's currently
+     * refundable. This is a ledger entry, not an on-chain transfer -- no
+     * Receipt is minted for it.
+     */
+    async refundBillingAccount(
+      apiKey: string,
+      billingAccountId: number | string,
+      params: { amount: string | number; memo?: string }
+    ): Promise<{ ok: true; entry_id: number; billing_account: BillingAccount }> {
+      return request("POST", `/api/v1/billing_accounts/${billingAccountId}/refund`, apiKey, {
+        amount: params.amount,
+        memo: params.memo,
+      });
     },
 
     /** The caller's own wallets. */
