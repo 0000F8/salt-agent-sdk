@@ -10,6 +10,7 @@
 // (Anthropic's native server tool, not something this code executes at
 // all -- stays in the reference implementation's own tool list).
 
+import { randomUUID } from "node:crypto";
 import { ethers } from "ethers";
 import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
@@ -370,11 +371,20 @@ export function createActions(options: ActionsOptions) {
     if (ctx.mainChatId == null) throw new Error("add_usage is only available while replying in a chat.");
     const productId = Number(input.product_id);
     if (!productId) throw new Error("product_id is required.");
+    // Generated once per call to this function -- i.e. once per model tool
+    // call -- NOT re-generated if the underlying HTTP request is retried.
+    // That's the point: usage_events_controller includes salt-api's
+    // Idempotent concern, so replaying the SAME key on a retried request is
+    // what makes a network-level retry safe against double-billing prepaid
+    // credits. Minting a fresh key per attempt would defeat that -- it would
+    // look like a brand-new usage event each time.
+    const idempotencyKey = randomUUID();
     const result = (await client.addUsage(caller.apiKey, {
       productId,
       chatId: ctx.mainChatId,
       qty: parseFloat(input.qty || "1"),
       description: input.description,
+      idempotencyKey,
     })) as { balance: unknown };
     return { recorded: true, balance_remaining: result.balance };
   }
