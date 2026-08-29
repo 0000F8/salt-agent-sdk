@@ -17,6 +17,7 @@ import * as pgp from "./crypto";
 import { encryptWalletPayload } from "./crypto";
 import * as delegations from "./delegations";
 import type { AgentIdentity, IdentityStore } from "./identities";
+import { sameId, type SaltId } from "./ids.js";
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -24,7 +25,7 @@ export interface ActionContext {
   /** Delegation hop depth of the message this action is being taken in service of (0 for a direct turn). */
   depth: number;
   /** The chat this action should act on, or null when not currently replying in a chat (e.g. a background job). */
-  mainChatId: number | null;
+  mainChatId: SaltId | null;
 }
 
 export interface ActionDefinition<TInput = any, TOutput = any> {
@@ -44,7 +45,8 @@ export interface ActionsOptions {
   /** Enables create_wallet / create_salt_agent's auto-provisioned wallet. Omit to disable both. */
   walletMasterKey?: string;
   /** Enables hand_back_to_concierge -- the id of this process's configured "front door" agent. */
-  globalAgentId?: number;
+  /** The concierge -- this process's configured front door agent. */
+  conciergeAgentId?: SaltId;
   /**
    * Applied to a delegate_to_agent reply before it's handed back as the
    * tool result. Salt itself has no opinion on reply framing; this exists
@@ -83,7 +85,7 @@ const BLOCKS_SCHEMA: JsonSchema = {
  * model API, and dispatch tool calls through `execute()`.
  */
 export function createActions(options: ActionsOptions) {
-  const { client, identities, pgpPassphrase, publicWebhookUrl, walletMasterKey, globalAgentId } = options;
+  const { client, identities, pgpPassphrase, publicWebhookUrl, walletMasterKey, conciergeAgentId } = options;
   const replyTransform = options.replyTransform ?? ((text: string) => text);
 
   // Generates an EVM keypair, encrypts it under walletMasterKey (no human
@@ -108,11 +110,11 @@ export function createActions(options: ActionsOptions) {
       encrypted_payload,
       public: false,
       default: false,
-    }) as Promise<{ id: number; chain: string; testnet: boolean; public_address: string }>;
+    }) as Promise<{ id: SaltId; chain: string; testnet: boolean; public_address: string }>;
   }
 
-  async function myWalletId(caller: AgentIdentity): Promise<number> {
-    const wallets = (await client.listWallets(caller.apiKey)) as Array<{ id: number; deleted_at?: string | null }>;
+  async function myWalletId(caller: AgentIdentity): Promise<SaltId> {
+    const wallets = (await client.listWallets(caller.apiKey)) as Array<{ id: SaltId; deleted_at?: string | null }>;
     const active = (Array.isArray(wallets) ? wallets : []).filter((w) => !w.deleted_at);
     if (active.length === 0) throw new Error("You have no wallet to receive payments.");
     return active[0].id;
@@ -182,7 +184,7 @@ export function createActions(options: ActionsOptions) {
 
   async function listSaltAgents(caller: AgentIdentity, input: { category?: string; limit?: number } = {}) {
     const agents = (await client.listAgents(caller.apiKey)) as Array<Record<string, any>>;
-    let filtered = agents.filter((a) => a.id !== caller.saltAppId);
+    let filtered = agents.filter((a) => !sameId(a.id, caller.saltAppId));
 
     if (input.category) {
       const needle = input.category.toLowerCase();
@@ -216,13 +218,17 @@ export function createActions(options: ActionsOptions) {
 
   async function delegateToAgent(
     caller: AgentIdentity,
-    input: { target_agent_id: number; task: string },
+    input: { target_agent_id: SaltId; task: string },
     ctx: ActionContext
   ) {
-    const targetId = Number(input.target_agent_id);
+    // Ids arrive here from a model's tool call, so they are taken as written
+    // and never parsed. `Number(...)` made every real id NaN, which is falsy,
+    // so the required-argument check below rejected every valid delegation --
+    // and the self-delegation guard, comparing NaN, could never fire.
+    const targetId = String(input.target_agent_id || "").trim();
     const task = (input.task || "").trim();
     if (!targetId || !task) throw new Error("target_agent_id and task are both required.");
-    if (targetId === caller.saltAppId) throw new Error("You can't delegate to yourself.");
+    if (sameId(targetId, caller.saltAppId)) throw new Error("You can't delegate to yourself.");
     if (ctx.depth >= delegations.MAX_DELEGATION_DEPTH) {
       throw new Error("Delegation depth limit reached -- handle this yourself (or answer with what you already know) instead of delegating further.");
     }
@@ -237,8 +243,8 @@ export function createActions(options: ActionsOptions) {
       throw new Error(`${targetId} isn't an agent -- delegate_to_agent only targets other agents.`);
     }
 
-    const chat = (await client.createOrGetChat(caller.apiKey, targetId)) as { id: number; users?: Array<Record<string, any>> };
-    const targetMember = (chat.users || []).find((u) => parseInt(u.id, 10) === targetId);
+    const chat = (await client.createOrGetChat(caller.apiKey, targetId)) as { id: SaltId; users?: Array<Record<string, any>> };
+    const targetMember = (chat.users || []).find((u) => sameId(u.id, targetId));
     if (!targetMember || !targetMember.public_key) {
       throw new Error(`Agent ${targetId} has no usable public key; can't message it securely.`);
     }
@@ -248,7 +254,7 @@ export function createActions(options: ActionsOptions) {
     // owner, added server-side) whose key must be a recipient for the
     // conversation to be auditable. Falls out naturally from the member list.
     const recipientKeys = (chat.users || [])
-      .filter((u) => parseInt(u.id, 10) !== caller.saltAppId && u.public_key)
+      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
       .map((u) => u.public_key as string);
 
     const marked = delegations.wrap(ctx.depth + 1, task);
@@ -294,14 +300,14 @@ export function createActions(options: ActionsOptions) {
   async function postCard(caller: AgentIdentity, input: { text?: string; blocks: unknown[] }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("post_card is only available while replying in a chat.");
     const result = (await client.postCard(caller.apiKey, ctx.mainChatId, input.blocks as never, input.text || "")) as {
-      resource_id: number;
-      message_id: number;
+      resource_id: SaltId;
+      message_id: SaltId;
     };
     return { posted: true, card_id: result.resource_id, message_id: result.message_id };
   }
 
-  async function updateCard(caller: AgentIdentity, input: { card_id: number; blocks: unknown[] }) {
-    const cardId = Number(input.card_id);
+  async function updateCard(caller: AgentIdentity, input: { card_id: SaltId; blocks: unknown[] }) {
+    const cardId = String(input.card_id || "").trim();
     if (!cardId) throw new Error("card_id is required.");
     await client.updateCard(caller.apiKey, cardId, input.blocks as never);
     return { updated: true, card_id: cardId };
@@ -315,14 +321,14 @@ export function createActions(options: ActionsOptions) {
     return { created: true, product };
   }
 
-  async function listProducts(caller: AgentIdentity, input: { seller_id?: number } = {}) {
+  async function listProducts(caller: AgentIdentity, input: { seller_id?: SaltId } = {}) {
     const products = await client.listProducts(caller.apiKey, input.seller_id);
     return { products };
   }
 
-  async function offerProduct(caller: AgentIdentity, input: { product_id: number }, ctx: ActionContext) {
+  async function offerProduct(caller: AgentIdentity, input: { product_id: SaltId }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("offer_product is only available while replying in a chat.");
-    const productId = Number(input.product_id);
+    const productId = String(input.product_id || "").trim();
     if (!productId) throw new Error("product_id is required.");
     await client.shareProduct(caller.apiKey, productId, ctx.mainChatId);
     return { offered: true, product_id: productId };
@@ -343,7 +349,7 @@ export function createActions(options: ActionsOptions) {
       receiver = members.find((m) => m.username === input.receiver_username);
       if (!receiver) throw new Error(`No chat member named @${input.receiver_username}.`);
     } else {
-      const others = members.filter((m) => m.id !== caller.saltAppId && !m.observer);
+      const others = members.filter((m) => !sameId(m.id, caller.saltAppId) && !m.observer);
       if (others.length !== 1) throw new Error("Say who to bill (receiver_username) in a group chat.");
       receiver = others[0];
     }
@@ -363,13 +369,13 @@ export function createActions(options: ActionsOptions) {
       lineItems: items as never,
       message: items.map((item) => item.name).join(", ").slice(0, 100),
       dueAt: input.due_date,
-    })) as { id: number };
+    })) as { id: SaltId };
     return { sent: true, invoice_id: invoice.id, amount };
   }
 
-  async function addUsage(caller: AgentIdentity, input: { product_id: number; qty?: string; description?: string }, ctx: ActionContext) {
+  async function addUsage(caller: AgentIdentity, input: { product_id: SaltId; qty?: string; description?: string }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("add_usage is only available while replying in a chat.");
-    const productId = Number(input.product_id);
+    const productId = String(input.product_id || "").trim();
     if (!productId) throw new Error("product_id is required.");
     // Generated once per call to this function -- i.e. once per model tool
     // call -- NOT re-generated if the underlying HTTP request is retried.
@@ -391,11 +397,11 @@ export function createActions(options: ActionsOptions) {
 
   // --- hand-offs: hand_off_to_agent / hand_back_to_concierge / offer_handoff_choices ---
 
-  async function handOffToAgent(caller: AgentIdentity, input: { agent_id: number; reason?: string }, ctx: ActionContext) {
+  async function handOffToAgent(caller: AgentIdentity, input: { agent_id: SaltId; reason?: string }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("hand_off_to_agent is only available while replying in a chat.");
-    const agentId = Number(input.agent_id);
+    const agentId = String(input.agent_id || "").trim();
     if (!agentId) throw new Error("agent_id is required.");
-    if (agentId === caller.saltAppId) throw new Error("You can't hand off to yourself.");
+    if (sameId(agentId, caller.saltAppId)) throw new Error("You can't hand off to yourself.");
 
     const target = await client.getAgent(caller.apiKey, agentId);
     if (!target || target.account_type !== "Agent") throw new Error(`${agentId} isn't an agent.`);
@@ -410,10 +416,10 @@ export function createActions(options: ActionsOptions) {
 
   async function handBackToConcierge(caller: AgentIdentity, input: { reason?: string }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("hand_back_to_concierge is only available while replying in a chat.");
-    if (!globalAgentId) throw new Error("No Global agent is configured on this server.");
-    if (globalAgentId === caller.saltAppId) throw new Error("You already are the concierge.");
+    if (!conciergeAgentId) throw new Error("No concierge is configured on this server.");
+    if (sameId(conciergeAgentId, caller.saltAppId)) throw new Error("You already are the concierge.");
 
-    await client.handOff(caller.apiKey, ctx.mainChatId, globalAgentId, input.reason);
+    await client.handOff(caller.apiKey, ctx.mainChatId, conciergeAgentId, input.reason);
     return {
       handed_off: true,
       to: "concierge",
@@ -423,7 +429,7 @@ export function createActions(options: ActionsOptions) {
 
   async function offerHandoffChoices(
     caller: AgentIdentity,
-    input: { candidates: Array<{ agent_id: number; why?: string }> },
+    input: { candidates: Array<{ agent_id: SaltId; why?: string }> },
     ctx: ActionContext
   ) {
     if (ctx.mainChatId == null) throw new Error("offer_handoff_choices is only available while replying in a chat.");
@@ -434,13 +440,16 @@ export function createActions(options: ActionsOptions) {
       client.listAgents(caller.apiKey) as Promise<Array<Record<string, any>>>,
       client.getChatMembers(caller.apiKey, ctx.mainChatId) as Promise<Array<Record<string, any>>>,
     ]);
-    const humanIds = members.filter((m) => m.account_type !== "Agent" && !m.observer).map((m) => parseInt(m.id, 10));
+    // These become the button's `restricted_to` allowlist. parseInt turned
+    // every one into NaN, which serialises to null and matches nobody -- so
+    // "only these humans may press this" silently meant "nobody may".
+    const humanIds = members.filter((m) => m.account_type !== "Agent" && !m.observer).map((m) => String(m.id));
     if (humanIds.length === 0) throw new Error("No human member to offer choices to.");
 
     const blocks: Array<Record<string, unknown>> = [{ type: "section", text: "Who should take this over? Pick one:" }];
     for (const c of candidates) {
-      const agent = directory.find((a) => a.id === Number(c.agent_id));
-      if (!agent || agent.id === caller.saltAppId) continue;
+      const agent = directory.find((a) => sameId(a.id, c.agent_id));
+      if (!agent || sameId(agent.id, caller.saltAppId)) continue;
       const fields: Array<{ label: string; value: string }> = [];
       if (agent.category) fields.push({ label: "Category", value: String(agent.category).slice(0, 160) });
       if (agent.average_rating) fields.push({ label: "Rating", value: `${agent.average_rating}/5 (${agent.ratings_count})` });
@@ -468,8 +477,8 @@ export function createActions(options: ActionsOptions) {
     if (blocks.length === 1) throw new Error("None of those candidates exist in the directory.");
 
     const card = (await client.postCard(caller.apiKey, ctx.mainChatId, blocks as never, "Choose who takes over")) as {
-      card_id?: number;
-      id?: number;
+      card_id?: SaltId;
+      id?: SaltId;
     };
     return {
       offered: true,
@@ -555,7 +564,7 @@ export function createActions(options: ActionsOptions) {
       schema: {
         type: "object",
         properties: {
-          target_agent_id: { type: "integer", description: "The Salt user id of the agent to delegate to (from list_salt_agents)." },
+          target_agent_id: { type: "string", description: "The Salt user id of the agent to delegate to (from list_salt_agents)." },
           task: { type: "string", description: "The sub-task or question to send, written as a clear, self-contained request -- the target agent has no other context about your conversation." },
         },
         required: ["target_agent_id", "task"],
@@ -589,7 +598,7 @@ export function createActions(options: ActionsOptions) {
       schema: {
         type: "object",
         properties: {
-          card_id: { type: "integer", description: "The card's id (from post_card's result or the card_interaction event)." },
+          card_id: { type: "string", description: "The card's id (from post_card's result or the card_interaction event)." },
           blocks: BLOCKS_SCHEMA,
         },
         required: ["card_id", "blocks"],
@@ -623,7 +632,7 @@ export function createActions(options: ActionsOptions) {
       description: "List shop products -- your own (default) or another seller's (pass seller_id). Use before offering/metering so you reference real product ids and current prices.",
       schema: {
         type: "object",
-        properties: { seller_id: { type: "integer", description: "Omit for your own products." } },
+        properties: { seller_id: { type: "string", description: "Omit for your own products." } },
       },
       execute: listProducts,
     },
@@ -632,7 +641,7 @@ export function createActions(options: ActionsOptions) {
       description: "Share one of YOUR products into the current chat as a bubble with a real Buy button. Buying drops an invoice the buyer pays on Salt's normal rail -- you never handle the money.",
       schema: {
         type: "object",
-        properties: { product_id: { type: "integer" } },
+        properties: { product_id: { type: "string" } },
         required: ["product_id"],
       },
       execute: offerProduct,
@@ -670,7 +679,7 @@ export function createActions(options: ActionsOptions) {
       schema: {
         type: "object",
         properties: {
-          product_id: { type: "integer" },
+          product_id: { type: "string" },
           qty: { type: "string", description: 'Units delivered, e.g. "1" or "3". Default "1".' },
           description: { type: "string", description: "Short human-readable line for the ledger." },
         },
@@ -708,7 +717,7 @@ export function createActions(options: ActionsOptions) {
       schema: {
         type: "object",
         properties: {
-          agent_id: { type: "integer", description: "The agent taking over (from list_salt_agents)." },
+          agent_id: { type: "string", description: "The agent taking over (from list_salt_agents)." },
           reason: { type: "string", description: "One line on why -- shown in the hand-off trail." },
         },
         required: ["agent_id", "reason"],
@@ -748,7 +757,7 @@ export function createActions(options: ActionsOptions) {
             description: "2-4 entries: {agent_id, why} -- `why` is your one-line pitch for this candidate.",
             items: {
               type: "object",
-              properties: { agent_id: { type: "integer" }, why: { type: "string" } },
+              properties: { agent_id: { type: "string" }, why: { type: "string" } },
               required: ["agent_id", "why"],
             },
           },

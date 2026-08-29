@@ -16,8 +16,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import type { SaltId } from "./ids.js";
+
 export interface AgentIdentity {
-  saltAppId: number;
+  saltAppId: SaltId;
   username: string;
   displayName?: string;
   apiKey: string;
@@ -29,7 +31,7 @@ export interface AgentIdentity {
 
 export interface IdentityStore {
   register(identity: AgentIdentity): void;
-  get(saltAppId: number): AgentIdentity | undefined;
+  get(saltAppId: SaltId): AgentIdentity | undefined;
   all(): AgentIdentity[];
 }
 
@@ -44,7 +46,12 @@ const DEFAULT_STORE_PATH = path.join(process.cwd(), "data", "identities.json");
  * them).
  */
 export function createIdentityStore(storePath: string = DEFAULT_STORE_PATH): IdentityStore {
-  const identities = new Map<number, AgentIdentity>();
+  // Keyed by the lowercased id. Ids arrive from webhook bodies, REST
+  // responses and env vars, and a uuid that differs only in case would
+  // otherwise register as a second, separate identity -- the process would
+  // hold two copies of one agent and route to whichever it looked up first.
+  const identities = new Map<string, AgentIdentity>();
+  const mapKey = (id: SaltId): string => String(id).toLowerCase();
 
   function load(): void {
     let raw: string;
@@ -58,7 +65,7 @@ export function createIdentityStore(storePath: string = DEFAULT_STORE_PATH): Ide
     }
     try {
       for (const identity of JSON.parse(raw) as AgentIdentity[]) {
-        identities.set(identity.saltAppId, identity);
+        identities.set(mapKey(identity.saltAppId), identity);
       }
     } catch (err) {
       console.error("[identities] failed to parse store:", (err as Error).message);
@@ -78,11 +85,11 @@ export function createIdentityStore(storePath: string = DEFAULT_STORE_PATH): Ide
 
   return {
     register(identity: AgentIdentity): void {
-      identities.set(identity.saltAppId, identity);
+      identities.set(mapKey(identity.saltAppId), identity);
       persist();
     },
-    get(saltAppId: number): AgentIdentity | undefined {
-      return identities.get(saltAppId);
+    get(saltAppId: SaltId): AgentIdentity | undefined {
+      return identities.get(mapKey(saltAppId));
     },
     all(): AgentIdentity[] {
       return Array.from(identities.values());
