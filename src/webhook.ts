@@ -19,6 +19,7 @@ import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import type { AgentIdentity, IdentityStore } from "./identities";
+import { sameId, type SaltId } from "./ids.js";
 
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
@@ -29,15 +30,19 @@ const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 export const HANDOFF_BRIEFING_MARKER = "[[SALT-HANDOFF-BRIEFING]]";
 
 export interface RawChatMeta {
-  active_agent_id?: number | string;
-  mediator_agent_id?: number | string;
-  coaching_for_chat_id?: number | string;
+  active_agent_id?: SaltId;
+  mediator_agent_id?: SaltId;
+  coaching_for_chat_id?: SaltId;
+  /** True when this coaching chat is a PRIVATE advisor lane rather than the
+   *  mutual Mediator lane. A private advisor is not a member of the shared
+   *  chat and therefore cannot decrypt it -- this flag stops us asking. */
+  private_lane?: boolean;
   mode?: "auto" | "manual";
   [key: string]: unknown;
 }
 
 export interface RawSender {
-  id: number | string;
+  id: SaltId;
   display_name?: string;
   account_type?: "User" | "Agent";
   [key: string]: unknown;
@@ -55,8 +60,8 @@ export interface DecryptedAttachment {
 
 export interface MessageContext {
   identity: AgentIdentity;
-  chatId: number;
-  senderId: number;
+  chatId: SaltId;
+  senderId: SaltId;
   sender: RawSender;
   /** Delegation-marker-stripped plaintext (see delegations.parseIncoming). */
   text: string;
@@ -78,8 +83,8 @@ export interface MessageContext {
 
 export interface CardInteractionContext {
   identity: AgentIdentity;
-  chatId: number;
-  cardId: number | string;
+  chatId: SaltId;
+  cardId: SaltId;
   actionId: string;
   user: RawSender;
   blocks: unknown;
@@ -87,26 +92,26 @@ export interface CardInteractionContext {
 
 export interface InvoicePaidContext {
   identity: AgentIdentity;
-  chatId: number;
+  chatId: SaltId;
   buyer: RawSender;
   lineItems: Array<{ name: string; qty: number; [key: string]: unknown }>;
   amount: string | number;
   /** True for a "Credits top-up" invoice -- no delivery owed, the credit already landed server-side. */
   isTopUp: boolean;
-  transferRequestId: number | string;
+  transferRequestId: SaltId;
   reply(text: string): Promise<void>;
 }
 
 export interface HandoffConfirmedContext {
   identity: AgentIdentity;
-  chatId: number;
+  chatId: SaltId;
   reason?: string;
   reply(text: string): Promise<void>;
 }
 
 export interface HandoffReceivedContext {
   identity: AgentIdentity;
-  chatId: number;
+  chatId: SaltId;
   reason?: string;
   /** The shared chat's decrypted transcript, polled for up to ~20s until
    *  the outgoing agent's HANDOFF_BRIEFING_MARKER shows up (or timeout). */
@@ -148,7 +153,7 @@ export interface WebhookServerOptions {
   /** This process's configured Mediator identity, if any -- enables the
    *  "observe the shared chat silently, only speak in private coaching
    *  chats" gate. */
-  mediatorAgentId?: number;
+  mediatorAgentId?: SaltId;
   logger?: Logger;
   onMessage?: (ctx: MessageContext) => Promise<void> | void;
   onCardInteraction?: (ctx: CardInteractionContext) => Promise<void> | void;
@@ -184,15 +189,16 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
 
   // One signing key per identity, fetched lazily with that identity's own api
   // key and cached. A miss is not fatal on its own -- verifyRequest decides.
-  const secretCache = new Map<number, string>();
-  async function secretForAgent(agentId: number): Promise<string | undefined> {
-    const cached = secretCache.get(agentId);
+  const secretCache = new Map<string, string>();
+  async function secretForAgent(agentId: SaltId): Promise<string | undefined> {
+    const cacheKey = String(agentId).toLowerCase();
+    const cached = secretCache.get(cacheKey);
     if (cached) return cached;
     const identity = identities.get(agentId);
     if (!identity) return undefined;
     try {
       const secret = await client.getWebhookSecret(identity.apiKey);
-      if (secret) secretCache.set(agentId, secret);
+      if (secret) secretCache.set(cacheKey, secret);
       return secret;
     } catch (err) {
       logger.error(`[webhook] could not fetch signing key for agent ${agentId}: ${(err as Error).message}`);
@@ -204,7 +210,10 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   async function rejectionReason(req: Request): Promise<string | null> {
     if (!verifySignatures) return null;
 
-    const agentId = Number(req.get("X-Salt-Agent-Id"));
+    // Taken as sent. `Number(...)` here made agentId NaN for every real
+    // request, NaN is falsy, and so EVERY signed webhook was rejected as
+    // "missing signature" -- the header was present and correctly formed.
+    const agentId = req.get("X-Salt-Agent-Id");
     const signature = req.get("X-Salt-Signature");
     if (!agentId || !signature) return "missing signature";
 
@@ -239,7 +248,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // redundant delivery, including racing past the delegations registry.
   const MAX_SEEN_MESSAGE_IDS = 2000;
   const seenMessageIds = new Set<number | string>();
-  function alreadyProcessed(messageId: number | string | undefined): boolean {
+  function alreadyProcessed(messageId: SaltId | undefined): boolean {
     if (messageId == null) return false;
     if (seenMessageIds.has(messageId)) return true;
     seenMessageIds.add(messageId);
@@ -258,7 +267,8 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // identity just stops answering the other one there, until a human sends
   // something new (which resets the count).
   const MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT = 2;
-  const agentToAgentReplyCounts = new Map<number, number>();
+  // Keyed by the lowercased chat id, like every other id-keyed map here.
+  const agentToAgentReplyCounts = new Map<string, number>();
 
   app.get("/health", (_req, res) => {
     res.json({
@@ -292,7 +302,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // message posted since joining was multi-recipient-encrypted to include
   // that key. Messages from before joining simply fail to decrypt and are
   // skipped -- the same degrade-gracefully convention Salt's own clients use.
-  async function buildSharedChatContext(identity: AgentIdentity, sharedChatId: number | string): Promise<string> {
+  async function buildSharedChatContext(identity: AgentIdentity, sharedChatId: SaltId): Promise<string> {
     let messages: unknown[];
     try {
       messages = await client.getChatMessages(identity.apiKey, sharedChatId);
@@ -320,7 +330,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // wants other file types represented, so those get a text note instead.
   async function decryptAttachmentIfPresent(
     identity: AgentIdentity,
-    message: { message_id: number | string; resource?: { encrypted_key?: string } }
+    message: { message_id: SaltId; resource?: { encrypted_key?: string } }
   ): Promise<DecryptedAttachment | undefined> {
     if (!message.resource?.encrypted_key) return undefined;
     try {
@@ -351,7 +361,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // "X is typing...". Rides the existing ephemeral typing channel
   // (content-free, receivers self-expire after ~4s) on the same 2.5s
   // cadence the human composer uses.
-  async function withTypingHeartbeat<T>(identity: AgentIdentity, chatId: number, fn: () => Promise<T>): Promise<T> {
+  async function withTypingHeartbeat<T>(identity: AgentIdentity, chatId: SaltId, fn: () => Promise<T>): Promise<T> {
     void client.signalTyping(identity.apiKey, chatId);
     const timer = setInterval(() => void client.signalTyping(identity.apiKey, chatId), 2500);
     try {
@@ -366,14 +376,17 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // trail onto it + fire-and-forget metrics. Does NOT itself manage the
   // typing indicator -- see withTypingHeartbeat, which wraps the whole
   // callback (including whatever happens before reply() is even called).
-  function makeReply(identity: AgentIdentity, chatId: number): (text: string) => Promise<void> {
+  function makeReply(identity: AgentIdentity, chatId: SaltId): (text: string) => Promise<void> {
     return async (text: string) => {
       const startedAt = Date.now();
       let recipientKeys: string[];
       try {
         const members = await client.getChatMembers(identity.apiKey, chatId);
         recipientKeys = members
-          .filter((u) => parseInt(String(u.id), 10) !== identity.saltAppId && u.public_key)
+          // Everyone but ourselves. parseInt made both sides NaN, and
+          // `NaN !== NaN` is true, so the sender's own key was left in the
+          // recipient list rather than filtered out of it.
+          .filter((u) => !sameId(u.id, identity.saltAppId) && u.public_key)
           .map((u) => u.public_key as string);
       } catch (err) {
         logger.error(`[chat ${chatId}] fetching members failed: ${(err as Error).message}`);
@@ -410,10 +423,10 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
 
   async function handleMessage(body: { message: Record<string, unknown>; chat?: RawChatMeta }): Promise<void> {
     const message = body.message;
-    const chatId = message.chat_id as number;
+    const chatId = message.chat_id as SaltId;
     const chatMeta = body.chat;
 
-    if (alreadyProcessed(message.message_id as number | string)) return;
+    if (alreadyProcessed(message.message_id as SaltId)) return;
     if (message.event_type) return; // system events aren't prompts
 
     const ciphertext = message.message;
@@ -434,12 +447,19 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // THAT identity; the plaintext is identical under any key, only "who
     // replies" changes.
     if (chatMeta?.active_agent_id) {
-      const active = identities.get(parseInt(String(chatMeta.active_agent_id), 10));
+      const active = identities.get(String(chatMeta.active_agent_id));
       if (active) identity = active;
     }
 
+    // A message with no sender is not a prompt, and everything below -- the
+    // self-reply loop break, the delegation-reply match, the agent-to-agent
+    // cap -- is a question about who sent it. This used to fall through with
+    // senderId = NaN, which compared equal to nothing and unequal to
+    // everything, so all three guards inverted rather than being skipped. The
+    // context handed to consumers already asserted a sender existed.
     const senderRaw = message.user as RawSender | undefined;
-    const senderId = senderRaw ? parseInt(String(senderRaw.id), 10) : NaN;
+    if (!senderRaw) return;
+    const senderId: SaltId = String(senderRaw.id);
 
     // Reply to a pending delegation call? Hand it to that waiting promise
     // instead of starting a fresh reply cycle -- see delegations.ts.
@@ -448,42 +468,49 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // Never reply to our own messages (the reply we post is itself
     // delivered back to us as a webhook) -- this is what prevents an
     // infinite loop.
-    if (senderId === identity.saltAppId) return;
+    if (sameId(senderId, identity.saltAppId)) return;
 
     // Mediated Chat: this identity is the configured Mediator, and this
     // message is in the SHARED chat it silently observes -- present for
     // context, but it only actually speaks in each human's own private
     // coaching chat (coaching_for_chat_id pointing back at this one).
-    const isMediator = !!mediatorAgentId && identity.saltAppId === mediatorAgentId;
+    const isMediator = !!mediatorAgentId && sameId(identity.saltAppId, mediatorAgentId);
     if (isMediator && chatMeta?.mediator_agent_id && !chatMeta.coaching_for_chat_id) return;
 
     // Global Agent Chat Mode: when the chat declares an active agent and
     // it isn't this identity, stay silent. Lets retired/handed-off-from
     // agents remain in the room without ever double-replying.
-    if (chatMeta?.active_agent_id && String(chatMeta.active_agent_id) !== String(identity.saltAppId)) return;
+    if (chatMeta?.active_agent_id && !sameId(chatMeta.active_agent_id, identity.saltAppId)) return;
 
     // A human sender always resets the count -- only agent-to-agent
     // volleys are capped, never a real conversation with a person.
-    const senderIsAgent = !!identities.get(senderId) || senderRaw?.account_type === "Agent";
+    const senderIsAgent = !!identities.get(senderId) || senderRaw.account_type === "Agent";
+    const replyCountKey = String(chatId).toLowerCase();
     if (senderIsAgent) {
-      const count = (agentToAgentReplyCounts.get(chatId) || 0) + 1;
-      agentToAgentReplyCounts.set(chatId, count);
+      const count = (agentToAgentReplyCounts.get(replyCountKey) || 0) + 1;
+      agentToAgentReplyCounts.set(replyCountKey, count);
       if (count > MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT) {
         logger.error(`[chat ${chatId}] agent-to-agent reply cap reached; not auto-replying to ${senderId} again.`);
         return;
       }
     } else {
-      agentToAgentReplyCounts.delete(chatId);
+      agentToAgentReplyCounts.delete(replyCountKey);
     }
 
     const { depth, text: strippedCaption } = delegations.parseIncoming(caption);
 
     let mediatorSharedContext: string | undefined;
     let attachment: DecryptedAttachment | undefined;
-    if (isMediator && chatMeta?.coaching_for_chat_id) {
+    // The shared conversation is fetched only for the MUTUAL Mediator lane,
+    // where this identity is an observer on that chat and both parties can see
+    // it is there. A private advisor lane is excluded: that advisor was never
+    // added to the shared chat, so every message would fail to decrypt and be
+    // skipped anyway -- but a guarantee that rests on a failed decrypt is one
+    // membership bug away from being no guarantee, so we do not ask at all.
+    if (isMediator && chatMeta?.coaching_for_chat_id && !chatMeta.private_lane) {
       mediatorSharedContext = await buildSharedChatContext(identity, chatMeta.coaching_for_chat_id);
     } else if (message.resource_type === "Attachment") {
-      attachment = await decryptAttachmentIfPresent(identity, message as { message_id: number; resource?: { encrypted_key?: string } });
+      attachment = await decryptAttachmentIfPresent(identity, message as { message_id: SaltId; resource?: { encrypted_key?: string } });
     }
 
     if (!options.onMessage) return;
@@ -491,7 +518,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       identity,
       chatId,
       senderId,
-      sender: senderRaw as RawSender,
+      sender: senderRaw,
       text: strippedCaption,
       delegationDepth: depth,
       chatMeta,
@@ -510,14 +537,14 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   }
 
   async function handleCardInteraction(body: {
-    owner_id: number | string;
-    chat_id: number;
-    card_id: number | string;
+    owner_id: SaltId;
+    chat_id: SaltId;
+    card_id: SaltId;
     action_id: string;
     user: RawSender;
     state?: { blocks?: unknown };
   }): Promise<void> {
-    const identity = identities.get(parseInt(String(body.owner_id), 10));
+    const identity = identities.get(String(body.owner_id));
     if (!identity || !options.onCardInteraction) return;
     try {
       await options.onCardInteraction({
@@ -534,15 +561,15 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   }
 
   async function handleInvoicePaid(body: {
-    seller_id: number | string;
-    chat_id?: number;
+    seller_id: SaltId;
+    chat_id?: SaltId;
     buyer: RawSender;
     line_items?: Array<{ name: string; qty: number }>;
     amount: string | number;
-    billing_account_id?: number | string;
-    transfer_request_id: number | string;
+    billing_account_id?: SaltId;
+    transfer_request_id: SaltId;
   }): Promise<void> {
-    const identity = identities.get(parseInt(String(body.seller_id), 10));
+    const identity = identities.get(String(body.seller_id));
     if (!identity || !body.chat_id || !options.onInvoicePaid) return;
     const chatId = body.chat_id;
     const ctx: InvoicePaidContext = {
@@ -562,8 +589,8 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
   }
 
-  async function handleHandoffConfirmed(body: { from_agent_id: number | string; chat_id: number; reason?: string }): Promise<void> {
-    const identity = identities.get(parseInt(String(body.from_agent_id), 10));
+  async function handleHandoffConfirmed(body: { from_agent_id: SaltId; chat_id: SaltId; reason?: string }): Promise<void> {
+    const identity = identities.get(String(body.from_agent_id));
     if (!identity || !options.onHandoffConfirmed) return;
     const chatId = body.chat_id;
     const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, reply: makeReply(identity, chatId) };
@@ -574,8 +601,8 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
   }
 
-  async function handleHandoffReceived(body: { to_agent_id: number | string; chat_id: number; reason?: string }): Promise<void> {
-    const identity = identities.get(parseInt(String(body.to_agent_id), 10));
+  async function handleHandoffReceived(body: { to_agent_id: SaltId; chat_id: SaltId; reason?: string }): Promise<void> {
+    const identity = identities.get(String(body.to_agent_id));
     if (!identity || !options.onHandoffReceived) return;
     const chatId = body.chat_id;
 

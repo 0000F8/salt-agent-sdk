@@ -4,8 +4,10 @@
 // each identity's own api-key per call (a process can act as more than one
 // Salt agent: the primary identity, plus any it spawns via createAgent).
 
+import { sameId, type SaltId } from "./ids.js";
+
 export interface SaltUser {
-  id: number;
+  id: SaltId;
   username: string;
   display_name: string;
   account_type: "User" | "Agent";
@@ -15,7 +17,7 @@ export interface SaltUser {
 }
 
 export interface SaltChat {
-  id: number;
+  id: SaltId;
   session?: { users?: SaltUser[] };
   messages?: unknown[];
   [key: string]: unknown;
@@ -45,13 +47,13 @@ export interface InvoiceLineItem {
   qty: number;
   unit_price: string | number;
   subtotal: string | number;
-  product_id?: number;
+  product_id?: SaltId;
 }
 
 export interface CreateInvoiceParams {
-  chatId: number;
-  receiverId: number;
-  walletId?: number;
+  chatId: SaltId;
+  receiverId: SaltId;
+  walletId?: SaltId;
   amount: string | number;
   lineItems: InvoiceLineItem[];
   message?: string;
@@ -61,11 +63,11 @@ export interface CreateInvoiceParams {
 }
 
 export interface AddUsageParams {
-  productId: number;
-  chatId: number;
+  productId: SaltId;
+  chatId: SaltId;
   qty: number;
   description?: string;
-  payerId?: number;
+  payerId?: SaltId;
   /** See addUsage's JSDoc for retry/reconciliation semantics. */
   idempotencyKey?: string;
 }
@@ -115,20 +117,20 @@ export interface UpdateSpendingPolicyParams {
 }
 
 export interface ReceiptParty {
-  id: number;
+  id: SaltId;
   username: string;
 }
 
 /** Only present when the settled transfer paid a TransferRequest (a regular send has no `request`). */
 export interface ReceiptRequestSummary {
-  id: number;
+  id: SaltId;
   request_type: string;
   status: string;
   line_items: InvoiceLineItem[] | null;
 }
 
 export interface ReceiptPayload {
-  transfer_id: number;
+  transfer_id: SaltId;
   /** HUMAN-DECIMAL string, the declared send amount. */
   amount: string;
   /** HUMAN-DECIMAL string, the value the chain actually moved -- absent until/unless verified; authoritative over `amount` where they disagree. */
@@ -152,7 +154,7 @@ export interface ReceiptPayload {
 
 /** A tamper-evident settlement record, minted once a Transfer confirms on-chain. */
 export interface Receipt {
-  transfer_id: number;
+  transfer_id: SaltId;
   payload: ReceiptPayload;
   /** SHA-256 over sorted-key canonical JSON of the FULL (unredacted) payload -- still verifiable even when `policy_snapshot` was redacted for this viewer. */
   digest: string;
@@ -160,14 +162,14 @@ export interface Receipt {
 }
 
 export interface BillingAccountParty {
-  id: number;
+  id: SaltId;
   username: string;
   display_name: string;
   account_type: "User" | "Agent";
 }
 
 export interface BillingAccountCreditEntry {
-  id: number;
+  id: SaltId;
   kind: "deposit" | "usage" | "refund";
   /** HUMAN-DECIMAL string. */
   amount: string;
@@ -178,9 +180,9 @@ export interface BillingAccountCreditEntry {
 
 /** A pair-scoped prepaid credit relationship: payer deposits with payee, payee's metered usage draws it down. */
 export interface BillingAccount {
-  id: number;
-  payer_id: number;
-  payee_id: number;
+  id: SaltId;
+  payer_id: SaltId;
+  payee_id: SaltId;
   payer: BillingAccountParty;
   payee: BillingAccountParty;
   /** HUMAN-DECIMAL string: deposits + refunds - usage. This IS the payer's spend cap on this payee's metered products. */
@@ -271,19 +273,19 @@ export function createSaltClient(options: SaltClientOptions) {
 
   return {
     /** A chat's members (with public keys), for encrypting a reply to everyone who should read it. */
-    async getChatMembers(apiKey: string, chatId: number | string): Promise<SaltUser[]> {
+    async getChatMembers(apiKey: string, chatId: SaltId): Promise<SaltUser[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
       return chat?.session?.users ?? [];
     },
 
     /** Recent messages in a chat this identity is a member of (even as a silent observer). */
-    async getChatMessages(apiKey: string, chatId: number | string): Promise<unknown[]> {
+    async getChatMessages(apiKey: string, chatId: SaltId): Promise<unknown[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
       return chat?.messages ?? [];
     },
 
     /** Download an attachment's ciphertext bytes. Decrypt separately (see crypto.ts). */
-    async getAttachment(apiKey: string, messageId: number | string): Promise<Buffer> {
+    async getAttachment(apiKey: string, messageId: SaltId): Promise<Buffer> {
       const url = `${host}/api/v1/messages/${messageId}/attachment`;
       const res = await doFetch(url, { headers: { "api-key": apiKey } });
       if (!res.ok) throw new SaltApiError("GET", url, res.status, await res.text().catch(() => undefined));
@@ -299,10 +301,10 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async postMessage(
       apiKey: string,
-      chatId: number | string,
+      chatId: SaltId,
       message: string,
       senderMessage?: string,
-      delegations?: Array<{ agent_id: number; chat_id: number; username: string }>
+      delegations?: Array<{ agent_id: SaltId; chat_id: SaltId; username: string }>
     ): Promise<unknown> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
       if (delegations && delegations.length > 0) body.delegations = delegations;
@@ -320,7 +322,7 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Owner-only: mint a new api key for an agent. The old one stops working immediately. */
-    async rotateAgentApiKey(apiKey: string, agentId: number | string): Promise<{ api_key: string }> {
+    async rotateAgentApiKey(apiKey: string, agentId: SaltId): Promise<{ api_key: string }> {
       return request("POST", `/api/v1/agents/${agentId}/rotate_api_key`, apiKey);
     },
 
@@ -334,7 +336,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * generates. Fetching at boot also means rotation takes effect on restart.
      */
     async getWebhookSecret(apiKey: string): Promise<string | undefined> {
-      const res = await request<{ agent_id: number; webhook_secret?: string }>(
+      const res = await request<{ agent_id: SaltId; webhook_secret?: string }>(
         "GET",
         `/api/v1/agents/webhook_secret?_=${Date.now()}`,
         apiKey,
@@ -347,7 +349,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * secret stops verifying immediately, so the agent must re-fetch via
      * getWebhookSecret before it can validate any further deliveries.
      */
-    async rotateWebhookSecret(apiKey: string, agentId: number | string): Promise<{ agent_id: number; webhook_secret: string }> {
+    async rotateWebhookSecret(apiKey: string, agentId: SaltId): Promise<{ agent_id: SaltId; webhook_secret: string }> {
       return request("POST", `/api/v1/agents/${agentId}/rotate_webhook_secret`, apiKey);
     },
 
@@ -356,7 +358,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * the raw key rides only on the createAgent response, and after that only
      * rotateAgentApiKey can produce a usable value.
      */
-    async getAgentAdmin(apiKey: string, agentId: number | string): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
+    async getAgentAdmin(apiKey: string, agentId: SaltId): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);
     },
 
@@ -366,29 +368,29 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** A single agent's directory entry. */
-    async getAgent(apiKey: string, agentId: number | string): Promise<SaltUser> {
+    async getAgent(apiKey: string, agentId: SaltId): Promise<SaltUser> {
       return request("GET", `/api/v1/agents/${agentId}`, apiKey);
     },
 
     /** Create-or-reuse a 1:1 chat with `contactId` -- idempotent on Salt's side. */
-    async createOrGetChat(apiKey: string, contactId: number | string): Promise<SaltChat> {
+    async createOrGetChat(apiKey: string, contactId: SaltId): Promise<SaltChat> {
       return request("POST", "/api/v1/chats", apiKey, { contact_id: contactId });
     },
 
     /** Post a declarative blocks card into a chat (see CARD_PROTOCOL_SPEC.md / cards.ts). */
-    async postCard(apiKey: string, chatId: number | string, blocks: CardBlock[], text: string): Promise<unknown> {
+    async postCard(apiKey: string, chatId: SaltId, blocks: CardBlock[], text: string): Promise<unknown> {
       return request("POST", "/api/v1/cards", apiKey, { chat_id: chatId, blocks, text });
     },
 
     /** Replace an owned card's blocks -- re-broadcasts into everyone's bubble live. */
-    async updateCard(apiKey: string, cardId: number | string, blocks: CardBlock[]): Promise<unknown> {
+    async updateCard(apiKey: string, cardId: SaltId, blocks: CardBlock[]): Promise<unknown> {
       return request("PATCH", `/api/v1/cards/${cardId}`, apiKey, { blocks });
     },
 
     // --- Commerce (products, invoices, prepaid credits) ---
 
     /** My own products (sellerId omitted) or a seller's active products (sellerId given). */
-    async listProducts(apiKey: string, sellerId?: number | string): Promise<unknown[]> {
+    async listProducts(apiKey: string, sellerId?: SaltId): Promise<unknown[]> {
       const path = sellerId ? `/api/v1/products?seller_id=${sellerId}` : "/api/v1/products";
       return request("GET", path, apiKey);
     },
@@ -399,7 +401,7 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Drop one of the caller's products into a chat as a Buy-able bubble. */
-    async shareProduct(apiKey: string, productId: number | string, chatId: number | string): Promise<unknown> {
+    async shareProduct(apiKey: string, productId: SaltId, chatId: SaltId): Promise<unknown> {
       return request("POST", `/api/v1/products/${productId}/share`, apiKey, { chat_id: chatId });
     },
 
@@ -471,7 +473,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * mainnet send from it -- an owner must call updateSpendingPolicy at
      * least once before the agent can move mainnet funds.
      */
-    async getSpendingPolicy(apiKey: string, agentId: number | string): Promise<SpendingPolicy> {
+    async getSpendingPolicy(apiKey: string, agentId: SaltId): Promise<SpendingPolicy> {
       return request("GET", `/api/v1/agents/${agentId}/spending_policy`, apiKey);
     },
 
@@ -487,7 +489,7 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async updateSpendingPolicy(
       apiKey: string,
-      agentId: number | string,
+      agentId: SaltId,
       policy: UpdateSpendingPolicyParams
     ): Promise<SpendingPolicy> {
       return request("PUT", `/api/v1/agents/${agentId}/spending_policy`, apiKey, policy);
@@ -498,7 +500,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * or receiver) -- 404 for anyone else, or if the transfer hasn't
      * confirmed on-chain yet (receipts are minted only at confirmation).
      */
-    async getReceipt(apiKey: string, transferId: number | string): Promise<Receipt> {
+    async getReceipt(apiKey: string, transferId: SaltId): Promise<Receipt> {
       return request("GET", `/api/v1/receipts/${transferId}`, apiKey);
     },
 
@@ -515,8 +517,8 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async topUpBillingAccount(
       apiKey: string,
-      params: { chatId: number | string; payeeId: number | string; amount: string | number }
-    ): Promise<{ ok: true; transfer_request_id: number; billing_account: BillingAccount }> {
+      params: { chatId: SaltId; payeeId: SaltId; amount: string | number }
+    ): Promise<{ ok: true; transfer_request_id: SaltId; billing_account: BillingAccount }> {
       return request("POST", "/api/v1/billing_accounts/top_up", apiKey, {
         chat_id: params.chatId,
         payee_id: params.payeeId,
@@ -534,9 +536,9 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async refundBillingAccount(
       apiKey: string,
-      billingAccountId: number | string,
+      billingAccountId: SaltId,
       params: { amount: string | number; memo?: string }
-    ): Promise<{ ok: true; entry_id: number; billing_account: BillingAccount }> {
+    ): Promise<{ ok: true; entry_id: SaltId; billing_account: BillingAccount }> {
       return request("POST", `/api/v1/billing_accounts/${billingAccountId}/refund`, apiKey, {
         amount: params.amount,
         memo: params.memo,
@@ -554,12 +556,12 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Hand a chat off to another agent; salt-api does the whole swap atomically. */
-    async handOff(apiKey: string, chatId: number | string, toAgentId: number | string, reason?: string): Promise<unknown> {
+    async handOff(apiKey: string, chatId: SaltId, toAgentId: SaltId, reason?: string): Promise<unknown> {
       return request("POST", `/api/v1/chats/${chatId}/hand_off`, apiKey, { to_agent_id: toAgentId, reason });
     },
 
     /** Ephemeral "is typing" ping. Fire-and-forget by design -- a failed ping must never block a reply. */
-    async signalTyping(apiKey: string, chatId: number | string): Promise<void> {
+    async signalTyping(apiKey: string, chatId: SaltId): Promise<void> {
       try {
         await request("POST", `/api/v1/chats/${chatId}/typing`, apiKey, {});
       } catch {

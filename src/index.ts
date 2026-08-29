@@ -1,3 +1,4 @@
+export * from "./ids";
 export * from "./client";
 export * from "./crypto";
 export * from "./identities";

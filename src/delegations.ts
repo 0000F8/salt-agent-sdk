@@ -17,6 +17,8 @@
 //    only channel available between two separately-hosted agents is the
 //    message text itself), and `register`'s timeout bounds each hop.
 
+import { sameId, type SaltId } from "./ids.js";
+
 /** depth counts hops already taken; a call at depth >= this is refused, so a
  *  chain reaches at most MAX_DELEGATION_DEPTH+1 agents before the last one
  *  is forced to answer directly instead of delegating further. */
@@ -53,7 +55,7 @@ export function parseIncoming(plaintext: string): { depth: number; text: string 
 }
 
 interface PendingEntry {
-  targetId: number;
+  targetId: SaltId;
   resolve: (plaintext: string) => void;
   reject: (err: Error) => void;
   timer: ReturnType<typeof setTimeout>;
@@ -63,10 +65,13 @@ interface PendingEntry {
 // concurrent delegation call into the same chat is a clean error (see
 // register below) rather than an ambiguous race over which reply belongs
 // to which caller.
-const pending = new Map<number, PendingEntry>();
+// Keyed by the lowercased chat id -- see identities.ts for why ids are
+// normalised before they are used as map keys.
+const pending = new Map<string, PendingEntry>();
+const mapKey = (id: SaltId): string => String(id).toLowerCase();
 
-export function hasPending(chatId: number): boolean {
-  return pending.has(chatId);
+export function hasPending(chatId: SaltId): boolean {
+  return pending.has(mapKey(chatId));
 }
 
 /**
@@ -75,16 +80,16 @@ export function hasPending(chatId: number): boolean {
  * `timeoutMs` elapses first. Throws synchronously (before any network call)
  * if this chat already has a pending wait.
  */
-export function register(chatId: number, targetId: number, timeoutMs: number): Promise<string> {
-  if (pending.has(chatId)) {
+export function register(chatId: SaltId, targetId: SaltId, timeoutMs: number): Promise<string> {
+  if (pending.has(mapKey(chatId))) {
     throw new Error("Already waiting on a reply from this agent in this chat -- wait for that to finish first.");
   }
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      pending.delete(chatId);
+      pending.delete(mapKey(chatId));
       reject(new Error(`No reply within ${Math.round(timeoutMs / 1000)}s -- the agent may be offline or slow.`));
     }, timeoutMs);
-    pending.set(chatId, { targetId, resolve, reject, timer });
+    pending.set(mapKey(chatId), { targetId, resolve, reject, timer });
   });
 }
 
@@ -93,11 +98,11 @@ export function register(chatId: number, targetId: number, timeoutMs: number): P
  * the delegation message itself fails after register() already ran, so the
  * registry entry doesn't leak (the caller throws its own error instead).
  */
-export function cancel(chatId: number): void {
-  const entry = pending.get(chatId);
+export function cancel(chatId: SaltId): void {
+  const entry = pending.get(mapKey(chatId));
   if (!entry) return;
   clearTimeout(entry.timer);
-  pending.delete(chatId);
+  pending.delete(mapKey(chatId));
 }
 
 /**
@@ -109,11 +114,16 @@ export function cancel(chatId: number): void {
  * TARGET's very first inbound request, which by definition has no pending
  * entry on its own server.
  */
-export function resolveIfPending(chatId: number, senderId: number, plaintext: string): boolean {
-  const entry = pending.get(chatId);
-  if (!entry || entry.targetId !== senderId) return false;
+export function resolveIfPending(chatId: SaltId, senderId: SaltId, plaintext: string): boolean {
+  const entry = pending.get(mapKey(chatId));
+  // sameId, not `!==`: this decides whether an inbound message is THE reply
+  // being waited on. Comparing a uuid that came from a webhook body against one
+  // that came from a REST response is not guaranteed to match on casing, and a
+  // false negative here restarts the whole prompt cycle instead of completing
+  // the delegation.
+  if (!entry || !sameId(entry.targetId, senderId)) return false;
   clearTimeout(entry.timer);
-  pending.delete(chatId);
+  pending.delete(mapKey(chatId));
   entry.resolve(plaintext);
   return true;
 }
@@ -121,8 +131,8 @@ export function resolveIfPending(chatId: number, senderId: number, plaintext: st
 // --- Delegation trail (provenance) -------------------------------------
 
 export interface DelegationTrailEntry {
-  agent_id: number;
-  chat_id: number;
+  agent_id: SaltId;
+  chat_id: SaltId;
   username: string;
 }
 
@@ -135,17 +145,17 @@ export interface DelegationTrailEntry {
 // identities) never mix their trails.
 const trails = new Map<string, DelegationTrailEntry[]>();
 
-function trailKey(identityId: number, mainChatId: number): string {
-  return `${identityId}:${mainChatId}`;
+function trailKey(identityId: SaltId, mainChatId: SaltId): string {
+  return `${mapKey(identityId)}:${mapKey(mainChatId)}`;
 }
 
-export function recordTrail(identityId: number, mainChatId: number, entry: DelegationTrailEntry): void {
+export function recordTrail(identityId: SaltId, mainChatId: SaltId, entry: DelegationTrailEntry): void {
   const key = trailKey(identityId, mainChatId);
   if (!trails.has(key)) trails.set(key, []);
   trails.get(key)!.push(entry);
 }
 
-export function drainTrail(identityId: number, mainChatId: number): DelegationTrailEntry[] {
+export function drainTrail(identityId: SaltId, mainChatId: SaltId): DelegationTrailEntry[] {
   const key = trailKey(identityId, mainChatId);
   const entries = trails.get(key) || [];
   trails.delete(key);

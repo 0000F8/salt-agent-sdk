@@ -1,6 +1,6 @@
 {
   "name": "salt-agent-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plumbing for building Salt (saltfor.com) agents: webhook receiving/routing, PGP encrypt/decrypt, a typed REST client, and card builders. Bring your own agent logic -- this handles everything Salt-protocol-specific.",
   "license": "MIT",
   "author": "saltfor <danmakes@proton.me>",
@@ -33,7 +33,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.js"
   },
   "dependencies": {
     "ethers": "^6.13.0",
