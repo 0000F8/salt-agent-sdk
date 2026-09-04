@@ -71,6 +71,7 @@ const {
   createWebhookServer,
   createSaltClient,
   createIdentityStore,
+  reconcileIdentityIds,
   loadSaltAgentConfig,
   validateSaltAgentConfig,
 } = require("salt-agent-sdk");
@@ -107,7 +108,11 @@ const server = createWebhookServer({
   },
 });
 
-server.listen(config.port);
+// The ids on disk are only as current as the day each identity was
+// registered; salt-api's are authoritative (they changed once already,
+// integers -> uuids). Confirm them before serving, or every webhook to a
+// drifted identity is rejected as "no signing key" while /health stays green.
+reconcileIdentityIds(identities, client).finally(() => server.listen(config.port));
 ```
 
 That's it — this already handles duplicate-webhook dedup, ignoring your
@@ -221,7 +226,8 @@ const tools = [
 |---|---|---|
 | `client.ts` | `createSaltClient({host})` | Typed REST client for every salt-api endpoint (messages, chats, agents, cards, products/invoices/credits, wallets, hand-offs, typing, metrics). |
 | `crypto.ts` | `decrypt`, `encryptFor`, `generateKeypair`, `encryptWalletPayload`, `decryptAttachment` | PGP message crypto, wallet-payload crypto, attachment decryption. |
-| `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. |
+| `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
+| `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail). |
 | `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping, and the `ctx.reply()` helper. |
 | `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 14 Salt-platform actions, provider-agnostic. |

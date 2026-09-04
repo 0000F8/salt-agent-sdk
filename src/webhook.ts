@@ -20,6 +20,7 @@ import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
+import { reconcileIdentityIds } from "./reconcile";
 
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
@@ -187,6 +188,26 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }),
   );
 
+  // A lookup miss on a signed request is the signature of a stale store: the
+  // id salt-api signs with is not the one the identity was registered under
+  // (see reconcile.ts). Ask the API once, then look again. Throttled so an
+  // unknown-agent POST from the open internet costs at most one round of
+  // whoAmI calls a minute, and single-flight so a burst shares one pass.
+  const RECONCILE_MIN_INTERVAL_MS = 60_000;
+  let lastReconcileAt = 0;
+  let reconcileInFlight: Promise<unknown> | null = null;
+  function reconcileOnMiss(): Promise<unknown> {
+    if (reconcileInFlight) return reconcileInFlight;
+    if (Date.now() - lastReconcileAt < RECONCILE_MIN_INTERVAL_MS) return Promise.resolve();
+    lastReconcileAt = Date.now();
+    reconcileInFlight = reconcileIdentityIds(identities, client, logger)
+      .catch((err) => logger.error(`[webhook] identity reconcile failed: ${(err as Error).message}`))
+      .finally(() => {
+        reconcileInFlight = null;
+      });
+    return reconcileInFlight;
+  }
+
   // One signing key per identity, fetched lazily with that identity's own api
   // key and cached. A miss is not fatal on its own -- verifyRequest decides.
   const secretCache = new Map<string, string>();
@@ -194,7 +215,11 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const cacheKey = String(agentId).toLowerCase();
     const cached = secretCache.get(cacheKey);
     if (cached) return cached;
-    const identity = identities.get(agentId);
+    let identity = identities.get(agentId);
+    if (!identity) {
+      await reconcileOnMiss();
+      identity = identities.get(agentId);
+    }
     if (!identity) return undefined;
     try {
       const secret = await client.getWebhookSecret(identity.apiKey);
