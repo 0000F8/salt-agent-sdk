@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { SaltId } from "./ids.js";
+import { sameId, type SaltId } from "./ids.js";
 
 export interface AgentIdentity {
   saltAppId: SaltId;
@@ -33,6 +33,12 @@ export interface IdentityStore {
   register(identity: AgentIdentity): void;
   get(saltAppId: SaltId): AgentIdentity | undefined;
   all(): AgentIdentity[];
+  /**
+   * Move an identity from the id it was registered under to the id salt-api
+   * now uses for it (see reconcile.ts). Returns whatever is registered under
+   * `to` afterwards, or undefined when nothing was registered under `from`.
+   */
+  reassignId(from: SaltId, to: SaltId): AgentIdentity | undefined;
 }
 
 const DEFAULT_STORE_PATH = path.join(process.cwd(), "data", "identities.json");
@@ -93,6 +99,28 @@ export function createIdentityStore(storePath: string = DEFAULT_STORE_PATH): Ide
     },
     all(): AgentIdentity[] {
       return Array.from(identities.values());
+    },
+    reassignId(from: SaltId, to: SaltId): AgentIdentity | undefined {
+      const moving = identities.get(mapKey(from));
+      if (!moving) return undefined;
+      if (sameId(from, to)) return moving;
+
+      // Both entries name one agent -- that is what the API said when it
+      // answered `to` for `from`'s api key. It happens when the env var was
+      // corrected before the store was: boot registered the identity afresh
+      // under the new id while the old entry stayed on disk. Keep the entry
+      // already under `to` (it is what the process routes by, and the
+      // freshest config) and drop the stale duplicate rather than hold two
+      // copies of one agent.
+      const existing = identities.get(mapKey(to));
+      identities.delete(mapKey(from));
+      // Mutated in place rather than copied so a handler holding this
+      // identity mid-request sees the new id too.
+      if (!existing) moving.saltAppId = to;
+      const survivor = existing ?? moving;
+      identities.set(mapKey(to), survivor);
+      persist();
+      return survivor;
     },
   };
 }

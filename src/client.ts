@@ -271,6 +271,12 @@ export function createSaltClient(options: SaltClientOptions) {
     return (await res.json()) as T;
   }
 
+  async function whoAmI(apiKey: string): Promise<{ agent_id: SaltId; webhook_secret?: string }> {
+    // Cache-busted: the answer changes on rotation and on re-keying, and a
+    // stale intermediary copy would quietly defeat both.
+    return request("GET", `/api/v1/agents/webhook_secret?_=${Date.now()}`, apiKey);
+  }
+
   return {
     /** A chat's members (with public keys), for encrypting a reply to everyone who should read it. */
     async getChatMembers(apiKey: string, chatId: SaltId): Promise<SaltUser[]> {
@@ -336,13 +342,20 @@ export function createSaltClient(options: SaltClientOptions) {
      * generates. Fetching at boot also means rotation takes effect on restart.
      */
     async getWebhookSecret(apiKey: string): Promise<string | undefined> {
-      const res = await request<{ agent_id: SaltId; webhook_secret?: string }>(
-        "GET",
-        `/api/v1/agents/webhook_secret?_=${Date.now()}`,
-        apiKey,
-      );
-      return res?.webhook_secret;
+      return (await whoAmI(apiKey))?.webhook_secret;
     },
+
+    /**
+     * Which agent does this api key belong to, according to salt-api?
+     *
+     * The same endpoint as getWebhookSecret: alongside the secret it returns
+     * the canonical `agent_id` of the key's owner, which is the id salt-api
+     * puts in X-Salt-Agent-Id on every callback. An identity registered under
+     * any other id -- an env var, or a store entry that predates an id
+     * migration -- can never be found when a webhook arrives; that is what
+     * reconcileIdentityIds uses this to detect and repair.
+     */
+    whoAmI,
 
     /**
      * Owner-only: mint a new webhook signing secret for an agent. The old
