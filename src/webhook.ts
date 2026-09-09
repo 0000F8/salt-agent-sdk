@@ -103,6 +103,40 @@ export interface InvoicePaidContext {
   reply(text: string): Promise<void>;
 }
 
+export interface ChatOpenedChat {
+  id: SaltId;
+  name?: string;
+  public?: boolean;
+  managed?: boolean;
+  open_invite?: boolean;
+  mode?: "auto" | "manual";
+  active_agent_id?: SaltId;
+  mediator_agent_id?: SaltId;
+  coaching_for_chat_id?: SaltId;
+  private_lane?: boolean;
+  [key: string]: unknown;
+}
+
+export interface ChatOpenedMember extends RawSender {
+  observer?: boolean;
+}
+
+export interface ChatOpenedContext {
+  identity: AgentIdentity;
+  chatId: SaltId;
+  chat: ChatOpenedChat;
+  /** The person (or agent -- see `openedBy.account_type`) who newly opened
+   *  this chat: a fresh 1:1, a new group that includes this identity, or an
+   *  add-to-an-existing-group. */
+  openedBy: RawSender;
+  /** Every current member, including this identity's own account. */
+  members: ChatOpenedMember[];
+  openedAt: string;
+  /** Encrypts `text` for every current chat member (+ this identity's own
+   *  copy) and posts it -- the same closure every other context type gets. */
+  reply(text: string): Promise<void>;
+}
+
 export interface HandoffConfirmedContext {
   identity: AgentIdentity;
   chatId: SaltId;
@@ -144,8 +178,9 @@ export interface WebhookServerOptions {
    *  sent a request.
    *
    *  Encrypted-message webhooks fail safe regardless (forged ciphertext never
-   *  decrypts), but card_interaction/invoice_paid payloads are PLAINTEXT and
-   *  would otherwise be actable by anyone who can reach this server.
+   *  decrypts), but card_interaction/invoice_paid/chat_opened payloads are
+   *  PLAINTEXT and would otherwise be actable by anyone who can reach this
+   *  server.
    *
    *  Set false only for local development against a dev salt-api. */
   verifySignatures?: boolean;
@@ -159,6 +194,7 @@ export interface WebhookServerOptions {
   onMessage?: (ctx: MessageContext) => Promise<void> | void;
   onCardInteraction?: (ctx: CardInteractionContext) => Promise<void> | void;
   onInvoicePaid?: (ctx: InvoicePaidContext) => Promise<void> | void;
+  onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
@@ -294,6 +330,24 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   const MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT = 2;
   // Keyed by the lowercased chat id, like every other id-keyed map here.
   const agentToAgentReplyCounts = new Map<string, number>();
+
+  // chat_opened has no message_id to dedupe on (it isn't a Message at all),
+  // and delivery can be retried -- so a retried delivery must not make this
+  // identity greet the same chat twice. Keyed by identity+chat since one
+  // process can host several identities and a chat could in principle be
+  // opened for more than one of them. Bounded the same way seenMessageIds is.
+  const MAX_SEEN_CHAT_OPENED = 2000;
+  const seenChatOpened = new Set<string>();
+  function alreadyGreeted(identityId: SaltId, chatId: SaltId): boolean {
+    const key = `${String(identityId).toLowerCase()}:${String(chatId).toLowerCase()}`;
+    if (seenChatOpened.has(key)) return true;
+    seenChatOpened.add(key);
+    if (seenChatOpened.size > MAX_SEEN_CHAT_OPENED) {
+      const oldest = seenChatOpened.values().next().value;
+      if (oldest !== undefined) seenChatOpened.delete(oldest);
+    }
+    return false;
+  }
 
   app.get("/health", (_req, res) => {
     res.json({
@@ -614,6 +668,57 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
   }
 
+  async function handleChatOpened(body: {
+    chat?: ChatOpenedChat;
+    opened_by?: RawSender;
+    members?: ChatOpenedMember[];
+    opened_at?: string;
+  }): Promise<void> {
+    if (!options.onChatOpened) return;
+    const chat = body.chat;
+    const chatId = chat?.id;
+    if (chatId == null) return;
+
+    // Unlike card_interaction/invoice_paid, this payload carries no explicit
+    // owner/seller id naming which hosted identity it's for -- salt-api
+    // delivers it once per member with a callback URL, same as everything
+    // else, but the only way this process (which can host several identities
+    // on one endpoint) learns WHICH of its identities the event is about is
+    // by noticing itself in the member list. Prefer the chat's declared
+    // active agent when that's one of ours (GACM), the same tie-break
+    // handleMessage uses, in case delegation ever puts two hosted identities
+    // in the same chat.
+    let identity: AgentIdentity | undefined;
+    if (chat?.active_agent_id) identity = identities.get(String(chat.active_agent_id));
+    if (!identity) {
+      for (const member of body.members || []) {
+        identity = identities.get(String(member.id));
+        if (identity) break;
+      }
+    }
+    if (!identity) {
+      logger.error(`[chat ${chatId}] chat_opened: no hosted identity found among members; ignoring.`);
+      return;
+    }
+
+    if (alreadyGreeted(identity.saltAppId, chatId)) return;
+
+    const ctx: ChatOpenedContext = {
+      identity,
+      chatId,
+      chat: chat as ChatOpenedChat,
+      openedBy: body.opened_by as RawSender,
+      members: body.members || [],
+      openedAt: body.opened_at as string,
+      reply: makeReply(identity, chatId),
+    };
+    try {
+      await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
+    } catch (err) {
+      logger.error(`[chat ${chatId}] onChatOpened failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleHandoffConfirmed(body: { from_agent_id: SaltId; chat_id: SaltId; reason?: string }): Promise<void> {
     const identity = identities.get(String(body.from_agent_id));
     if (!identity || !options.onHandoffConfirmed) return;
@@ -653,24 +758,26 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   async function dispatch(body: Record<string, unknown>): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);
+    if (body?.type === "chat_opened") return handleChatOpened(body as never);
     if (body?.type === "handoff_confirmed") return handleHandoffConfirmed(body as never);
     if (body?.type === "handoff_received") return handleHandoffReceived(body as never);
     if (body?.message) return handleMessage(body as never);
   }
 
   // salt-api's WebhookJob POSTs here with { chat, message } (or a typed
-  // event body for card/invoice/handoff). Ack immediately (200) and process
-  // in the background so a slow agent-loop call can't make Salt's webhook
-  // delivery time out.
+  // event body for card/invoice/chat_opened/handoff). Ack immediately (200)
+  // and process in the background so a slow agent-loop call can't make
+  // Salt's webhook delivery time out.
   //
   // When this server is publicly reachable, anyone can POST here. Encrypted-
   // message webhooks fail safe (forged ciphertext never decrypts), but
-  // card_interaction/invoice_paid payloads are PLAINTEXT and would be acted
-  // on -- so every POST must carry a valid HMAC signed with the RECIPIENT
-  // identity's own key (see rejectionReason above).
+  // card_interaction/invoice_paid/chat_opened payloads are PLAINTEXT and
+  // would be acted on -- so every POST must carry a valid HMAC signed with
+  // the RECIPIENT identity's own key (see rejectionReason above).
   app.post("/", (req, res) => {
     // Verify BEFORE acknowledging: an unsigned POST must never reach dispatch,
-    // because card_interaction/invoice_paid are plaintext and actionable.
+    // because card_interaction/invoice_paid/chat_opened are plaintext and
+    // actionable.
     rejectionReason(req)
       .then((reason) => {
         if (reason) {

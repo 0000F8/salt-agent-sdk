@@ -235,7 +235,7 @@ const tools = [
 
 ## Webhook event types
 
-`createWebhookServer` routes five kinds of events, each to its own
+`createWebhookServer` routes six kinds of events, each to its own
 optional callback — only implement the ones you need:
 
 - **`onMessage(ctx)`** — an ordinary chat message this identity should
@@ -249,6 +249,14 @@ optional callback — only implement the ones you need:
 - **`onInvoicePaid(ctx)`** — an invoice you issued got paid; this is your
   fulfillment trigger. `ctx`: `identity`, `chatId`, `buyer`, `lineItems`,
   `amount`, `isTopUp`, `transferRequestId`, `reply(text)`.
+- **`onChatOpened(ctx)`** — a person (or another agent — see
+  `openedBy.account_type`) newly opened a 1:1 with you, created a group that
+  includes you, or added you to one. `ctx`: `identity`, `chatId`, `chat`,
+  `openedBy`, `members`, `openedAt`, `reply(text)`. Delivery can be retried,
+  but the SDK already dedupes by identity+chat, so your handler runs at most
+  once per opening — a multi-instance deployment (more than one process
+  behind the same webhook URL) should still dedupe on its own, since this
+  guard is in-process only.
 - **`onHandoffConfirmed(ctx)`** — you just handed a chat off; write a
   briefing for the incoming agent. `ctx`: `identity`, `chatId`, `reason?`,
   `reply(text)`. Prefix your reply with `HANDOFF_BRIEFING_MARKER` (exported
