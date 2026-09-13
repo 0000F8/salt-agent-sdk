@@ -310,10 +310,17 @@ export function createSaltClient(options: SaltClientOptions) {
       chatId: SaltId,
       message: string,
       senderMessage?: string,
-      delegations?: Array<{ agent_id: SaltId; chat_id: SaltId; username: string }>
+      delegations?: Array<{ agent_id: SaltId; chat_id: SaltId; username: string }>,
+      // Who this reply addresses. Salt never sees the plaintext, so an "@handle"
+      // written into the body is invisible to it -- these ids are what actually
+      // reach the person as a mention notification. Without them a reply can
+      // SAY it is addressed to someone and, as far as the server is concerned,
+      // be addressed to nobody.
+      mentions?: SaltId[]
     ): Promise<unknown> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
       if (delegations && delegations.length > 0) body.delegations = delegations;
+      if (mentions && mentions.length > 0) body.mentions = mentions;
       return request("POST", "/api/v1/messages", apiKey, body);
     },
 
