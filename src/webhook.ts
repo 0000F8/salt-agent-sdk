@@ -455,12 +455,29 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // trail onto it + fire-and-forget metrics. Does NOT itself manage the
   // typing indicator -- see withTypingHeartbeat, which wraps the whole
   // callback (including whatever happens before reply() is even called).
-  function makeReply(identity: AgentIdentity, chatId: SaltId): (text: string) => Promise<void> {
+  // `addressee` is whoever this reply is answering, when there is one. In a
+  // GROUP chat the reply is addressed back to them by handle -- being spoken
+  // to by name is how a person tells which of several messages in a busy room
+  // is meant for them, and an agent that answers into the middle of a group
+  // without naming anyone reads as talking to the room.
+  //
+  // Two deliberate limits. Only in a group: in a 1:1 there is exactly one
+  // person it could be for, and "@dan" on every line is noise. And only for a
+  // HUMAN: an agent addressed by handle receives a webhook, so auto-addressing
+  // another agent invites exactly the ping-pong the loop caps in this file
+  // exist to stop.
+  function makeReply(
+    identity: AgentIdentity,
+    chatId: SaltId,
+    addressee?: { id: SaltId; username?: string; account_type?: string } | null
+  ): (text: string) => Promise<void> {
     return async (text: string) => {
       const startedAt = Date.now();
       let recipientKeys: string[];
+      let memberCount = 0;
       try {
         const members = await client.getChatMembers(identity.apiKey, chatId);
+        memberCount = members.length;
         recipientKeys = members
           // Everyone but ourselves. parseInt made both sides NaN, and
           // `NaN !== NaN` is true, so the sender's own key was left in the
@@ -476,10 +493,25 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
         return;
       }
 
+      // Group + human + a handle to use, and not already addressed by whoever
+      // wrote the reply (an agent that writes its own "@dan" keeps it, and
+      // does not get a second one bolted on the front).
+      const addressHandle =
+        memberCount > 2 &&
+        addressee?.username &&
+        addressee.account_type !== "Agent" &&
+        !new RegExp(`(^|\\s)@${addressee.username}(?![\\w.-])`).test(text)
+          ? addressee.username
+          : null;
+      const outgoing = addressHandle ? `@${addressHandle} ${text}` : text;
+      // The ids, not the text: Salt only ever sees ciphertext, so an "@handle"
+      // in the body is invisible to it and notifies nobody by itself.
+      const mentions = addressHandle ? [addressee!.id] : undefined;
+
       let encryptedMessage: string, senderMessage: string;
       try {
-        encryptedMessage = await pgp.encryptFor(text, recipientKeys);
-        senderMessage = await pgp.encryptFor(text, [identity.publicKey]);
+        encryptedMessage = await pgp.encryptFor(outgoing, recipientKeys);
+        senderMessage = await pgp.encryptFor(outgoing, [identity.publicKey]);
       } catch (err) {
         logger.error(`[chat ${chatId}] encryption failed: ${(err as Error).message}`);
         return;
@@ -487,7 +519,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
 
       const trail = delegations.drainTrail(identity.saltAppId, chatId);
       try {
-        await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail);
+        await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail, mentions);
       } catch (err) {
         logger.error(`[chat ${chatId}] posting reply failed: ${(err as Error).message}`);
         return;
@@ -603,7 +635,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       chatMeta,
       mediatorSharedContext,
       attachment,
-      reply: makeReply(identity, chatId),
+      reply: makeReply(identity, chatId, senderRaw),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
