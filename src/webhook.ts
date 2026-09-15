@@ -15,7 +15,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express, type Request } from "express";
-import type { SaltClient } from "./client";
+import type { LatticeGrant, SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import * as lattice from "./lattice";
@@ -290,6 +290,66 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       logger.error(`[webhook] could not fetch signing key for agent ${agentId}: ${(err as Error).message}`);
       return undefined;
     }
+  }
+
+  // Verifying a Lattice release that has no live request_personal_data wait
+  // to resolve it (see lattice.ts's "unmatched" outcome -- a late reply or
+  // a standing push): lattice.ts itself has no REST client and no concept
+  // of a grant, so it cannot tell a genuinely late answer from a bystander
+  // sending release-shaped junk (a request's plaintext id is deliberately
+  // visible to every current member of the chat it was sent into -- see
+  // actions.ts's request_personal_data -- so the id alone proves nothing
+  // once there's no live wait bound to a specific chat/sender left to check
+  // it against). This is what makes onLatticeRelease safe to wire up:
+  // fetch this identity's own live grants (server-scoped to grants naming
+  // it) and require the sender to be human and, for a standing push, that
+  // `grant_id` actually names one of them. One minute of cache per identity
+  // so a burst of forged releases can't force a salt-api round trip each.
+  const LATTICE_GRANTS_CACHE_MS = 60_000;
+  const latticeGrantsCache = new Map<string, { grants: LatticeGrant[]; fetchedAt: number }>();
+  const latticeGrantsInFlight = new Map<string, Promise<LatticeGrant[]>>();
+  async function liveLatticeGrantsFor(identity: AgentIdentity): Promise<LatticeGrant[]> {
+    const key = String(identity.saltAppId).toLowerCase();
+    const cached = latticeGrantsCache.get(key);
+    if (cached && Date.now() - cached.fetchedAt < LATTICE_GRANTS_CACHE_MS) return cached.grants;
+
+    const inFlight = latticeGrantsInFlight.get(key);
+    if (inFlight) return inFlight;
+
+    const fetchPromise = client
+      .getLatticeGrants(identity.apiKey)
+      .then((grants) => {
+        latticeGrantsCache.set(key, { grants, fetchedAt: Date.now() });
+        return grants;
+      })
+      .catch((err) => {
+        logger.error(`[lattice] fetching grants for ${identity.saltAppId} failed: ${(err as Error).message}`);
+        // Fail closed on a cold cache (no grants known yet -- an unmatched
+        // release then verifies as false, below); fall back to the last
+        // known-good list rather than treating a transient salt-api hiccup
+        // as "every grant this identity had just vanished".
+        return cached?.grants ?? [];
+      })
+      .finally(() => {
+        latticeGrantsInFlight.delete(key);
+      });
+    latticeGrantsInFlight.set(key, fetchPromise);
+    return fetchPromise;
+  }
+
+  // A human sender (never another agent -- see the module comment) who
+  // either has ANY live grant naming this identity (an ordinary late
+  // reply -- lattice.ts's parseRelease already guarantees `standingGrantId`
+  // is unset here means this came from SOME chat member, but not which
+  // one's grant covers it; that finer-grained check isn't something
+  // GET /lattice/grants exposes today, so "this identity has at least one
+  // live human relationship at all" is the strongest available check) or,
+  // for a standing push, one whose id is EXACTLY `standingGrantId` (fully
+  // checkable: PROTOCOL.md's standing push always names its own grant).
+  function isVerifiedLatticeSender(sender: RawSender | undefined, grants: LatticeGrant[], standingGrantId: string | undefined): boolean {
+    if (!sender || sender.account_type === "Agent") return false;
+    if (standingGrantId) return grants.some((g) => !g.revoked_at && sameId(g.id, standingGrantId));
+    return grants.some((g) => !g.revoked_at);
   }
 
   // Returns null when the request is authentic, or a reason string to reject.
@@ -608,21 +668,36 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // delegations -- this and a delegation reply are both wire protocol,
     // never a fresh prompt, whenever they're "matched" or "unmatched".
     const latticeOutcome = lattice.classifyRelease(chatId, senderId, caption);
-    if (latticeOutcome.kind === "unmatched" && options.onLatticeRelease) {
+    if (latticeOutcome.kind === "unmatched") {
       const release = latticeOutcome.release;
-      const ctx: LatticeReleaseContext = {
-        identity,
-        chatId,
-        senderId,
-        id: release.id,
-        standing: release.standing,
-        body: release.body,
-        reply: makeReply(identity, chatId),
-      };
-      try {
-        await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onLatticeRelease!(ctx)));
-      } catch (err) {
-        logger.error(`[chat ${chatId}] onLatticeRelease failed: ${(err as Error).message}`);
+      const grants = await liveLatticeGrantsFor(identity);
+      if (!isVerifiedLatticeSender(senderRaw, grants, release.standing)) {
+        // Drop it: an unmatched release-shaped message from a sender who
+        // isn't a human holding a live grant to this identity (or, for a
+        // standing push, the exact grant it claims) is left unverified on
+        // purpose -- see isVerifiedLatticeSender's doc comment. Logged
+        // once here and never surfaced to onMessage either: this plaintext
+        // is Lattice wire-protocol shaped and must not reach a model as
+        // ordinary chat text any more than as trusted release data.
+        logger.error(
+          `[chat ${chatId}] lattice release ${release.id} from ${senderId} failed verification` +
+            `${release.standing ? ` (claims standing grant ${release.standing})` : ""} -- dropping.`
+        );
+      } else if (options.onLatticeRelease) {
+        const ctx: LatticeReleaseContext = {
+          identity,
+          chatId,
+          senderId,
+          id: release.id,
+          standing: release.standing,
+          body: release.body,
+          reply: makeReply(identity, chatId),
+        };
+        try {
+          await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onLatticeRelease!(ctx)));
+        } catch (err) {
+          logger.error(`[chat ${chatId}] onLatticeRelease failed: ${(err as Error).message}`);
+        }
       }
     }
     if (latticeOutcome.kind === "matched" || latticeOutcome.kind === "unmatched") return;
