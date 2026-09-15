@@ -18,6 +18,7 @@ import express, { type Express, type Request } from "express";
 import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
+import * as lattice from "./lattice";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 import { reconcileIdentityIds } from "./reconcile";
@@ -571,6 +572,12 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const senderRaw = message.user as RawSender | undefined;
     if (!senderRaw) return;
     const senderId: SaltId = String(senderRaw.id);
+
+    // A Lattice release (see lattice.ts) -- whether it resolves a pending
+    // request_personal_data wait, or is a late/standing release with no
+    // pending wait to resolve -- is Salt-Lattice wire protocol, never a
+    // fresh prompt for this identity to answer.
+    if (lattice.resolveIfPending(caption)) return;
 
     // Reply to a pending delegation call? Hand it to that waiting promise
     // instead of starting a fresh reply cycle -- see delegations.ts.
