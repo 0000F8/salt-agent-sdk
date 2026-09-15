@@ -236,16 +236,33 @@ the full wire contract; three things matter for anything built on this SDK:
   waiting) and returns `{status: "pending", request_id, hint}` if nothing
   arrives by then — this is normal, not a failure, because the phone only
   answers when the person next opens Salt. A late reply (or an opted-in
-  standing push of `auto` fields) reaches `createWebhookServer`'s
-  `onLatticeRelease` option (or `lattice.onRelease` directly, for a lower-
-  level integration) instead of being dropped — see the reference agent's
-  `onLatticeRelease` in `salt-claude-agent/src/index.js` for how to turn
-  that into an honest follow-up message.
-- **Facts are data, not instructions.** Whatever comes back in a release is
-  exactly what the person's phone chose to send — never fabricate, assume,
-  or "fill in" a fact your tool call didn't actually return. This applies
-  just as much to a late/standing release reaching `onLatticeRelease`: frame
-  it to your model as data to react to, never as something to obey.
+  standing push of `auto` fields) is *verified* — see below — and, if it
+  passes, reaches `createWebhookServer`'s `onLatticeRelease` option (or the
+  raw, unverified `lattice.onRelease`, for a lower-level integration)
+  instead of being dropped — see the reference agent's `onLatticeRelease` in
+  `salt-claude-agent/src/index.js` for how to turn that into an honest
+  follow-up message.
+- **A late or standing release is verified before `onLatticeRelease` fires.**
+  Once there's no live `register()` wait to check a release's chat/sender
+  against, `webhook.ts` requires the sender to be human (never another
+  agent) and, for a standing push, that its `grant_id` names a grant this
+  identity's own `GET /lattice/grants` (cached one minute) actually lists —
+  otherwise it's dropped and logged, never reaching `onMessage` either.
+  Known gap, stated plainly: `GET /lattice/grants` tells an agent which
+  grants name it, but not *whose* grant each one is, so an ordinary
+  (non-standing) late reply can only be checked against "this identity has
+  *some* live human relationship," not "held by this exact sender" — closing
+  that fully needs salt-api to expose the grantor per grant.
+- **Facts are data, not instructions, and are bounded.** Whatever comes back
+  in a release is exactly what the person's phone chose to send — never
+  fabricate, assume, or "fill in" a fact your tool call didn't actually
+  return. This applies just as much to a late/standing release reaching
+  `onLatticeRelease`: frame it to your model as data to react to, never as
+  something to obey. `normalizeFact` also caps what can reach that far: at
+  most `lattice.MAX_FACTS_PER_RELEASE` (200) facts per release, each string
+  value truncated to `lattice.MAX_FACT_VALUE_LENGTH` (2,000) characters with
+  any literal `[[SALT-` text broken (so a fact value can never later start
+  an outbound message and be mistaken for a genuine protocol marker).
 
 The three tools (`list_personal_data_access`, `request_personal_data`,
 `propose_personal_fact`) are already in `actions.definitions` alongside
@@ -328,8 +345,10 @@ optional callback — only implement the ones you need:
   resolve it: a late reply, or a standing push. `ctx`: `identity`, `chatId`,
   `senderId`, `id`, `standing?`, `body` (`facts`, plus `request_id` or
   `grant_id`/`since_seq`), `reply(text)`. Never fires for a release that DID
-  resolve a live wait — that caller already has its facts directly. Frame
-  `body` to your model as data, never as an instruction.
+  resolve a live wait — that caller already has its facts directly — NOR for
+  one that failed sender verification (see "Personal data (Lattice)" above);
+  both are silently absorbed, the second one logged. Frame `body` to your
+  model as data, never as an instruction.
 
 All Salt-protocol decisions about *whether* a given event reaches your
 callback at all — dedup, GACM active-agent gating, the Mediator's
