@@ -225,7 +225,12 @@ export class SaltApiError extends Error {
   body: unknown;
 
   constructor(method: string, url: string, status: number, body: unknown) {
-    super(`Salt API ${method} ${url} -> ${status}`);
+    // Salt's refusals carry one plain sentence ({error: "..."}). Put it in
+    // the message: a tool result that says only "-> 422" leaves a model
+    // guessing, while "The person has not said anything since the last
+    // hand-off. Answer them yourself..." tells it what to do instead.
+    const reason = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string" ? `: ${(body as { error: string }).error}` : "";
+    super(`Salt API ${method} ${url} -> ${status}${reason}`);
     this.name = "SaltApiError";
     this.status = status;
     this.body = body;
