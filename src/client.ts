@@ -72,6 +72,35 @@ export interface AddUsageParams {
   idempotencyKey?: string;
 }
 
+/** One rule inside a Lattice grant -- a selector plus how it's answered. */
+export interface LatticeGrantRule {
+  /** e.g. "preferences.food.cuisine.*" or "preferences.food.restriction.strength". */
+  selector: string;
+  /** "auto": answered immediately. "ask": opens Salt's own consent sheet. */
+  mode: "auto" | "ask";
+}
+
+/**
+ * A Lattice grant, as `GET /api/v1/lattice/grants` returns it -- field
+ * NAMES only, never values (the server never sees a person's facts). See
+ * ../../salt-lattice/docs/PROTOCOL.md. Called with an agent's own api key,
+ * the server scopes this to grants naming that agent.
+ */
+export interface LatticeGrant {
+  id: SaltId;
+  agent: { id: SaltId; username: string; display_name: string };
+  agent_fingerprint: string;
+  /** True when the bound fingerprint no longer matches the agent's current key -- standing release is paused until the person re-approves. */
+  key_changed: boolean;
+  rules: LatticeGrantRule[];
+  /** Compartments this agent's own writes (propose_personal_fact) land already-accepted into, rather than pending. */
+  trusted_writes: string[];
+  standing: { expires_at: string } | null;
+  version: number;
+  created_at: string;
+  revoked_at: string | null;
+}
+
 export interface SaltClientOptions {
   host: string;
   /** Override fetch (e.g. for tests). Defaults to global fetch. */
@@ -573,6 +602,23 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Upload an already-encrypted wallet under the caller's own identity (see crypto.ts). */
     async createWallet(apiKey: string, params: Record<string, unknown>): Promise<unknown> {
       return request("POST", "/api/v1/wallets", apiKey, params);
+    },
+
+    // --- Lattice (personal-data grants; see ../../salt-lattice/docs/PROTOCOL.md) ---
+
+    /**
+     * This agent's own Lattice grants -- salt-api scopes the result to
+     * grants naming the calling api key's agent. `rules[].selector` and
+     * `trusted_writes` are the EXACT field/compartment names to use in
+     * lattice.buildRequest's `asks` and lattice.buildProposal's `type`.
+     */
+    async getLatticeGrants(apiKey: string): Promise<LatticeGrant[]> {
+      return request("GET", `/api/v1/lattice/grants?_=${Date.now()}`, apiKey);
+    },
+
+    /** Lattice's full closed schema (every type/field name that can ever exist), for building valid asks/proposals. */
+    async getLatticeSchema(apiKey: string): Promise<unknown> {
+      return request("GET", "/api/v1/lattice/schema", apiKey);
     },
 
     /** Hand a chat off to another agent; salt-api does the whole swap atomically. */
