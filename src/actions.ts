@@ -287,11 +287,14 @@ export function createActions(options: ActionsOptions) {
     // The person this turn is for sees the delegation as it happens, in their
     // Tasks panel: who was asked, what, and how it ended. Awaited so the
     // reports land in order; a report that fails never fails the delegation.
-    const work: Omit<WorkReport, "status" | "title"> = {
+    // Each step carries its own detail (0.6.1): the ask on the way out, the
+    // reply's first line on the way back, the reason on a failure. One detail
+    // reused for every step made a finished delegation repeat the question.
+    const firstLine = (s: string) => (s || "").split("\n").find((l) => l.trim()) || "";
+    const work: Omit<WorkReport, "status" | "title" | "detail"> = {
       id: newWorkId(),
       kind: "delegation",
       with: target.username,
-      detail: task.split("\n")[0],
     };
     const handle = target.username ? `@${target.username}` : target.display_name || "another agent";
 
@@ -305,17 +308,17 @@ export function createActions(options: ActionsOptions) {
       delegations.cancel(chat.id);
       throw err;
     }
-    await reportWork(caller, ctx, { ...work, status: "running", title: `Asking ${handle}` });
+    await reportWork(caller, ctx, { ...work, status: "running", title: `Asking ${handle}`, detail: firstLine(task) });
 
     let rawReplyText: string;
     try {
       rawReplyText = await waitForReply; // rejects with a timeout Error if nothing arrives in time
     } catch (err) {
-      await reportWork(caller, ctx, { ...work, status: "failed", title: `No answer from ${handle}` });
+      await reportWork(caller, ctx, { ...work, status: "failed", title: `No answer from ${handle}`, detail: `No reply within ${Math.round(delegations.DELEGATION_TIMEOUT_MS / 1000)} s.` });
       throw err;
     }
-    await reportWork(caller, ctx, { ...work, status: "done", title: `${handle} answered` });
     const replyText = replyTransform(rawReplyText);
+    await reportWork(caller, ctx, { ...work, status: "done", title: `${handle} answered`, detail: firstLine(replyText) });
 
     if (ctx.mainChatId != null) {
       delegations.recordTrail(caller.saltAppId, ctx.mainChatId, {
@@ -334,6 +337,10 @@ export function createActions(options: ActionsOptions) {
       delegated: true,
       target: { id: target.id, username: target.username, display_name: target.display_name },
       reply: replyText,
+      // Seen live (2026-09-15): after consulting Faucet, the Concierge told the
+      // person "They're in this chat now -- you can message them directly."
+      // They were not. Say so in the result the model reads.
+      note: `${target.display_name || target.username} answered YOU in a separate chat and is NOT a member of the chat you are replying in. The person cannot message them here. Give them the answer yourself; if they should talk to that agent directly, use hand_off_to_agent, which actually brings it in.`,
     };
   }
 
@@ -620,6 +627,9 @@ export function createActions(options: ActionsOptions) {
         "exactly like a human messaging that agent. Creates (or reuses) a 1:1 chat with the target, " +
         "sends it your request, and waits for its reply, which is returned to you to use. This is a " +
         "real, visible conversation, not a shortcut: anyone who opens that chat can see the " +
+        "delegation happen. The target joins THAT chat, never the one you are replying in -- the person " +
+        "you are helping cannot message it there, so never tell them it is 'in this chat' (use " +
+        "hand_off_to_agent when they should talk to it directly). Anyone who opens the delegation chat can see the " +
         "delegation happen. Use list_salt_agents first to pick a suitable, well-rated target rather " +
         "than guessing an id. Only delegate work the other agent is plausibly better positioned for " +
         "-- don't delegate something you can already just answer yourself. You can't delegate to " +

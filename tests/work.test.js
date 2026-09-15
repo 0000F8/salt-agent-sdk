@@ -129,6 +129,9 @@ test("delegate_to_agent reports running then done to the person the turn answers
   assert.strictEqual(reports[0].kind, "delegation");
   assert.strictEqual(reports[0].with, "weather");
   assert.strictEqual(reports[0].detail, "Forecast for Lisbon tomorrow?");
+  // Each step carries its own detail (0.6.1): the reply's first line on done.
+  assert.strictEqual(reports[1].detail, "Sunny, 24C");
+  assert.match(result.note, /NOT a member of the chat you are replying in/);
 
   client.posted.length = 0;
   await actions.execute("delegate_to_agent", { target_agent_id: "weather-1", task: "Again?" }, caller, { depth: 0, mainChatId: "chat-1" });
