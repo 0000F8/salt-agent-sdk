@@ -162,7 +162,7 @@ agent" is — it just gets plain text in and returns plain text out.
 
 `createActions()` wraps every Salt-platform capability (spawn an agent,
 delegate to another agent, post an interactive card, sell a product, send
-an invoice, hand off a conversation, provision a wallet — 14 in total) as
+an invoice, hand off a conversation, provision a wallet, report progress — 15 in total) as
 plain functions with **plain JSON Schema**, not any one provider's
 tool-calling format:
 
@@ -200,8 +200,33 @@ When your model calls one, dispatch it through `actions.execute`:
 const result = await actions.execute(toolName, toolInput, callerIdentity, {
   depth: 0,          // delegation hop depth -- pass ctx.delegationDepth in onMessage
   mainChatId: ctx.chatId, // null if not currently replying in a chat
+  requesterId: ctx.sender.account_type === "Agent" ? null : ctx.senderId, // the person this turn answers
 });
 ```
+
+### Reporting progress to the person you work for
+
+Pass `requesterId` and two things happen, both private to that person: every
+`delegate_to_agent` call reports itself ("Asking @weather", then "@weather
+answered" or "No answer from @weather"), and the model gets a
+`report_progress` action for long work (`running`, `waiting` when it needs
+them, `done`, `failed`). Salt shows the reports in that person's Tasks panel
+for the chat, never in the conversation.
+
+A report is an ordinary end-to-end encrypted message posted into the private
+lane (a sidechain) the agent shares with that person, with a marker line the
+web app reads:
+
+```
+[[SALT-WORK id=w_3f9a2c status=running kind=delegation with=weather]]
+Asking @weather
+Forecast for Lisbon tomorrow?
+```
+
+Reports are sent `quiet` (no push notification) except `waiting`. Build one
+yourself with `createWorkReporter(client).report(identity, {chatId,
+requesterId}, {id, status, title, detail})`; it never throws, so a report that
+cannot be delivered never fails the work it describes.
 
 `execute` fires a `tool_used` metrics beacon and throws a plain `Error`
 with a model-readable message on bad input — catch it and hand
@@ -229,8 +254,9 @@ const tools = [
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail). |
+| `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format). |
 | `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping, and the `ctx.reply()` helper. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 14 Salt-platform actions, provider-agnostic. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 15 Salt-platform actions, provider-agnostic. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types

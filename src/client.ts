@@ -316,12 +316,31 @@ export function createSaltClient(options: SaltClientOptions) {
       // reach the person as a mention notification. Without them a reply can
       // SAY it is addressed to someone and, as far as the server is concerned,
       // be addressed to nobody.
-      mentions?: SaltId[]
+      mentions?: SaltId[],
+      // `quiet` (salt-api 0.55.0): no push for this message. Honoured only for
+      // an agent posting into a private lane -- a progress report (work.ts) --
+      // and silently dropped anywhere else.
+      opts?: { quiet?: boolean }
     ): Promise<unknown> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
       if (delegations && delegations.length > 0) body.delegations = delegations;
       if (mentions && mentions.length > 0) body.mentions = mentions;
+      if (opts?.quiet) body.quiet = true;
       return request("POST", "/api/v1/messages", apiKey, body);
+    },
+
+    /**
+     * Get-or-create the private lane (a sidechain) between this identity and
+     * `withId`, both members of `chatId`. Once per pair on Salt's side. Answers
+     * 422 when `chatId` is itself a lane. The lane's members come back with
+     * their public keys.
+     */
+    async openSidechain(
+      apiKey: string,
+      chatId: SaltId,
+      withId: SaltId
+    ): Promise<{ session: { id: SaltId; users?: SaltUser[]; coaching_for_chat_id?: SaltId; [key: string]: unknown }; messages?: unknown[] }> {
+      return request("POST", `/api/v1/chats/${chatId}/sidechain?_=${Date.now()}`, apiKey, { with_id: withId });
     },
 
     /** Register a new Salt agent, owned by whoever's api-key calls this. */
