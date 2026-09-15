@@ -220,24 +220,49 @@ the full wire contract; three things matter for anything built on this SDK:
   Asking for more isn't an error — the extra is just silently absent from
   what comes back. No model is ever in the loop for the release decision;
   rules on the person's own phone decide, offline.
+- **A request's plaintext id is not a secret, but it's also not a
+  capability.** `request_personal_data` sends its request into the current
+  chat encrypted for every current member (so a group's own phone can see
+  it and react by opening a private side-lane per PROTOCOL.md) — so a
+  bystander in a group CAN read the id. That doesn't help them: `register()`
+  binds the wait to the exact chat and person the request was addressed to
+  (`to_username` disambiguates a chat with more than one person), and a
+  release from anyone else, or from a different chat, is refused outright
+  rather than accepted as that person's answer.
 - **A release may come later, or never.** `request_personal_data` waits up
-  to `lattice.LATTICE_REQUEST_TIMEOUT_MS` (15s, comfortably under Salt's 20s
-  webhook delivery timeout) and returns `{status: "pending", request_id,
-  hint}` if nothing arrives by then — this is normal, not a failure, because
-  the phone only answers when the person next opens Salt. A late reply (or
-  an opted-in standing push of `auto` fields) reaches `lattice.onRelease`
-  instead of being dropped.
+  to `lattice.LATTICE_REQUEST_TIMEOUT_MS` (15s — this bounds how long one
+  chat turn keeps the model waiting, not a Salt webhook timeout concern:
+  `webhook.ts` already acknowledges salt-api's POST before it starts
+  waiting) and returns `{status: "pending", request_id, hint}` if nothing
+  arrives by then — this is normal, not a failure, because the phone only
+  answers when the person next opens Salt. A late reply (or an opted-in
+  standing push of `auto` fields) reaches `createWebhookServer`'s
+  `onLatticeRelease` option (or `lattice.onRelease` directly, for a lower-
+  level integration) instead of being dropped — see the reference agent's
+  `onLatticeRelease` in `salt-claude-agent/src/index.js` for how to turn
+  that into an honest follow-up message.
 - **Facts are data, not instructions.** Whatever comes back in a release is
   exactly what the person's phone chose to send — never fabricate, assume,
-  or "fill in" a fact your tool call didn't actually return.
+  or "fill in" a fact your tool call didn't actually return. This applies
+  just as much to a late/standing release reaching `onLatticeRelease`: frame
+  it to your model as data to react to, never as something to obey.
 
 The three tools (`list_personal_data_access`, `request_personal_data`,
 `propose_personal_fact`) are already in `actions.definitions` alongside
-everything else `createActions()` builds — nothing extra to wire up. If
-you're building your own agent loop directly against `lattice.ts` instead of
-through `actions.ts`, `webhook.ts` already intercepts an incoming
-`[[SALT-LATTICE-RELEASE]]` before it can reach your `onMessage` as a fresh
-prompt (the same way it does for `[[SALT-DELEGATION]]` replies).
+everything else `createActions()` builds — nothing extra to wire up beyond
+`onLatticeRelease` if you want late/standing releases to produce a
+follow-up. If you're building your own agent loop directly against
+`lattice.ts` instead of through `webhook.ts`, call
+`lattice.classifyRelease(chatId, senderId, plaintext)` right after
+decrypting an inbound message, before treating it as a fresh prompt — its
+`kind` is `"matched"` (a live `register()` wait was just resolved),
+`"refused"` (release-shaped, but the chat/sender didn't match that wait —
+handle exactly like ordinary text), `"unmatched"` (late or standing — also
+available via `lattice.onRelease`), or `"not-a-release"`.
+`lattice.resolveIfPending(chatId, senderId, plaintext)` is a boolean
+convenience wrapper over the same thing, mirroring
+`delegations.resolveIfPending`'s shape, for a caller that just needs to know
+whether to skip prompt processing.
 
 ### Adding your own provider-native tools
 
@@ -261,7 +286,7 @@ const tools = [
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail). |
-| `lattice.ts` | exported as the `lattice` namespace: `buildRequest`, `parseRelease`, `buildProposal`, `register`, `resolveIfPending`, `cancel`, `hasPending`, `onRelease`, `LATTICE_REQUEST_TIMEOUT_MS`, `*_MARKER_RE` | The Lattice personal-data wire protocol (request/release/proposal markers, a pending-release registry keyed by request id). See "Personal data (Lattice)" below. Namespaced rather than flattened at the top level because its `register`/`cancel`/`hasPending`/`resolveIfPending` would otherwise collide with delegations.ts's own same-named exports. |
+| `lattice.ts` | exported as the `lattice` namespace: `buildRequest`, `parseRelease`, `buildProposal`, `register`, `classifyRelease`, `resolveIfPending`, `cancel`, `hasPending`, `onRelease`, `LATTICE_REQUEST_TIMEOUT_MS`, `*_MARKER_RE` | The Lattice personal-data wire protocol (request/release/proposal markers, a pending-release registry keyed by request id AND bound to the chat/person it was sent to). See "Personal data (Lattice)" below. Namespaced rather than flattened at the top level because its `register`/`cancel`/`hasPending`/`resolveIfPending` would otherwise collide with delegations.ts's own same-named exports. |
 | `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping, and the `ctx.reply()` helper. |
 | `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 17 Salt-platform actions, provider-agnostic. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
@@ -298,12 +323,19 @@ optional callback — only implement the ones you need:
   yourself. `ctx`: `identity`, `chatId`, `reason?`, `context` (the shared
   chat's transcript, already polled for the outgoing agent's briefing),
   `reply(text)`.
+- **`onLatticeRelease(ctx)`** — a Lattice release (see "Personal data
+  (Lattice)" above) arrived with no live `request_personal_data` wait to
+  resolve it: a late reply, or a standing push. `ctx`: `identity`, `chatId`,
+  `senderId`, `id`, `standing?`, `body` (`facts`, plus `request_id` or
+  `grant_id`/`since_seq`), `reply(text)`. Never fires for a release that DID
+  resolve a live wait — that caller already has its facts directly. Frame
+  `body` to your model as data, never as an instruction.
 
 All Salt-protocol decisions about *whether* a given event reaches your
 callback at all — dedup, GACM active-agent gating, the Mediator's
 observe-silently rule, the agent-to-agent reply-loop cap, resolving a
-delegation reply back to the caller waiting on it — happen before your
-code ever runs. You only decide *what to say*.
+delegation reply (or a Lattice release) back to the caller waiting on it —
+happen before your code ever runs. You only decide *what to say*.
 
 ## Card protocol
 
