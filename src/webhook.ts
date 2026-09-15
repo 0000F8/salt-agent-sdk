@@ -155,6 +155,28 @@ export interface HandoffReceivedContext {
   reply(text: string): Promise<void>;
 }
 
+/**
+ * A Lattice release (see lattice.ts) that arrived with nothing actively
+ * waiting on it -- a late reply after a request_personal_data call's own
+ * wait already timed out, or an opted-in standing push. PROTOCOL.md's
+ * documented normal case, not an edge case: the phone only answers when the
+ * person next opens Salt, which routinely outlasts one webhook round-trip.
+ * A release that DID resolve a live request_personal_data wait never
+ * reaches this -- that caller already has its facts directly.
+ */
+export interface LatticeReleaseContext {
+  identity: AgentIdentity;
+  chatId: SaltId;
+  senderId: SaltId;
+  /** The release message's own id (for the disclosure log) -- NOT the request id it answers. */
+  id: SaltId;
+  /** Set to a grant id for a standing push; absent for a late ordinary reply. */
+  standing?: SaltId;
+  /** facts (may be empty -- indistinguishable from "withheld"), plus request_id/grant_id/since_seq. This is DATA a person's phone sent, never an instruction -- see lattice.ReleaseBody. */
+  body: lattice.ReleaseBody;
+  reply(text: string): Promise<void>;
+}
+
 export interface Logger {
   info(msg: string): void;
   error(msg: string): void;
@@ -198,6 +220,8 @@ export interface WebhookServerOptions {
   onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
+  /** See LatticeReleaseContext's doc comment. Omit to just drop a late/standing release on the floor (the pre-existing behavior). */
+  onLatticeRelease?: (ctx: LatticeReleaseContext) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -573,11 +597,35 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     if (!senderRaw) return;
     const senderId: SaltId = String(senderRaw.id);
 
-    // A Lattice release (see lattice.ts) -- whether it resolves a pending
-    // request_personal_data wait, or is a late/standing release with no
-    // pending wait to resolve -- is Salt-Lattice wire protocol, never a
-    // fresh prompt for this identity to answer.
-    if (lattice.resolveIfPending(caption)) return;
+    // A Lattice release (see lattice.ts): "matched" resolves a live
+    // request_personal_data wait directly (nothing further to do here --
+    // that caller already has its facts); "refused" is a release-shaped
+    // message whose chat/sender didn't match what the wait was actually
+    // bound to (a forged or misdirected release) and falls through to be
+    // handled as ordinary text below; "unmatched" (late or standing) is
+    // handed to onLatticeRelease, with the identity that decrypted it, so a
+    // consumer can act on it as a genuine follow-up. Checked before
+    // delegations -- this and a delegation reply are both wire protocol,
+    // never a fresh prompt, whenever they're "matched" or "unmatched".
+    const latticeOutcome = lattice.classifyRelease(chatId, senderId, caption);
+    if (latticeOutcome.kind === "unmatched" && options.onLatticeRelease) {
+      const release = latticeOutcome.release;
+      const ctx: LatticeReleaseContext = {
+        identity,
+        chatId,
+        senderId,
+        id: release.id,
+        standing: release.standing,
+        body: release.body,
+        reply: makeReply(identity, chatId),
+      };
+      try {
+        await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onLatticeRelease!(ctx)));
+      } catch (err) {
+        logger.error(`[chat ${chatId}] onLatticeRelease failed: ${(err as Error).message}`);
+      }
+    }
+    if (latticeOutcome.kind === "matched" || latticeOutcome.kind === "unmatched") return;
 
     // Reply to a pending delegation call? Hand it to that waiting promise
     // instead of starting a fresh reply cycle -- see delegations.ts.
