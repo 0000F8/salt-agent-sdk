@@ -16,6 +16,7 @@ import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import { encryptWalletPayload } from "./crypto";
 import * as delegations from "./delegations";
+import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type WorkStatus } from "./work";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 
@@ -26,6 +27,13 @@ export interface ActionContext {
   depth: number;
   /** The chat this action should act on, or null when not currently replying in a chat (e.g. a background job). */
   mainChatId: SaltId | null;
+  /**
+   * The PERSON whose message this turn answers, when it answers one. Work
+   * reports (work.ts) go to them privately: delegate_to_agent reports itself,
+   * and report_progress is only available with one. Leave it unset for an
+   * agent sender, a background job, or a delegated hop.
+   */
+  requesterId?: SaltId | null;
 }
 
 export interface ActionDefinition<TInput = any, TOutput = any> {
@@ -87,6 +95,21 @@ const BLOCKS_SCHEMA: JsonSchema = {
 export function createActions(options: ActionsOptions) {
   const { client, identities, pgpPassphrase, publicWebhookUrl, walletMasterKey, conciergeAgentId } = options;
   const replyTransform = options.replyTransform ?? ((text: string) => text);
+
+  // Progress reports to the person a turn is for (work.ts). Only a turn that
+  // answers a person in a chat has anyone to report to; everything else is a
+  // quiet no-op, so a delegation made by a background job or a delegated hop
+  // behaves exactly as it did before reports existed.
+  const workReporter = createWorkReporter(client);
+  const reportTarget = (ctx: ActionContext) =>
+    ctx.mainChatId != null && ctx.requesterId != null && ctx.depth === 0
+      ? { chatId: ctx.mainChatId, requesterId: ctx.requesterId }
+      : null;
+  async function reportWork(caller: AgentIdentity, ctx: ActionContext, report: WorkReport): Promise<boolean> {
+    const target = reportTarget(ctx);
+    if (!target) return false;
+    return workReporter.report(caller, target, report);
+  }
 
   // Generates an EVM keypair, encrypts it under walletMasterKey (no human
   // recovery phrase), and uploads it under `identity`'s own api-key. Shared
@@ -261,6 +284,17 @@ export function createActions(options: ActionsOptions) {
     const recipientMessage = await pgp.encryptFor(marked, recipientKeys);
     const senderMessage = await pgp.encryptFor(marked, [caller.publicKey]);
 
+    // The person this turn is for sees the delegation as it happens, in their
+    // Tasks panel: who was asked, what, and how it ended. Awaited so the
+    // reports land in order; a report that fails never fails the delegation.
+    const work: Omit<WorkReport, "status" | "title"> = {
+      id: newWorkId(),
+      kind: "delegation",
+      with: target.username,
+      detail: task.split("\n")[0],
+    };
+    const handle = target.username ? `@${target.username}` : target.display_name || "another agent";
+
     // register() throws synchronously (before any network call) if this
     // chat already has a pending wait -- surfaces as a normal action error
     // rather than an ambiguous race over which reply belongs to which caller.
@@ -271,8 +305,16 @@ export function createActions(options: ActionsOptions) {
       delegations.cancel(chat.id);
       throw err;
     }
+    await reportWork(caller, ctx, { ...work, status: "running", title: `Asking ${handle}` });
 
-    const rawReplyText = await waitForReply; // rejects with a timeout Error if nothing arrives in time
+    let rawReplyText: string;
+    try {
+      rawReplyText = await waitForReply; // rejects with a timeout Error if nothing arrives in time
+    } catch (err) {
+      await reportWork(caller, ctx, { ...work, status: "failed", title: `No answer from ${handle}` });
+      throw err;
+    }
+    await reportWork(caller, ctx, { ...work, status: "done", title: `${handle} answered` });
     const replyText = replyTransform(rawReplyText);
 
     if (ctx.mainChatId != null) {
@@ -293,6 +335,28 @@ export function createActions(options: ActionsOptions) {
       target: { id: target.id, username: target.username, display_name: target.display_name },
       reply: replyText,
     };
+  }
+
+  // --- report_progress --------------------------------------------------
+
+  async function reportProgress(
+    caller: AgentIdentity,
+    input: { id?: string; status: WorkStatus; title: string; detail?: string },
+    ctx: ActionContext
+  ) {
+    if (!reportTarget(ctx)) {
+      throw new Error("report_progress is only available while answering a person in a chat.");
+    }
+    if (!WORK_STATUSES.includes(input.status)) {
+      throw new Error(`status must be one of ${WORK_STATUSES.join(", ")}.`);
+    }
+    const title = (input.title || "").trim();
+    if (!title) throw new Error("title is required -- one short line saying what is happening.");
+    const id = input.id && /^[A-Za-z0-9_-]{1,64}$/.test(input.id) ? input.id : newWorkId();
+    const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail });
+    return reported
+      ? { reported: true, id, note: "Only they can see this, in their Tasks panel for this chat." }
+      : { reported: false, id, note: "The report could not be delivered; carry on with the work." };
   }
 
   // --- post_card / update_card ------------------------------------------
@@ -570,6 +634,30 @@ export function createActions(options: ActionsOptions) {
         required: ["target_agent_id", "task"],
       },
       execute: delegateToAgent,
+    },
+    {
+      name: "report_progress",
+      description:
+        "Keep the person you are answering up to date on work that takes a while, privately. Salt " +
+        "shows the report in that person's Tasks panel for this chat -- never in the conversation, " +
+        "and nobody else in the chat can see it. Use status 'running' when you start something that " +
+        "will take more than a few seconds, and again with the same id when the step changes; " +
+        "'waiting' when you cannot continue without something from them (they are notified and can " +
+        "answer you privately); 'done' or 'failed' when it ends. Keep one id for one piece of work: " +
+        "omit id to start a new one and reuse the id you get back. Delegations through " +
+        "delegate_to_agent are reported for you -- do not report those again. Do not report quick " +
+        "answers; just answer.",
+      schema: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The id returned by an earlier report of the same work. Omit to start a new piece of work." },
+          status: { type: "string", enum: ["running", "waiting", "done", "failed"], description: "Where the work stands now." },
+          title: { type: "string", description: 'One short line, e.g. "Comparing three flights" or "I need your departure date".' },
+          detail: { type: "string", description: "Optional: a sentence or two more, e.g. what you found so far or exactly what you need." },
+        },
+        required: ["status", "title"],
+      },
+      execute: reportProgress,
     },
     {
       name: "post_card",
