@@ -32,13 +32,19 @@
 //     the chat or the sender don't match the binding -- a forged or
 //     misdirected release. The live wait keeps waiting; this message is
 //     left for the caller to fall through as ordinary (harmless) text.
-//   - unmatched (late or standing): a genuine release with no live wait to
-//     resolve -- either the request already timed out (the phone only
-//     answers when the app is next open, which routinely outlasts one
-//     webhook round-trip) or it's an opted-in standing push, which never
-//     had a request to begin with. Reaches onRelease() (and, via
-//     webhook.ts's onLatticeRelease option, a consumer's own follow-up
-//     logic) instead of being silently dropped.
+//   - unmatched (late or standing): a release-shaped message with no live
+//     wait to resolve -- either a genuinely late reply (the request already
+//     timed out; the phone only answers when the app is next open, which
+//     routinely outlasts one webhook round-trip) or an opted-in standing
+//     push, which never had a request to begin with. Unlike "matched",
+//     THIS module never authenticates who sent it -- lattice.ts has no
+//     REST client and no concept of a grant. Reaches onRelease() (raw,
+//     unverified) and, via webhook.ts's onLatticeRelease option, a
+//     consumer's own follow-up logic -- webhook.ts is what verifies the
+//     sender is human and holds a live grant (and, for standing, that it's
+//     the grant named) before that option ever fires, dropping and logging
+//     otherwise. Reaching onRelease/onLatticeRelease at all is not itself a
+//     trust signal.
 
 import { newUlid, sameId, ULID_RE, type SaltId } from "./ids.js";
 
@@ -148,6 +154,32 @@ function isPrimitive(value: unknown): value is string | number | boolean | null 
   return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
+/** A single release's fact count is capped here -- not rejected outright,
+ *  just bounded, since an over-long but otherwise well-formed release isn't
+ *  a protocol violation the way a malformed entry is (see normalizeFact). */
+export const MAX_FACTS_PER_RELEASE = 200;
+/** A fact's string value is capped to this many characters, after marker
+ *  stripping (see sanitizeFactValue) -- bounds how much untrusted text from
+ *  the other end of the wire can reach a model in one fact. */
+export const MAX_FACT_VALUE_LENGTH = 2_000;
+
+// Every wire marker this SDK recognizes starts with this exact two-bracket
+// prefix, anchored at the very start of a plaintext (see the *_MARKER_RE
+// definitions above -- none of them carry the `m` flag). A fact's value is
+// untrusted content from the other end of the wire; without this, a value
+// containing literal "[[SALT-...]]" text could later start some OTHER
+// outbound message built by echoing the fact back (e.g. "the person's
+// favorite cuisine is <value>") and be mistaken for a genuine protocol
+// marker by whatever receives it. Breaks the bracket pair rather than
+// deleting the text outright, so the value stays legible.
+const MARKER_TEXT_RE = /\[\[SALT-/g;
+
+function sanitizeFactValue(value: string | number | boolean | null): string | number | boolean | null {
+  if (typeof value !== "string") return value;
+  const stripped = value.replace(MARKER_TEXT_RE, "[SALT-");
+  return stripped.length > MAX_FACT_VALUE_LENGTH ? stripped.slice(0, MAX_FACT_VALUE_LENGTH) : stripped;
+}
+
 function normalizeFact(raw: unknown): LatticeFact | null {
   if (!raw || typeof raw !== "object") return null;
   const f = raw as Record<string, unknown>;
@@ -155,7 +187,7 @@ function normalizeFact(raw: unknown): LatticeFact | null {
   if (typeof f.author !== "string" || !FACT_AUTHORS.has(f.author)) return null;
   if (typeof f.updated !== "number") return null;
   if (!isPrimitive(f.value)) return null;
-  return { path: f.path, type: f.type, field: f.field, value: f.value, author: f.author as "you" | "agent", updated: f.updated };
+  return { path: f.path, type: f.type, field: f.field, value: sanitizeFactValue(f.value), author: f.author as "you" | "agent", updated: f.updated };
 }
 
 function normalizeReleaseBody(parsed: unknown): ReleaseBody | null {
@@ -168,7 +200,7 @@ function normalizeReleaseBody(parsed: unknown): ReleaseBody | null {
     if (!fact) return null;
     facts.push(fact);
   }
-  const body: ReleaseBody = { facts };
+  const body: ReleaseBody = { facts: facts.slice(0, MAX_FACTS_PER_RELEASE) };
   if (typeof obj.request_id === "string") body.request_id = obj.request_id;
   if (typeof obj.grant_id === "string") body.grant_id = obj.grant_id;
   if (typeof obj.since_seq === "number") body.since_seq = obj.since_seq;
@@ -185,7 +217,13 @@ function normalizeReleaseBody(parsed: unknown): ReleaseBody | null {
  * "always a reply to a request id" unless it's a standing push, so anything
  * else is out-of-protocol. Deliberate in all these cases: it's safer to let
  * a corrupt or nonsensical release fall through as ordinary (harmless)
- * message text than to silently act on it.
+ * message text than to silently act on it. A standing push's marker-line
+ * `standing=<grant id>` and its body's `grant_id` must name the SAME grant
+ * -- PROTOCOL.md's own example shows them matching, and disagreeing values
+ * are simply invalid rather than a case to guess between (whoever
+ * eventually checks `grant_id` against this agent's actual grants -- see
+ * webhook.ts's onLatticeRelease verification -- must be checking the one
+ * value the marker itself also claims).
  */
 export function parseRelease(plaintext: string): { id: string; standing?: string; body: ReleaseBody } | null {
   const match = RELEASE_MARKER_RE.exec(plaintext);
@@ -200,7 +238,7 @@ export function parseRelease(plaintext: string): { id: string; standing?: string
   const body = normalizeReleaseBody(parsed);
   if (!body) return null;
   if (standing) {
-    if (!body.grant_id) return null;
+    if (!body.grant_id || !sameId(body.grant_id, standing)) return null;
     return { id, standing, body };
   }
   if (!body.request_id) return null;
@@ -292,6 +330,15 @@ const releaseHandlers = new Set<ReleaseHandler>();
  * Subscribes to releases that arrive with nothing waiting on them: a late
  * reply (the request already timed out) or a standing push (there was
  * never a request to begin with). Returns an unsubscribe function.
+ *
+ * UNVERIFIED: lattice.ts has no REST client and no concept of a grant, so a
+ * handler here fires for ANY sender in ANY chat with no check that they
+ * actually hold a live grant to this agent. webhook.ts's `onLatticeRelease`
+ * option is the verified, recommended path for exactly this case (it
+ * fetches this agent's live grants and checks the sender is human and,
+ * for a standing push, that `grant_id` names one, before ever calling your
+ * handler) -- reach for this lower-level hook only if you're bypassing
+ * webhook.ts entirely, and do your own equivalent check.
  *
  * A handler may be async. Either a synchronous throw or a rejected promise
  * is swallowed -- like every other fire-and-forget hook in this SDK, a bug
