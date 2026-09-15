@@ -16,6 +16,7 @@ import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import { encryptWalletPayload } from "./crypto";
 import * as delegations from "./delegations";
+import * as lattice from "./lattice";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 
@@ -295,6 +296,97 @@ export function createActions(options: ActionsOptions) {
     };
   }
 
+  // --- Lattice: request_personal_data / propose_personal_fact / list_personal_data_access ---
+  // See ../../salt-lattice/docs/PROTOCOL.md. Rules decide access; no model
+  // is ever in the loop for a release decision -- these tools only send the
+  // ask and report whatever the phone chose to send back (or nothing).
+
+  async function requestPersonalData(
+    caller: AgentIdentity,
+    input: { purpose: string; asks: string[] },
+    ctx: ActionContext
+  ) {
+    if (ctx.mainChatId == null) throw new Error("request_personal_data is only available while replying in a chat.");
+    const purpose = (input.purpose || "").trim();
+    const asks = Array.isArray(input.asks) ? input.asks.filter((a) => typeof a === "string" && a.trim()) : [];
+    if (!purpose || asks.length === 0) throw new Error("purpose and at least one ask are both required.");
+
+    const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
+    // A group chat never receives personal data (PROTOCOL.md R6) -- the
+    // person's phone opens a private sidechain with this agent and answers
+    // there instead, invisible to the room. This tool still sends the
+    // request into the current chat either way (the phone is what decides
+    // where the reply actually goes); the group/1:1 distinction only
+    // changes what a "pending" result tells the calling model to expect.
+    const isGroup = members.length > 2;
+    const recipientKeys = members
+      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
+      .map((u) => u.public_key as string);
+    if (recipientKeys.length === 0) throw new Error("No recipient with a usable key in this chat.");
+
+    const { id, text } = lattice.buildRequest({ purpose, asks });
+    const recipientMessage = await pgp.encryptFor(text, recipientKeys);
+    const senderMessage = await pgp.encryptFor(text, [caller.publicKey]);
+
+    const waitForRelease = lattice.register(id, { timeoutMs: lattice.LATTICE_REQUEST_TIMEOUT_MS });
+    try {
+      await client.postMessage(caller.apiKey, ctx.mainChatId, recipientMessage, senderMessage);
+    } catch (err) {
+      lattice.cancel(id);
+      throw err;
+    }
+
+    try {
+      const body = await waitForRelease;
+      client.trackEvent(caller.apiKey, "lattice_request_released", { asks_count: asks.length });
+      return { status: "released", facts: body.facts };
+    } catch {
+      // Expected, not a failure: PROTOCOL.md says the phone only answers
+      // when the app is next open, which routinely outlasts this wait.
+      client.trackEvent(caller.apiKey, "lattice_request_pending", { asks_count: asks.length });
+      return {
+        status: "pending",
+        request_id: id,
+        hint: isGroup
+          ? "The person will answer privately in a side-lane with you, not in this group -- their phone opens it. You'll get a message there when they next open Salt; wait for it before continuing this part of the task."
+          : "The person's phone answers when they next open Salt; you will get a message then.",
+      };
+    }
+  }
+
+  async function proposePersonalFact(
+    caller: AgentIdentity,
+    input: { proposals: Array<{ type: string; parent_name?: string; fields: Record<string, unknown> }> },
+    ctx: ActionContext
+  ) {
+    if (ctx.mainChatId == null) throw new Error("propose_personal_fact is only available while replying in a chat.");
+    const proposals = Array.isArray(input.proposals) ? input.proposals : [];
+    if (proposals.length === 0) throw new Error("proposals is required.");
+
+    const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
+    const recipientKeys = members
+      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
+      .map((u) => u.public_key as string);
+    if (recipientKeys.length === 0) throw new Error("No recipient with a usable key in this chat.");
+
+    const text = lattice.buildProposal(proposals);
+    const recipientMessage = await pgp.encryptFor(text, recipientKeys);
+    const senderMessage = await pgp.encryptFor(text, [caller.publicKey]);
+    await client.postMessage(caller.apiKey, ctx.mainChatId, recipientMessage, senderMessage);
+
+    client.trackEvent(caller.apiKey, "lattice_proposal_sent", { proposal_count: proposals.length });
+    return {
+      proposed: true,
+      count: proposals.length,
+      note: "Lands pending in the person's Lattice for them to review -- you won't be told whether they accept it, so don't act as though it's already true.",
+    };
+  }
+
+  async function listPersonalDataAccess(caller: AgentIdentity) {
+    const [grants, schema] = await Promise.all([client.getLatticeGrants(caller.apiKey), client.getLatticeSchema(caller.apiKey)]);
+    return { grants, schema };
+  }
+
   // --- post_card / update_card ------------------------------------------
 
   async function postCard(caller: AgentIdentity, input: { text?: string; blocks: unknown[] }, ctx: ActionContext) {
@@ -570,6 +662,78 @@ export function createActions(options: ActionsOptions) {
         required: ["target_agent_id", "task"],
       },
       execute: delegateToAgent,
+    },
+    {
+      name: "list_personal_data_access",
+      description:
+        "See what personal data you're allowed to ask the person for, from Lattice (their private, " +
+        "on-device knowledge graph). Returns your own Lattice grants -- rules naming compartments and " +
+        "fields, each marked auto (answered immediately) or ask (the person is prompted), plus whether " +
+        "you have standing (ongoing) access -- and the full closed schema of every Lattice type/field " +
+        "name that can ever exist. The EXACT selector strings for request_personal_data's `asks` and the " +
+        "EXACT type names for propose_personal_fact's `proposals` come from here. Call this first if " +
+        "you're not sure what you're allowed to ask about; you have no access at all until a grant exists.",
+      schema: { type: "object", properties: {} },
+      execute: listPersonalDataAccess,
+    },
+    {
+      name: "request_personal_data",
+      description:
+        "Ask the person for personal facts from Lattice that your grant allows (see " +
+        "list_personal_data_access for the exact field names) -- e.g. a food preference or a scheduling " +
+        "constraint. You may only ask for what your grant actually names; asking for more isn't an " +
+        "error, the extra is just silently absent from what comes back. Rules decide what's released, " +
+        "never you -- some fields answer immediately, others prompt the person first. In a GROUP chat " +
+        "the person answers privately in a side-lane with you, never in the room. Answers can take a " +
+        "while (the phone only answers when the person next opens Salt), so a 'pending' result is " +
+        "normal, not a failure -- if you get one, tell the person you'll follow up once you hear back, " +
+        "and don't ask again for the same thing in the meantime. NEVER invent, assume, or state a fact " +
+        "you didn't actually receive back from this tool.",
+      schema: {
+        type: "object",
+        properties: {
+          purpose: { type: "string", description: "One plain sentence explaining why you're asking -- shown to the person before they decide." },
+          asks: {
+            type: "array",
+            description:
+              'Field selectors, e.g. "preferences.food.cuisine.*" or "preferences.food.restriction.strength" -- ' +
+              "use ONLY names that appear in your grant or its schema types (list_personal_data_access).",
+            items: { type: "string" },
+          },
+        },
+        required: ["purpose", "asks"],
+      },
+      execute: requestPersonalData,
+    },
+    {
+      name: "propose_personal_fact",
+      description:
+        "Suggest a new fact for the person's Lattice (their private knowledge graph) -- e.g. a " +
+        "preference you noticed while talking. This always lands PENDING for the person to review and " +
+        "accept themselves; you are never told whether they accept it, so don't treat it as already " +
+        "true. Only applied automatically if your grant explicitly trusts your writes to that " +
+        "compartment (list_personal_data_access). `type` must be one of the closed schema's exact type " +
+        "names -- an unknown type or field is silently dropped, not an error.",
+      schema: {
+        type: "object",
+        properties: {
+          proposals: {
+            type: "array",
+            description: '[{type:"preferences.food.cuisine", parent_name?:"Food", fields:{name:"Japanese", strength:0.8}}, ...]',
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string" },
+                parent_name: { type: "string" },
+                fields: { type: "object" },
+              },
+              required: ["type", "fields"],
+            },
+          },
+        },
+        required: ["proposals"],
+      },
+      execute: proposePersonalFact,
     },
     {
       name: "post_card",
