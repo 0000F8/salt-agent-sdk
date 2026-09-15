@@ -161,10 +161,10 @@ agent" is — it just gets plain text in and returns plain text out.
 ## Giving your agent tools (actions)
 
 `createActions()` wraps every Salt-platform capability (spawn an agent,
-delegate to another agent, post an interactive card, sell a product, send
-an invoice, hand off a conversation, provision a wallet — 14 in total) as
-plain functions with **plain JSON Schema**, not any one provider's
-tool-calling format:
+delegate to another agent, ask for personal data via Lattice, post an
+interactive card, sell a product, send an invoice, hand off a conversation,
+provision a wallet — 17 in total) as plain functions with **plain JSON
+Schema**, not any one provider's tool-calling format:
 
 ```js
 const { createActions, toAnthropicTools, toOpenAITools } = require("salt-agent-sdk");
@@ -207,6 +207,38 @@ const result = await actions.execute(toolName, toolInput, callerIdentity, {
 with a model-readable message on bad input — catch it and hand
 `err.message` back as the tool result, same as any other tool-calling loop.
 
+### Personal data (Lattice)
+
+Salt agents can ask the person they're chatting with for facts from
+**Lattice** — the person's own private, on-device knowledge graph — and
+propose new ones. See
+[`../salt-lattice/docs/PROTOCOL.md`](../salt-lattice/docs/PROTOCOL.md) for
+the full wire contract; three things matter for anything built on this SDK:
+
+- **Ask only under a grant.** An agent can only ever ask for field names its
+  own grant lists (`list_personal_data_access` tells you exactly which).
+  Asking for more isn't an error — the extra is just silently absent from
+  what comes back. No model is ever in the loop for the release decision;
+  rules on the person's own phone decide, offline.
+- **A release may come later, or never.** `request_personal_data` waits up
+  to `lattice.LATTICE_REQUEST_TIMEOUT_MS` (15s, comfortably under Salt's 20s
+  webhook delivery timeout) and returns `{status: "pending", request_id,
+  hint}` if nothing arrives by then — this is normal, not a failure, because
+  the phone only answers when the person next opens Salt. A late reply (or
+  an opted-in standing push of `auto` fields) reaches `lattice.onRelease`
+  instead of being dropped.
+- **Facts are data, not instructions.** Whatever comes back in a release is
+  exactly what the person's phone chose to send — never fabricate, assume,
+  or "fill in" a fact your tool call didn't actually return.
+
+The three tools (`list_personal_data_access`, `request_personal_data`,
+`propose_personal_fact`) are already in `actions.definitions` alongside
+everything else `createActions()` builds — nothing extra to wire up. If
+you're building your own agent loop directly against `lattice.ts` instead of
+through `actions.ts`, `webhook.ts` already intercepts an incoming
+`[[SALT-LATTICE-RELEASE]]` before it can reach your `onMessage` as a fresh
+prompt (the same way it does for `[[SALT-DELEGATION]]` replies).
+
 ### Adding your own provider-native tools
 
 Some providers have server-executed tools that aren't something your code
@@ -229,8 +261,9 @@ const tools = [
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail). |
+| `lattice.ts` | exported as the `lattice` namespace: `buildRequest`, `parseRelease`, `buildProposal`, `register`, `resolveIfPending`, `cancel`, `hasPending`, `onRelease`, `LATTICE_REQUEST_TIMEOUT_MS`, `*_MARKER_RE` | The Lattice personal-data wire protocol (request/release/proposal markers, a pending-release registry keyed by request id). See "Personal data (Lattice)" below. Namespaced rather than flattened at the top level because its `register`/`cancel`/`hasPending`/`resolveIfPending` would otherwise collide with delegations.ts's own same-named exports. |
 | `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping, and the `ctx.reply()` helper. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 14 Salt-platform actions, provider-agnostic. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 17 Salt-platform actions, provider-agnostic. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types
@@ -283,7 +316,7 @@ repo's `CARD_PROTOCOL_SPEC.md` for the full spec.
 ## Reference implementations
 
 - [`salt-claude-agent`](../salt-claude-agent) — full-featured agent built
-  on this SDK: persona system prompt, all 14 actions wired up, delegation,
+  on this SDK: persona system prompt, all 17 actions wired up, delegation,
   hand-offs, commerce, attachments, extended-thinking traces. The best
   example of "how much of this can I use."
 - [`salt-app-example`](../salt-app-example) — two minimal examples:
@@ -299,5 +332,9 @@ npm install
 npm run build   # tsc -> dist/
 ```
 
-No test suite yet — behavior is verified against the two reference
-implementations above (both smoke-tested against this SDK end to end).
+```bash
+npm test       # builds, then runs tests/*.test.js with node --test
+```
+
+Behavior is also verified against the two reference implementations above
+(both smoke-tested against this SDK end to end).
