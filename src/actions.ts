@@ -57,6 +57,10 @@ export interface ActionsOptions {
    * agent's own context. Defaults to a no-op.
    */
   replyTransform?: (text: string) => string;
+  /** Override for how long request_personal_data waits for a release before
+   *  reporting pending -- defaults to lattice.LATTICE_REQUEST_TIMEOUT_MS.
+   *  Exists mainly so a test isn't stuck waiting out the real 15s. */
+  latticeRequestTimeoutMs?: number;
 }
 
 // Shared block-vocabulary schema, so both card tools teach the model the
@@ -88,6 +92,7 @@ const BLOCKS_SCHEMA: JsonSchema = {
 export function createActions(options: ActionsOptions) {
   const { client, identities, pgpPassphrase, publicWebhookUrl, walletMasterKey, conciergeAgentId } = options;
   const replyTransform = options.replyTransform ?? ((text: string) => text);
+  const latticeRequestTimeoutMs = options.latticeRequestTimeoutMs ?? lattice.LATTICE_REQUEST_TIMEOUT_MS;
 
   // Generates an EVM keypair, encrypts it under walletMasterKey (no human
   // recovery phrase), and uploads it under `identity`'s own api-key. Shared
@@ -303,7 +308,7 @@ export function createActions(options: ActionsOptions) {
 
   async function requestPersonalData(
     caller: AgentIdentity,
-    input: { purpose: string; asks: string[] },
+    input: { purpose: string; asks: string[]; to_username?: string },
     ctx: ActionContext
   ) {
     if (ctx.mainChatId == null) throw new Error("request_personal_data is only available while replying in a chat.");
@@ -312,23 +317,53 @@ export function createActions(options: ActionsOptions) {
     if (!purpose || asks.length === 0) throw new Error("purpose and at least one ask are both required.");
 
     const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
-    // A group chat never receives personal data (PROTOCOL.md R6) -- the
-    // person's phone opens a private sidechain with this agent and answers
-    // there instead, invisible to the room. This tool still sends the
-    // request into the current chat either way (the phone is what decides
-    // where the reply actually goes); the group/1:1 distinction only
-    // changes what a "pending" result tells the calling model to expect.
-    const isGroup = members.length > 2;
-    const recipientKeys = members
-      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
-      .map((u) => u.public_key as string);
+
+    // Who this request is actually addressed to -- a release only ever
+    // resolves this call's wait if it comes from exactly this person, in
+    // exactly this chat (see lattice.register). A silent delegation
+    // observer is excluded: they're not a live participant to ask, the same
+    // way the rest of this codebase excludes observers from per-chat logic
+    // (1:1 reuse counting, webhook group-gating).
+    const humanRecipients = members.filter((u) => !sameId(u.id, caller.saltAppId) && u.account_type !== "Agent" && !u.observer);
+    let target: Record<string, any> | undefined;
+    if (input.to_username) {
+      target = humanRecipients.find((u) => u.username === input.to_username);
+      if (!target) throw new Error(`No person named @${input.to_username} in this chat.`);
+    } else if (humanRecipients.length === 1) {
+      target = humanRecipients[0];
+    } else if (humanRecipients.length === 0) {
+      throw new Error("No person in this chat to ask.");
+    } else {
+      throw new Error("Say who you're asking (to_username) -- there's more than one person in this chat.");
+    }
+    if (!target.public_key) throw new Error(`${target.username || target.id} has no usable key -- can't ask securely.`);
+
+    // Group/1:1 only changes what a "pending" result tells the calling
+    // model to expect (see below) -- observers don't count as "the room"
+    // for this either.
+    const isGroup = members.filter((u) => !u.observer).length > 2;
+
+    // Broadcast the request to every current member with a key, same as any
+    // other message in this chat -- NOT narrowed to `target` alone. In a
+    // group this means a bystander CAN read the request's plaintext id,
+    // purpose, and asks: PROTOCOL.md's own design has the person's phone
+    // notice this request in-room and react by opening a private sidechain
+    // (R6), which requires it to be able to decrypt the request there in
+    // the first place. That visibility is harmless: the id is not a
+    // capability by itself, because lattice.register below binds the wait
+    // to `target.id` in THIS chat specifically, and a release from anyone
+    // else (or the real answer arriving via a different chat, e.g. the
+    // sidechain the phone opens) is refused or, for the real answer,
+    // handled as a late release instead -- never silently accepted as the
+    // fast "released" path below.
+    const recipientKeys = members.filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string);
     if (recipientKeys.length === 0) throw new Error("No recipient with a usable key in this chat.");
 
     const { id, text } = lattice.buildRequest({ purpose, asks });
     const recipientMessage = await pgp.encryptFor(text, recipientKeys);
     const senderMessage = await pgp.encryptFor(text, [caller.publicKey]);
 
-    const waitForRelease = lattice.register(id, { timeoutMs: lattice.LATTICE_REQUEST_TIMEOUT_MS });
+    const waitForRelease = lattice.register(id, { chatId: ctx.mainChatId, senderId: target.id, timeoutMs: latticeRequestTimeoutMs });
     try {
       await client.postMessage(caller.apiKey, ctx.mainChatId, recipientMessage, senderMessage);
     } catch (err) {
@@ -342,7 +377,12 @@ export function createActions(options: ActionsOptions) {
       return { status: "released", facts: body.facts };
     } catch {
       // Expected, not a failure: PROTOCOL.md says the phone only answers
-      // when the app is next open, which routinely outlasts this wait.
+      // when the app is next open, which routinely outlasts this wait --
+      // and, for a group-originated request, the real answer typically
+      // arrives via a DIFFERENT chat (the sidechain the phone opened), so
+      // it will always surface this way rather than as "released" above.
+      // See webhook.ts's onLatticeRelease for how that late answer reaches
+      // a consumer.
       client.trackEvent(caller.apiKey, "lattice_request_pending", { asks_count: asks.length });
       return {
         status: "pending",
@@ -688,7 +728,8 @@ export function createActions(options: ActionsOptions) {
         "while (the phone only answers when the person next opens Salt), so a 'pending' result is " +
         "normal, not a failure -- if you get one, tell the person you'll follow up once you hear back, " +
         "and don't ask again for the same thing in the meantime. NEVER invent, assume, or state a fact " +
-        "you didn't actually receive back from this tool.",
+        "you didn't actually receive back from this tool. In a chat with more than one person, say who " +
+        "you're asking with to_username -- the answer is only ever trusted from that specific person.",
       schema: {
         type: "object",
         properties: {
@@ -699,6 +740,10 @@ export function createActions(options: ActionsOptions) {
               'Field selectors, e.g. "preferences.food.cuisine.*" or "preferences.food.restriction.strength" -- ' +
               "use ONLY names that appear in your grant or its schema types (list_personal_data_access).",
             items: { type: "string" },
+          },
+          to_username: {
+            type: "string",
+            description: "Who you're asking. Only needed when this chat has more than one person -- inferred automatically in a 1:1.",
           },
         },
         required: ["purpose", "asks"],
