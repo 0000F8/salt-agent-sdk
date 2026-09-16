@@ -617,8 +617,27 @@ export function createActions(options: ActionsOptions) {
 
     const target = await client.getAgent(caller.apiKey, agentId);
     if (!target || target.account_type !== "Agent") throw new Error(`${agentId} isn't an agent.`);
+    const handle = target.username ? `@${target.username}` : target.display_name || "another agent";
 
-    await client.handOff(caller.apiKey, ctx.mainChatId, agentId, input.reason);
+    try {
+      await client.handOff(caller.apiKey, ctx.mainChatId, agentId, input.reason);
+    } catch (err) {
+      // A refused hand-off (Salt says no, for whatever reason it has) is not
+      // a bug in this tool call -- it's an answer. Hand it back as a normal
+      // RESULT, not a throw, so the model gets one consistent instruction
+      // instead of three different guesses at what a raw error meant.
+      if (!(err instanceof SaltApiError) || (err.status !== 403 && err.status !== 422)) throw err;
+      const reason =
+        err.body && typeof err.body === "object" && typeof (err.body as { error?: unknown }).error === "string"
+          ? (err.body as { error: string }).error
+          : err.message;
+      return {
+        ok: false,
+        refused: true,
+        reason,
+        next_step: `Tell the person they can open ${handle} from Salt's agent directory and message them directly.`,
+      };
+    }
     return {
       handed_off: true,
       to: { id: target.id, username: target.username, display_name: target.display_name },
@@ -1018,7 +1037,10 @@ export function createActions(options: ActionsOptions) {
         "asked to write a briefing for them right after. Use in AUTO-mode hand-off chats when " +
         "another agent clearly serves the person better (check list_salt_agents first for a " +
         "well-rated match). ALWAYS tell the person you're handing off and why, in the same reply or " +
-        "just before. Never use this in MANUAL mode -- offer_handoff_choices is for that.",
+        "just before. Never use this in MANUAL mode -- offer_handoff_choices is for that. If Salt " +
+        "refuses the hand-off, this returns a plain result ({ok: false, refused: true, reason, " +
+        "next_step}) instead of an error -- say the reason in one sentence and follow next_step; " +
+        "don't call it a technical issue or guess at a cause.",
       schema: {
         type: "object",
         properties: {
