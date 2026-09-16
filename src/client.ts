@@ -639,6 +639,19 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", `/api/v1/chats/${chatId}/hand_off`, apiKey, { to_agent_id: toAgentId, reason });
     },
 
+    /**
+     * One step back: return the chat to whoever handed it TO the current
+     * active agent most recently (a real hop off the trail, not a fixed
+     * destination) -- salt-api's `Chat#hand_off_back!`. 422 with "Already
+     * at the start of this conversation." when there's no previous hop;
+     * callers (actions.ts's hand_back_to_concierge) fall back to something
+     * fixed in that case. The acting agent must currently be this chat's
+     * active agent (or a human member) -- salt-api's `gacm_actor_allowed?`.
+     */
+    async handBack(apiKey: string, chatId: SaltId): Promise<unknown> {
+      return request("POST", `/api/v1/chats/${chatId}/hand_off/back`, apiKey);
+    },
+
     /** Ephemeral "is typing" ping. Fire-and-forget by design -- a failed ping must never block a reply. */
     async signalTyping(apiKey: string, chatId: SaltId): Promise<void> {
       try {
