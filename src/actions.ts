@@ -640,8 +640,9 @@ export function createActions(options: ActionsOptions) {
     }
     return {
       handed_off: true,
+      handedOff: true,
       to: { id: target.id, username: target.username, display_name: target.display_name },
-      note: "They're live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Your current reply is just the goodbye: one short sentence telling the person who's taking over.",
+      note: "They're live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Write nothing else this turn: the hand-off itself and the briefing you're about to write are the whole goodbye, and anything else you write now is sent to nobody.",
     };
   }
 
@@ -658,8 +659,9 @@ export function createActions(options: ActionsOptions) {
       await client.handBack(caller.apiKey, ctx.mainChatId);
       return {
         handed_off: true,
+        handedOff: true,
         to: "previous",
-        note: "They're live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Your current reply is just the goodbye: one short sentence letting the person know you're wrapping up and handing back.",
+        note: "They're live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Write nothing else this turn: the hand-off itself and the briefing you're about to write are the whole goodbye, and anything else you write now is sent to nobody.",
       };
     } catch (err) {
       if (!(err instanceof SaltApiError) || err.status !== 422) throw err;
@@ -673,8 +675,9 @@ export function createActions(options: ActionsOptions) {
     await client.handOff(caller.apiKey, ctx.mainChatId, conciergeAgentId, input.reason);
     return {
       handed_off: true,
+      handedOff: true,
       to: "concierge",
-      note: "The concierge is live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Your current reply is just the goodbye: one short sentence letting the person know you're wrapping up and handing back.",
+      note: "The concierge is live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Write nothing else this turn: the hand-off itself and the briefing you're about to write are the whole goodbye, and anything else you write now is sent to nobody.",
     };
   }
 
@@ -1036,11 +1039,14 @@ export function createActions(options: ActionsOptions) {
         "this same chat (no new chat is created), you stay in the room silently, and you'll be " +
         "asked to write a briefing for them right after. Use in AUTO-mode hand-off chats when " +
         "another agent clearly serves the person better (check list_salt_agents first for a " +
-        "well-rated match). ALWAYS tell the person you're handing off and why, in the same reply or " +
-        "just before. Never use this in MANUAL mode -- offer_handoff_choices is for that. If Salt " +
-        "refuses the hand-off, this returns a plain result ({ok: false, refused: true, reason, " +
-        "next_step}) instead of an error -- say the reason in one sentence and follow next_step; " +
-        "don't call it a technical issue or guess at a cause.",
+        "well-rated match). Never use this in MANUAL mode -- offer_handoff_choices is for that. On " +
+        "success, Salt itself posts a visible line naming the hand-off -- that seam plus the " +
+        "briefing you're asked for next ARE the goodbye, so write nothing else this turn: say " +
+        "whatever the person needs to know BEFORE calling this, in an earlier reply, never after -- " +
+        "any text you write in the same turn as a successful call is never sent. If Salt refuses " +
+        "the hand-off, this returns a plain result ({ok: false, refused: true, reason, next_step}) " +
+        "instead of an error -- say the reason in one sentence and follow next_step; don't call it a " +
+        "technical issue or guess at a cause.",
       schema: {
         type: "object",
         properties: {
@@ -1060,9 +1066,12 @@ export function createActions(options: ActionsOptions) {
         "you were brought in for: you answered their question, finished the task, hit something " +
         "outside your scope, or they signal they're done / want something else. Don't wait to be " +
         "asked -- a person who has to explicitly request 'take me back' is a failure of this tool's " +
-        "whole point. Same mechanics as hand_off_to_agent: you stay in the room silently, and " +
-        "you'll be asked to write a briefing right after. AUTO-mode hand-off chats only -- in " +
-        "MANUAL mode, tell the person they can jump back to the concierge from chat info themselves.",
+        "whole point. Same mechanics as hand_off_to_agent: you stay in the room silently, you'll be " +
+        "asked to write a briefing right after, and that briefing plus Salt's own visible hand-off " +
+        "line are the whole goodbye -- write nothing else this turn; any text you write in the same " +
+        "turn as a successful call is never sent, so say anything the person needs to hear BEFORE " +
+        "calling this, in an earlier reply. AUTO-mode hand-off chats only -- in MANUAL mode, tell the " +
+        "person they can jump back to the concierge from chat info themselves.",
       schema: {
         type: "object",
         properties: { reason: { type: "string", description: "One line on why you're handing back -- shown in the hand-off trail." } },
