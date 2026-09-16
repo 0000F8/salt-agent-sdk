@@ -299,6 +299,70 @@ test("a consult lane (no non-observer human) keeps the old runaway-reply cap reg
   assert.strictEqual(onMessageCalls, 3, "the consult lane's higher runaway cap (20) still governs -- no mention needed");
 });
 
+// --- bonus: onHandoffConfirmed gets ctx.session too ------------------------
+// (found while wiring the host: HandoffConfirmedContext had no `session`,
+// unlike chat_opened/invoice_paid/handoff_received, so a briefing composed
+// from it had no transcript to draw on -- brought it in line with the rest.)
+
+test("onHandoffConfirmed's ctx.session carries the prior transcript tail (cold-start rebuild), and the briefing reply is persisted to it", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass6");
+  const AGENT_ID = "70000000-0000-0000-0000-0000000000a6";
+  const ROOM_ID = "room-confirmed-1";
+
+  const store = sdk.createIdentityStore(tempStore("salt-handoff-confirmed-session-"));
+  store.register({ saltAppId: AGENT_ID, username: "outgoing", apiKey: "key-agent6", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  const priorArmored = await encryptFor("what's my order status?", agentKeys.publicKey);
+  const sessionStore = sdk.MemorySessionStore();
+  const api = {
+    async getWebhookSecret(apiKey) {
+      return apiKey === "key-agent6" ? "secret-agent6" : undefined;
+    },
+    async getChatMembers() {
+      return [human("human-1", "dan"), bot(AGENT_ID, "outgoing")];
+    },
+    // Nothing in the session store yet -- this is a cold start, so
+    // loadOrRebuildSession must rebuild transcriptTail from chat history.
+    async getChatMessages() {
+      return [{ event_type: null, message: priorArmored, user: { id: "human-1", username: "dan" }, created_at: new Date().toISOString() }];
+    },
+    async postMessage() {
+      return {};
+    },
+    async signalTyping() {},
+    trackEvent() {},
+  };
+
+  let seenTail = null;
+  const server = sdk.createWebhookServer({
+    client: api,
+    identities: store,
+    pgpPassphrase: "agent-pass6",
+    logger: silent,
+    sessionStore,
+    async onHandoffConfirmed(ctx) {
+      seenTail = ctx.session.transcriptTail.map((turn) => [turn.role, turn.content]);
+      await ctx.reply(`${sdk.HANDOFF_BRIEFING_MARKER}\nDan is asking about an order.`);
+    },
+  });
+  const listening = server.app.listen(0);
+  t.after(() => listening.close());
+  const port = listening.address().port;
+
+  const res = await signedPost(port, { type: "handoff_confirmed", from_agent_id: AGENT_ID, chat_id: ROOM_ID, reason: "out of scope" }, AGENT_ID, "secret-agent6");
+  assert.equal(res.status, 200);
+  await new Promise((r) => setTimeout(r, 200));
+
+  assert.ok(seenTail, "onHandoffConfirmed ran");
+  assert.deepStrictEqual(seenTail, [["user", "what's my order status?"]]);
+
+  const persisted = await sessionStore.get(AGENT_ID, ROOM_ID);
+  assert.ok(persisted, "the outgoing identity's own session for this room was persisted");
+  const lastTurn = persisted.transcriptTail[persisted.transcriptTail.length - 1];
+  assert.strictEqual(lastTurn.role, "assistant");
+  assert.match(lastTurn.content, /Dan is asking about an order\./);
+});
+
 // --- item 3: a successful hand-off result carries handedOff: true ---------
 
 test("hand_off_to_agent and hand_back_to_concierge results carry handedOff: true on success", async () => {

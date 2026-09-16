@@ -173,6 +173,13 @@ export interface HandoffConfirmedContext {
    *  hand_off_to_agent/hand_back_to_concierge: the consult lane's decrypted
    *  transcript so far (capped), for the briefing to draw on. */
   consultTranscript?: string;
+  /** This identity's memory of `chatId` (see MessageContext.session): the
+   *  tail and note it built up while it was the active agent here, so a
+   *  briefing composed from it isn't starting cold. Whatever you reply()
+   *  with (the briefing) is appended as an assistant turn and persisted --
+   *  moot once you've handed off, but there if you're ever handed this
+   *  chat again later. */
+  session: Session;
   reply(text: string): Promise<void>;
 }
 
@@ -1096,26 +1103,27 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       }
     }
 
+    const session = await loadOrRebuildSession(identity, chatId);
+
     // Appends the outgoing session's note (if any) as the briefing's final
     // wire-protocol line -- see sessions.ts's SESSION_NOTE_MARKER and
     // handleHandoffReceived below, which parses it back out on the other
     // end. Transparent to the consumer: whatever text they reply() with is
-    // what a human sees; this just rides along after it.
+    // what a human sees; this just rides along after it. Reads `session.note`
+    // directly rather than re-fetching -- the same object ctx.session is, so
+    // a handler that wrote to it before calling reply() is picked up.
+    const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId);
     const reply = async (text: string): Promise<void> => {
-      let noteLine: string | undefined;
-      try {
-        const session = await sessionStore.get(identity.saltAppId, chatId);
-        noteLine = sessions.formatSessionNoteLine(session?.note);
-      } catch (err) {
-        logger.error(`[chat ${chatId}] reading session for hand-off note failed: ${(err as Error).message}`);
-      }
+      repliesForSession.push(text);
+      const noteLine = sessions.formatSessionNoteLine(session.note);
       await baseReply(noteLine ? `${text}\n${noteLine}` : text);
     };
 
-    const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, consultTranscript, reply };
+    const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, consultTranscript, session, reply };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
+      await persistSessionAfterReply(identity.saltAppId, chatId, session, repliesForSession);
     } catch (err) {
       logger.error(`[chat ${chatId}] onHandoffConfirmed failed: ${(err as Error).message}`);
     }
