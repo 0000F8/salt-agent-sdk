@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ethers } from "ethers";
-import type { SaltClient } from "./client";
+import { SaltApiError, type SaltClient } from "./client";
 import * as pgp from "./crypto";
 import { encryptWalletPayload } from "./crypto";
 import * as delegations from "./delegations";
@@ -628,6 +628,26 @@ export function createActions(options: ActionsOptions) {
 
   async function handBackToConcierge(caller: AgentIdentity, input: { reason?: string }, ctx: ActionContext) {
     if (ctx.mainChatId == null) throw new Error("hand_back_to_concierge is only available while replying in a chat.");
+
+    // A real one step back: whoever handed THIS chat to you, which on a
+    // Concierge -> A -> B chain is A, not the fixed concierge id -- a fixed
+    // destination would skip A entirely. Only when there is no previous hop
+    // (this identity is the FIRST agent in the chat, or the trail runs out)
+    // does salt-api answer 422, and only then do we fall back to a fixed
+    // destination at all.
+    try {
+      await client.handBack(caller.apiKey, ctx.mainChatId);
+      return {
+        handed_off: true,
+        to: "previous",
+        note: "They're live in this chat now; you'll be prompted SEPARATELY to write them a briefing -- do NOT include any briefing or summary in your current reply. Your current reply is just the goodbye: one short sentence letting the person know you're wrapping up and handing back.",
+      };
+    } catch (err) {
+      if (!(err instanceof SaltApiError) || err.status !== 422) throw err;
+      // "Already at the start of this conversation." -- nowhere further
+      // back to go, so fall through to the configured front door below.
+    }
+
     if (!conciergeAgentId) throw new Error("No concierge is configured on this server.");
     if (sameId(conciergeAgentId, caller.saltAppId)) throw new Error("You already are the concierge.");
 

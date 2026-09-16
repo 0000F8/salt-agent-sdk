@@ -106,6 +106,12 @@ export interface CardInteractionContext {
   actionId: string;
   user: RawSender;
   blocks: unknown;
+  /** This identity's memory of `chatId` (see MessageContext.session). Loaded
+   *  before this handler runs, same as everywhere else -- but there's no
+   *  reply() here (a card update IS the response), so nothing is appended
+   *  or persisted afterward. Read it; write session.note if you want, but
+   *  know it won't be saved from this call. */
+  session: Session;
 }
 
 export interface InvoicePaidContext {
@@ -117,6 +123,8 @@ export interface InvoicePaidContext {
   /** True for a "Credits top-up" invoice -- no delivery owed, the credit already landed server-side. */
   isTopUp: boolean;
   transferRequestId: SaltId;
+  /** This identity's memory of `chatId` (see MessageContext.session). Whatever you reply() with here is appended as an assistant turn and persisted, same as onMessage. */
+  session: Session;
   reply(text: string): Promise<void>;
 }
 
@@ -149,6 +157,8 @@ export interface ChatOpenedContext {
   /** Every current member, including this identity's own account. */
   members: ChatOpenedMember[];
   openedAt: string;
+  /** This identity's memory of `chatId` (see MessageContext.session). Whatever you reply() with here (e.g. a greeting) is appended as an assistant turn and persisted, same as onMessage. */
+  session: Session;
   /** Encrypts `text` for every current chat member (+ this identity's own
    *  copy) and posts it -- the same closure every other context type gets. */
   reply(text: string): Promise<void>;
@@ -173,6 +183,12 @@ export interface HandoffReceivedContext {
   /** The shared chat's decrypted transcript, polled for up to ~20s until
    *  the outgoing agent's HANDOFF_BRIEFING_MARKER shows up (or timeout). */
   context: string;
+  /** This identity's memory of `chatId`, seeded from the outgoing agent's
+   *  session note (see sessions.ts's SESSION_NOTE_MARKER) when the briefing
+   *  carried one. Whatever you reply() with here (your introduction) is
+   *  appended as an assistant turn and persisted, so it's already in
+   *  transcriptTail by the time the next onMessage call for this chat runs. */
+  session: Session;
   reply(text: string): Promise<void>;
 }
 
@@ -542,6 +558,31 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     return session;
   }
 
+  // Appends each of `repliesForSession` to `session` as an assistant turn,
+  // bounds the note, and persists -- shared by every context type that has
+  // a reply() worth remembering (onMessage additionally appends its own
+  // incoming "user" turn first; see handleMessage, which does that inline
+  // since it's the only one with an incoming turn to record at all). Never
+  // throws: a persistence failure here must not turn into an unhandled
+  // rejection on top of a webhook handler that already ran successfully.
+  async function persistSessionAfterReply(
+    identityId: SaltId,
+    chatId: SaltId,
+    session: Session,
+    repliesForSession: string[]
+  ): Promise<void> {
+    try {
+      for (const replyText of repliesForSession) {
+        sessions.appendTurn(session, { role: "assistant", content: replyText, at: Date.now() });
+      }
+      session.note = sessions.boundNote(session.note);
+      session.updatedAt = Date.now();
+      await sessionStore.put(identityId, chatId, session);
+    } catch (err) {
+      logger.error(`[session] persisting ${chatId} failed: ${(err as Error).message}`);
+    }
+  }
+
   // The consult lane's own transcript, for a hand-off briefing that was
   // triggered by a request_floor call rather than chosen by a model turn --
   // see handleHandoffConfirmed. Capped to the last few exchanges; a consult
@@ -870,6 +911,9 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   }): Promise<void> {
     const identity = identities.get(String(body.owner_id));
     if (!identity || !options.onCardInteraction) return;
+    // No reply() on this context (a card update IS the response), so just
+    // load -- nothing new here to append or persist afterward.
+    const session = await loadOrRebuildSession(identity, body.chat_id);
     try {
       await options.onCardInteraction({
         identity,
@@ -878,6 +922,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
         actionId: body.action_id,
         user: body.user,
         blocks: body.state?.blocks,
+        session,
       });
     } catch (err) {
       logger.error(`[chat ${body.chat_id}] onCardInteraction failed: ${(err as Error).message}`);
@@ -896,6 +941,15 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const identity = identities.get(String(body.seller_id));
     if (!identity || !body.chat_id || !options.onInvoicePaid) return;
     const chatId = body.chat_id;
+
+    const session = await loadOrRebuildSession(identity, chatId);
+    const repliesForSession: string[] = [];
+    const baseReply = makeReply(identity, chatId);
+    const trackedReply = async (text: string): Promise<void> => {
+      repliesForSession.push(text);
+      await baseReply(text);
+    };
+
     const ctx: InvoicePaidContext = {
       identity,
       chatId,
@@ -904,10 +958,12 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       amount: body.amount,
       isTopUp: !!body.billing_account_id,
       transferRequestId: body.transfer_request_id,
-      reply: makeReply(identity, chatId),
+      session,
+      reply: trackedReply,
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
+      await persistSessionAfterReply(identity.saltAppId, chatId, session, repliesForSession);
     } catch (err) {
       logger.error(`[chat ${chatId}] onInvoicePaid failed: ${(err as Error).message}`);
     }
@@ -948,6 +1004,14 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
 
     if (alreadyGreeted(identity.saltAppId, chatId)) return;
 
+    const session = await loadOrRebuildSession(identity, chatId, chat);
+    const repliesForSession: string[] = [];
+    const baseReply = makeReply(identity, chatId);
+    const trackedReply = async (text: string): Promise<void> => {
+      repliesForSession.push(text);
+      await baseReply(text);
+    };
+
     const ctx: ChatOpenedContext = {
       identity,
       chatId,
@@ -955,10 +1019,12 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       openedBy: body.opened_by as RawSender,
       members: body.members || [],
       openedAt: body.opened_at as string,
-      reply: makeReply(identity, chatId),
+      session,
+      reply: trackedReply,
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
+      await persistSessionAfterReply(identity.saltAppId, chatId, session, repliesForSession);
     } catch (err) {
       logger.error(`[chat ${chatId}] onChatOpened failed: ${(err as Error).message}`);
     }
@@ -1025,27 +1091,46 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    // The outgoing agent's session note, if its briefing carried one --
-    // seeds this identity's own session for `chatId` so it picks up
-    // whatever goal/waitingOn/consulted state the previous agent had.
+    // Seed this identity's own session for `chatId` from whatever's already
+    // stored (a fresh one if nothing is), fold in the outgoing agent's note
+    // if the briefing carried one, and persist that much right away --
+    // independent of whether onHandoffReceived itself succeeds below, same
+    // as before this session had a `session` field on its ctx at all.
     // Stripped from `context` either way: wire protocol, never something
     // the incoming agent's own prompt-building should see verbatim.
+    let session: Session;
+    try {
+      session = (await sessionStore.get(identity.saltAppId, chatId)) ?? sessions.emptySession(chatId, chatId);
+    } catch (err) {
+      logger.error(`[session] loading ${chatId} failed: ${(err as Error).message}`);
+      session = sessions.emptySession(chatId, chatId);
+    }
     const note = sessions.extractSessionNote(context);
     if (note) {
+      session.note = sessions.boundNote(note);
+      session.updatedAt = Date.now();
       try {
-        const existing = (await sessionStore.get(identity.saltAppId, chatId)) ?? sessions.emptySession(chatId, chatId);
-        existing.note = sessions.boundNote(note);
-        existing.updatedAt = Date.now();
-        await sessionStore.put(identity.saltAppId, chatId, existing);
+        await sessionStore.put(identity.saltAppId, chatId, session);
       } catch (err) {
         logger.error(`[session] persisting handed-off note for ${chatId} failed: ${(err as Error).message}`);
       }
     }
     context = sessions.stripSessionNoteLines(context);
 
-    const ctx: HandoffReceivedContext = { identity, chatId, reason: body.reason, context, reply: makeReply(identity, chatId) };
+    // Whatever the introduction reply() sends here is appended below,
+    // exactly like onMessage does for its own reply -- so it's already in
+    // transcriptTail the next time this chat's onMessage runs.
+    const repliesForSession: string[] = [];
+    const baseReply = makeReply(identity, chatId);
+    const trackedReply = async (text: string): Promise<void> => {
+      repliesForSession.push(text);
+      await baseReply(text);
+    };
+
+    const ctx: HandoffReceivedContext = { identity, chatId, reason: body.reason, context, session, reply: trackedReply };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
+      await persistSessionAfterReply(identity.saltAppId, chatId, session, repliesForSession);
     } catch (err) {
       logger.error(`[chat ${chatId}] onHandoffReceived failed: ${(err as Error).message}`);
     }

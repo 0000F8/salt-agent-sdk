@@ -292,6 +292,13 @@ possible), incoming ciphertext can decrypt under more than one of them.
 for), falling back to trial decryption only when the header is absent or
 names an identity this process doesn't host.
 
+**`hand_back_to_concierge` is a real one step back**, not always a jump to a
+fixed destination: it calls `client.handBack` (salt-api's
+`POST /chats/:id/hand_off/back`) first, so on a Concierge → A → B chain, B's
+hand-back returns to A, not straight past it. Only when there's no previous
+hop (a 422, "Already at the start of this conversation.") does it fall back
+to the configured `conciergeAgentId`, same as before.
+
 **Hand-offs carry the note forward**: `hand_off_to_agent` /
 `hand_back_to_concierge` / an automatic hand-off from `request_floor` (below)
 all append a final `[[SALT-SESSION-NOTE]] <compact JSON>` line to whatever
@@ -361,19 +368,21 @@ optional callback — only implement the ones you need:
   `attachment?`, `reply(text)`.
 - **`onCardInteraction(ctx)`** — a member tapped a button on a card you
   posted. `ctx`: `identity`, `chatId`, `cardId`, `actionId`, `user`,
-  `blocks`. No `reply()` — respond by calling `client.updateCard`
-  yourself; the card update *is* the response.
+  `blocks`, `session` (loaded, but there's no `reply()` here to capture —
+  a card update *is* the response, so nothing is persisted from this call
+  even if you write to `session.note`). Respond by calling
+  `client.updateCard` yourself.
 - **`onInvoicePaid(ctx)`** — an invoice you issued got paid; this is your
   fulfillment trigger. `ctx`: `identity`, `chatId`, `buyer`, `lineItems`,
-  `amount`, `isTopUp`, `transferRequestId`, `reply(text)`.
+  `amount`, `isTopUp`, `transferRequestId`, `session`, `reply(text)`.
 - **`onChatOpened(ctx)`** — a person (or another agent — see
   `openedBy.account_type`) newly opened a 1:1 with you, created a group that
   includes you, or added you to one. `ctx`: `identity`, `chatId`, `chat`,
-  `openedBy`, `members`, `openedAt`, `reply(text)`. Delivery can be retried,
-  but the SDK already dedupes by identity+chat, so your handler runs at most
-  once per opening — a multi-instance deployment (more than one process
-  behind the same webhook URL) should still dedupe on its own, since this
-  guard is in-process only.
+  `openedBy`, `members`, `openedAt`, `session`, `reply(text)`. Delivery can
+  be retried, but the SDK already dedupes by identity+chat, so your handler
+  runs at most once per opening — a multi-instance deployment (more than
+  one process behind the same webhook URL) should still dedupe on its own,
+  since this guard is in-process only.
 - **`onHandoffConfirmed(ctx)`** — you just handed a chat off; write a
   briefing for the incoming agent. `ctx`: `identity`, `chatId`, `reason?`,
   `consultTranscript?` (set only when this hand-off was triggered
@@ -386,7 +395,13 @@ optional callback — only implement the ones you need:
 - **`onHandoffReceived(ctx)`** — a chat was just handed to you; introduce
   yourself. `ctx`: `identity`, `chatId`, `reason?`, `context` (the shared
   chat's transcript, already polled for the outgoing agent's briefing),
-  `reply(text)`.
+  `session` (seeded from the outgoing agent's session note, when its
+  briefing carried one), `reply(text)`.
+
+Every context above except `onCardInteraction` carries `session`, and
+whatever you `reply()` with is appended as an assistant turn and persisted
+after your handler returns — by the next `onMessage` call for that chat,
+it's already in `session.transcriptTail`.
 
 All Salt-protocol decisions about *whether* a given event reaches your
 callback at all — dedup, GACM active-agent gating, the Mediator's
