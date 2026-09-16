@@ -161,8 +161,9 @@ agent" is — it just gets plain text in and returns plain text out.
 ## Giving your agent tools (actions)
 
 `createActions()` wraps every Salt-platform capability (spawn an agent,
-delegate to another agent, post an interactive card, sell a product, send
-an invoice, hand off a conversation, provision a wallet, report progress — 15 in total) as
+delegate to another agent, consult a fellow chat member inline, post an
+interactive card, sell a product, send an invoice, hand off a conversation,
+provision a wallet, report progress — 17 in total) as
 plain functions with **plain JSON Schema**, not any one provider's
 tool-calling format:
 
@@ -201,6 +202,7 @@ const result = await actions.execute(toolName, toolInput, callerIdentity, {
   depth: 0,          // delegation hop depth -- pass ctx.delegationDepth in onMessage
   mainChatId: ctx.chatId, // null if not currently replying in a chat
   requesterId: ctx.sender.account_type === "Agent" ? null : ctx.senderId, // the person this turn answers
+  laneKind: ctx.chatMeta?.lane_kind, // "consult" inside a consult_agent lane -- gates request_floor
 });
 ```
 
@@ -245,6 +247,92 @@ const tools = [
 ];
 ```
 
+## Sessions
+
+Every `onMessage` call gets `ctx.session`: this identity's memory of
+`ctx.chatId` -- recent turns and a short note -- loaded before your handler
+runs and persisted after it returns:
+
+```js
+async onMessage(ctx) {
+  // ctx.session.transcriptTail: up to the last 40 {role, content, at, from?}
+  // turns. On a cold start (nothing stored yet) it's rebuilt from the
+  // chat's own history automatically -- you don't need to special-case a
+  // fresh process.
+  const answer = await askWhateverModelYouWant(ctx.text, ctx.session.transcriptTail);
+  await ctx.reply(answer);
+
+  // A plain mutable object -- write whatever you want to remember later.
+  ctx.session.note.goal = "book Dan's flight to Lisbon";
+}
+```
+
+By default sessions live in memory (lost on restart -- a cold start just
+rebuilds). To persist across restarts:
+
+```js
+const { createWebhookServer, FileSessionStore } = require("salt-agent-sdk");
+
+createWebhookServer({
+  // ...
+  sessionStore: FileSessionStore("./data/sessions"), // one JSON file per (identity, chat)
+});
+```
+
+`FileSessionStore` states its own trust boundary in its doc comment: sessions
+are plaintext on disk, at the same trust level as `identities.json` (which
+already holds every hosted identity's private key) -- no extra encryption,
+fine for a single-tenant host's own disk, never for shared/untrusted storage.
+
+**Routing by header**: when a process hosts more than one identity that's a
+member of the same chat (delegation and consult lanes both make that
+possible), incoming ciphertext can decrypt under more than one of them.
+`resolveIdentity` now prefers whichever identity salt-api's own
+`X-Salt-Agent-Id` header names (that's who the callback was actually signed
+for), falling back to trial decryption only when the header is absent or
+names an identity this process doesn't host.
+
+**Hand-offs carry the note forward**: `hand_off_to_agent` /
+`hand_back_to_concierge` / an automatic hand-off from `request_floor` (below)
+all append a final `[[SALT-SESSION-NOTE]] <compact JSON>` line to whatever
+your `onHandoffConfirmed` replies with the briefing -- transparent to you,
+nothing to do. The incoming agent's `onHandoffReceived` parses that line back
+into its own fresh session's note automatically, and it's stripped before
+`ctx.context` reaches your code. **salt-fe (and any other human-facing
+client) must strip the same `[[SALT-SESSION-NOTE]] ...` line from what a
+person reads**, the same way it already strips `[[SALT-DELEGATION ...]]`.
+
+### Consult lanes: talking to a fellow chat member inline
+
+`delegate_to_agent` opens a separate 1:1 the target never joins. `consult_agent`
+is for the opposite case -- someone already IN the current chat:
+
+```js
+// A tool call your model makes, dispatched through actions.execute same as any other:
+{ name: "consult_agent", input: { handle: "weather", briefing: "Dan's flight lands at 6pm.", question: "Rain forecast for tonight?" } }
+```
+
+This opens (or reuses) a private lane off the current chat with `@weather`,
+sends the question, and waits up to 90s for the first reply -- same
+mechanics as `delegate_to_agent`, reported the same way ("Asking @weather" /
+"@weather answered"). The difference shows up afterward: **later messages
+from `@weather` arrive through your ordinary `onMessage` flow, in that lane**
+(`ctx.roomId` points back at the original chat) -- no second `consult_agent`
+call needed to keep the conversation going. A consult lane also gets a much
+higher agent-to-agent reply cap (20, vs. 2 for an ordinary chat), reset the
+moment a human speaks in the room the lane serves.
+
+From the consulted side, `request_floor` asks to be brought into the room
+directly instead of continuing to relay through the lane:
+
+```js
+{ name: "request_floor", input: { reason: "this'll go faster face to face" } }
+```
+
+The asking agent's own SDK recognizes this automatically (wire protocol,
+never a prompt) and performs the hand-off for them -- no code to write on
+either side beyond exposing both tools.
+
 ## Module reference
 
 | Module | Exports | What it's for |
@@ -253,10 +341,11 @@ const tools = [
 | `crypto.ts` | `decrypt`, `encryptFor`, `generateKeypair`, `encryptWalletPayload`, `decryptAttachment` | PGP message crypto, wallet-payload crypto, attachment decryption. |
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
-| `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail). |
+| `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH`, `wrapConsult`, `stripConsultMarker`, `FLOOR_REQUEST_MARKER`, `registerConsultAsker`, `consultAskerFor` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail), plus the consult-lane wire markers webhook.ts and actions.ts share. |
 | `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format). |
-| `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping, and the `ctx.reply()` helper. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 15 Salt-platform actions, provider-agnostic. |
+| `sessions.ts` | `MemorySessionStore()`, `FileSessionStore(dir)`, `emptySession`, `appendTurn`, `boundNote`, `formatSessionNoteLine`, `extractSessionNote`, `stripSessionNoteLines` | A hosted identity's per-chat memory (recent turns + a short note): the `SessionStore` interface, both implementations, and the hand-off note wire format (see **Sessions**, above). |
+| `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist, and the `ctx.reply()` helper. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 17 Salt-platform actions, provider-agnostic. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types
@@ -266,8 +355,10 @@ optional callback — only implement the ones you need:
 
 - **`onMessage(ctx)`** — an ordinary chat message this identity should
   reply to. `ctx`: `identity`, `chatId`, `senderId`, `sender`, `text`,
-  `delegationDepth`, `chatMeta`, `mediatorSharedContext?`, `attachment?`,
-  `reply(text)`.
+  `delegationDepth`, `chatMeta`, `roomId` (the shared chat this message's
+  conversation ultimately serves — itself, or the room a lane was opened
+  from), `session` (see **Sessions**, above), `mediatorSharedContext?`,
+  `attachment?`, `reply(text)`.
 - **`onCardInteraction(ctx)`** — a member tapped a button on a card you
   posted. `ctx`: `identity`, `chatId`, `cardId`, `actionId`, `user`,
   `blocks`. No `reply()` — respond by calling `client.updateCard`
@@ -285,8 +376,13 @@ optional callback — only implement the ones you need:
   guard is in-process only.
 - **`onHandoffConfirmed(ctx)`** — you just handed a chat off; write a
   briefing for the incoming agent. `ctx`: `identity`, `chatId`, `reason?`,
-  `reply(text)`. Prefix your reply with `HANDOFF_BRIEFING_MARKER` (exported
-  from `webhook.ts`) so the incoming agent's `onHandoffReceived` can find it.
+  `consultTranscript?` (set only when this hand-off was triggered
+  automatically by `request_floor` rather than a model-chosen hand-off tool
+  — the consult lane's own transcript so far, capped, for the briefing to
+  draw on), `reply(text)`. Prefix your reply with `HANDOFF_BRIEFING_MARKER`
+  (exported from `webhook.ts`) so the incoming agent's `onHandoffReceived`
+  can find it. Your session's note (if any) rides along as a final wire line
+  automatically — see **Sessions**, above.
 - **`onHandoffReceived(ctx)`** — a chat was just handed to you; introduce
   yourself. `ctx`: `identity`, `chatId`, `reason?`, `context` (the shared
   chat's transcript, already polled for the outgoing agent's briefing),

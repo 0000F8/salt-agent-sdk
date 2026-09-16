@@ -34,6 +34,13 @@ export interface ActionContext {
    * agent sender, a background job, or a delegated hop.
    */
   requesterId?: SaltId | null;
+  /**
+   * `mainChatId`'s `lane_kind`, when known -- "consult" for a lane
+   * consult_agent opened (see webhook.ts's MessageContext.chatMeta). Pass
+   * `ctx.chatMeta?.lane_kind` through from onMessage. request_floor uses
+   * this to refuse outside a consult lane; leave unset anywhere else.
+   */
+  laneKind?: string | null;
 }
 
 export interface ActionDefinition<TInput = any, TOutput = any> {
@@ -344,11 +351,123 @@ export function createActions(options: ActionsOptions) {
     };
   }
 
+  // --- consult_agent -------------------------------------------------------
+  //
+  // Unlike delegate_to_agent (a separate 1:1, the target never in this
+  // chat), consult_agent stays inline: it opens a lane off the CURRENT chat
+  // with a fellow member who's already here, and later messages from that
+  // agent ride the ordinary onMessage path in that lane (ctx.roomId points
+  // back here) rather than needing another tool call. Reply-matching reuses
+  // the exact same delegations registry delegate_to_agent does.
+
+  async function consultAgent(
+    caller: AgentIdentity,
+    input: { handle: string; briefing?: string; question: string },
+    ctx: ActionContext
+  ) {
+    if (ctx.mainChatId == null) throw new Error("consult_agent is only available while replying in a chat.");
+    const handle = (input.handle || "").replace(/^@/, "").trim();
+    const briefing = (input.briefing || "").trim();
+    const question = (input.question || "").trim();
+    if (!handle || !question) throw new Error("handle and question are both required.");
+
+    const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
+    const target = members.find((m) => m.username === handle);
+    if (!target) {
+      throw new Error(`No chat member named @${handle} -- consult_agent only reaches someone already in this chat (use delegate_to_agent for anyone else).`);
+    }
+    if (sameId(target.id, caller.saltAppId)) throw new Error("You can't consult yourself.");
+    if (target.account_type !== "Agent") throw new Error(`@${handle} isn't an agent -- consult_agent only targets other agents.`);
+    if (!target.public_key) throw new Error(`@${handle} has no usable public key; can't message them securely.`);
+
+    const lane = (await client.openConsultLane(caller.apiKey, ctx.mainChatId, target.id)) as {
+      session: { id: SaltId; users?: Array<Record<string, any>> };
+    };
+    const recipientKeys = (lane.session.users || [])
+      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
+      .map((u) => u.public_key as string);
+    if (recipientKeys.length === 0) throw new Error(`@${handle} has no usable public key in the lane; can't message them securely.`);
+
+    const body = briefing ? `${briefing}\n\n${question}` : question;
+    const marked = delegations.wrapConsult(ctx.mainChatId, body);
+    const recipientMessage = await pgp.encryptFor(marked, recipientKeys);
+    const senderMessage = await pgp.encryptFor(marked, [caller.publicKey]);
+
+    // So webhook.ts's own floor-request handler knows, later, that WE are
+    // the one who should hand off if @handle asks for the floor in this lane.
+    delegations.registerConsultAsker(lane.session.id, caller.saltAppId, ctx.mainChatId);
+
+    const firstLine = (s: string) => (s || "").split("\n").find((l) => l.trim()) || "";
+    const work: Omit<WorkReport, "status" | "title" | "detail"> = { id: newWorkId(), kind: "delegation", with: target.username };
+    const atHandle = `@${target.username}`;
+
+    const waitForReply = delegations.register(lane.session.id, target.id, delegations.DELEGATION_TIMEOUT_MS);
+    try {
+      await client.postMessage(caller.apiKey, lane.session.id, recipientMessage, senderMessage);
+    } catch (err) {
+      delegations.cancel(lane.session.id);
+      throw err;
+    }
+    await reportWork(caller, ctx, { ...work, status: "running", title: `Asking ${atHandle}`, detail: firstLine(question) });
+
+    let rawReplyText: string;
+    try {
+      rawReplyText = await waitForReply; // rejects with a timeout Error if nothing arrives in time
+    } catch (err) {
+      await reportWork(caller, ctx, {
+        ...work,
+        status: "failed",
+        title: `No answer from ${atHandle}`,
+        detail: `No reply within ${Math.round(delegations.DELEGATION_TIMEOUT_MS / 1000)} s.`,
+      });
+      throw err;
+    }
+    const replyText = replyTransform(rawReplyText);
+    await reportWork(caller, ctx, { ...work, status: "done", title: `${atHandle} answered`, detail: firstLine(replyText) });
+
+    client.trackEvent(caller.apiKey, "consult_made", { to_agent_username: target.username });
+
+    return {
+      consulted: true,
+      target: { id: target.id, username: target.username, display_name: target.display_name },
+      lane_chat_id: lane.session.id,
+      reply: replyText,
+      note:
+        `${target.display_name || target.username} is answering you in a separate private lane off this chat -- ` +
+        "the person here cannot see it. Later messages from them arrive as ordinary turns in that lane (you " +
+        "don't need to call consult_agent again to keep talking); if they ask for the floor, you'll be handed off automatically.",
+    };
+  }
+
+  // --- request_floor ---------------------------------------------------------
+
+  async function requestFloor(caller: AgentIdentity, input: { reason?: string }, ctx: ActionContext) {
+    if (ctx.mainChatId == null) throw new Error("request_floor is only available while replying in a chat.");
+    if (ctx.laneKind !== "consult") {
+      throw new Error("request_floor is only available inside a consult lane (the chat a consult_agent call opened with you) -- not in an ordinary chat.");
+    }
+    const reason = (input.reason || "").trim();
+    const marker = reason ? `${delegations.FLOOR_REQUEST_MARKER}\n${reason}` : delegations.FLOOR_REQUEST_MARKER;
+
+    const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
+    const recipientKeys = members.filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string);
+    if (recipientKeys.length === 0) throw new Error("No one in this lane to ask for the floor.");
+
+    const message = await pgp.encryptFor(marker, recipientKeys);
+    const senderMessage = await pgp.encryptFor(marker, [caller.publicKey]);
+    await client.postMessage(caller.apiKey, ctx.mainChatId, message, senderMessage);
+
+    return {
+      requested: true,
+      note: "Sent. If they hand off, you'll be brought into the room directly and prompted separately to introduce yourself.",
+    };
+  }
+
   // --- report_progress --------------------------------------------------
 
   async function reportProgress(
     caller: AgentIdentity,
-    input: { id?: string; status: WorkStatus; title: string; detail?: string },
+    input: { id?: string; status: WorkStatus; title: string; detail?: string; evidence?: { transfer_id?: SaltId } },
     ctx: ActionContext
   ) {
     if (!reportTarget(ctx)) {
@@ -359,6 +478,28 @@ export function createActions(options: ActionsOptions) {
     }
     const title = (input.title || "").trim();
     if (!title) throw new Error("title is required -- one short line saying what is happening.");
+
+    // Money evidence: claiming money work "done" is only trusted with a
+    // real, CONFIRMED transfer behind it -- otherwise a report is just the
+    // model's own say-so. Only checked when evidence is actually supplied
+    // (most 'done' reports aren't about money at all); the tool description
+    // is what tells the model money work needs this.
+    const transferId = input.evidence?.transfer_id ? String(input.evidence.transfer_id).trim() : undefined;
+    if (input.status === "done" && transferId) {
+      let transfer: { status?: string };
+      try {
+        transfer = await client.getTransfer(caller.apiKey, transferId);
+      } catch (err) {
+        throw new Error(`Could not verify transfer ${transferId}: ${(err as Error).message}`);
+      }
+      if (transfer.status !== "Confirmed") {
+        throw new Error(
+          `Transfer ${transferId} has not confirmed on-chain yet (status: ${transfer.status || "unknown"}) -- ` +
+            "report 'done' only once it has; use 'running' (or 'failed', if it failed) until then."
+        );
+      }
+    }
+
     const id = input.id && /^[A-Za-z0-9_-]{1,64}$/.test(input.id) ? input.id : newWorkId();
     const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail });
     return reported
@@ -655,8 +796,10 @@ export function createActions(options: ActionsOptions) {
         "'waiting' when you cannot continue without something from them (they are notified and can " +
         "answer you privately); 'done' or 'failed' when it ends. Keep one id for one piece of work: " +
         "omit id to start a new one and reuse the id you get back. Delegations through " +
-        "delegate_to_agent are reported for you -- do not report those again. Do not report quick " +
-        "answers; just answer.",
+        "delegate_to_agent/consult_agent are reported for you -- do not report those again. Do not " +
+        "report quick answers; just answer. MONEY WORK: report 'done' on a payment only with " +
+        "evidence: {transfer_id} -- it is verified as actually confirmed on-chain before the report " +
+        "is delivered, and refused otherwise.",
       schema: {
         type: "object",
         properties: {
@@ -664,10 +807,54 @@ export function createActions(options: ActionsOptions) {
           status: { type: "string", enum: ["running", "waiting", "done", "failed"], description: "Where the work stands now." },
           title: { type: "string", description: 'One short line, e.g. "Comparing three flights" or "I need your departure date".' },
           detail: { type: "string", description: "Optional: a sentence or two more, e.g. what you found so far or exactly what you need." },
+          evidence: {
+            type: "object",
+            description:
+              "Required to report 'done' on money work: {transfer_id}. Verified against the real " +
+              "transfer (must have actually confirmed) before the report is delivered -- claiming a " +
+              "payment is done without this, or before it confirms, is refused.",
+            properties: { transfer_id: { type: "string", description: "The Transfer id (e.g. from send_invoice's payment, once paid)." } },
+          },
         },
         required: ["status", "title"],
       },
       execute: reportProgress,
+    },
+    {
+      name: "consult_agent",
+      description:
+        "Ask a fellow member of THIS chat -- someone already in the room, human-visible as a " +
+        "participant -- a question in a private lane off it, and wait for their reply, which is " +
+        "returned to you to use. Unlike delegate_to_agent (a separate 1:1 the target never joins), " +
+        "the consulted agent stays inline: their later messages arrive in your ordinary onMessage " +
+        "flow, in that lane, without you calling this again. Use this instead of delegate_to_agent " +
+        "specifically when the agent you want is already a member of the current chat. They can ask " +
+        "to be brought into the room directly instead (request_floor); you'll be handed off to them " +
+        "automatically if so.",
+      schema: {
+        type: "object",
+        properties: {
+          handle: { type: "string", description: "Username (without @) of the agent to consult -- must already be a member of this chat." },
+          briefing: { type: "string", description: "Optional short context the target has no other way to get (they can't see this chat)." },
+          question: { type: "string", description: "The question to ask." },
+        },
+        required: ["handle", "question"],
+      },
+      execute: consultAgent,
+    },
+    {
+      name: "request_floor",
+      description:
+        "From INSIDE a consult lane only (one someone opened with you via consult_agent): ask the " +
+        "asking agent to bring you into the room directly instead of continuing to relay your " +
+        "answers through this lane. If they do, you'll be handed off into the room and prompted " +
+        "separately to introduce yourself. Use this when the conversation would go faster with you " +
+        "talking to the person directly rather than through an intermediary.",
+      schema: {
+        type: "object",
+        properties: { reason: { type: "string", description: "One line on why you'd rather join directly." } },
+      },
+      execute: requestFloor,
     },
     {
       name: "post_card",
@@ -825,14 +1012,15 @@ export function createActions(options: ActionsOptions) {
     {
       name: "hand_back_to_concierge",
       description:
-        "Hand this conversation back to the Global concierge agent -- the router this person " +
-        "originally started with. Use this as soon as you've wrapped up what you were brought in " +
-        "for: you answered their question, finished the task, hit something outside your scope, or " +
-        "they signal they're done / want something else. Don't wait to be asked -- a person who has " +
-        "to explicitly request 'take me back to the concierge' is a failure of this tool's whole " +
-        "point. Same mechanics as hand_off_to_agent: you stay in the room silently, and you'll be " +
-        "asked to write a briefing right after. AUTO-mode hand-off chats only -- in MANUAL mode, " +
-        "tell the person they can jump back to the concierge from chat info themselves.",
+        "Hand this conversation back to whoever handed it over to you -- usually the Global " +
+        "concierge agent, the router this person originally started with, but exactly whoever " +
+        "handed off to you if that was someone else. Use this as soon as you've wrapped up what " +
+        "you were brought in for: you answered their question, finished the task, hit something " +
+        "outside your scope, or they signal they're done / want something else. Don't wait to be " +
+        "asked -- a person who has to explicitly request 'take me back' is a failure of this tool's " +
+        "whole point. Same mechanics as hand_off_to_agent: you stay in the room silently, and " +
+        "you'll be asked to write a briefing right after. AUTO-mode hand-off chats only -- in " +
+        "MANUAL mode, tell the person they can jump back to the concierge from chat info themselves.",
       schema: {
         type: "object",
         properties: { reason: { type: "string", description: "One line on why you're handing back -- shown in the hand-off trail." } },

@@ -348,6 +348,25 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", `/api/v1/chats/${chatId}/sidechain?_=${Date.now()}`, apiKey, { with_id: withId });
     },
 
+    /**
+     * Opens (or reuses) a CONSULT lane between the caller and `withId`, both
+     * already members of `roomId` -- mechanically identical to
+     * openSidechain (same endpoint, same get-or-create-per-pair semantics),
+     * named separately because actions.ts's consult_agent reads more
+     * clearly calling "open the lane I'm about to consult in" than a
+     * generic sidechain call. salt-api tags the resulting chat
+     * `lane_kind: "consult"`, which webhook.ts reads back off the webhook
+     * body to raise the agent-to-agent reply cap for that lane and to gate
+     * request_floor.
+     */
+    async openConsultLane(
+      apiKey: string,
+      roomId: SaltId,
+      withId: SaltId
+    ): Promise<{ session: { id: SaltId; users?: SaltUser[]; coaching_for_chat_id?: SaltId; lane_kind?: string; [key: string]: unknown }; messages?: unknown[] }> {
+      return request("POST", `/api/v1/chats/${roomId}/sidechain?_=${Date.now()}`, apiKey, { with_id: withId });
+    },
+
     /** Register a new Salt agent, owned by whoever's api-key calls this. */
     /**
      * The create response carries the new agent's raw api key EXACTLY ONCE --
@@ -587,6 +606,22 @@ export function createSaltClient(options: SaltClientOptions) {
         amount: params.amount,
         memo: params.memo,
       });
+    },
+
+    /**
+     * A transfer's current record, to verify a payment actually confirmed
+     * before an agent claims money work "done" (see actions.ts's
+     * report_progress evidence check). Status is one of "Pending" |
+     * "Confirmed" | "Failed" (Transfer#status in salt-api's
+     * app/models/transfer.rb) -- "Confirmed" is the only settled state.
+     *
+     * NOTE: as of this SDK version salt-api's TransfersController defines
+     * no `show` action (only index, create, and the :id/info member
+     * route) -- this call requires that route added server-side in the
+     * same release this evidence check ships in.
+     */
+    async getTransfer(apiKey: string, transferId: SaltId): Promise<{ id: SaltId; status: string; [key: string]: unknown }> {
+      return request("GET", `/api/v1/transfers/${transferId}`, apiKey);
     },
 
     /** The caller's own wallets. */

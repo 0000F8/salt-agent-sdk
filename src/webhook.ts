@@ -21,6 +21,8 @@ import * as delegations from "./delegations";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 import { reconcileIdentityIds } from "./reconcile";
+import * as sessions from "./sessions";
+import type { Session, SessionStore, SessionTurn } from "./sessions";
 
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
@@ -38,6 +40,8 @@ export interface RawChatMeta {
    *  mutual Mediator lane. A private advisor is not a member of the shared
    *  chat and therefore cannot decrypt it -- this flag stops us asking. */
   private_lane?: boolean;
+  /** The kind of lane this chat is, when it is one. "consult" for a lane consult_agent opened -- see webhook.ts's CONSULT_RUNAWAY_LIMIT and actions.ts's request_floor. Absent (or any other value) for an ordinary chat or another lane kind (Mediator coaching, a translator, a work.ts report lane). */
+  lane_kind?: string;
   mode?: "auto" | "manual";
   [key: string]: unknown;
 }
@@ -64,17 +68,30 @@ export interface MessageContext {
   chatId: SaltId;
   senderId: SaltId;
   sender: RawSender;
-  /** Delegation-marker-stripped plaintext (see delegations.parseIncoming). */
+  /** Delegation- and consult-marker-stripped plaintext (see delegations.parseIncoming / delegations.stripConsultMarker). */
   text: string;
   /** Delegation hop depth this message arrived at; pass through to any further delegate call. */
   delegationDepth: number;
   chatMeta?: RawChatMeta;
+  /** The shared chat this message's conversation ultimately serves --
+   *  `chatId` itself for an ordinary chat, or `chatMeta.coaching_for_chat_id`
+   *  when `chatId` is a lane (a sidechain, Mediator coaching, a consult).
+   *  Lets a handler act on "the room" even while replying inside a lane
+   *  (e.g. request_floor's hand-off target). */
+  roomId: SaltId;
   /** Set when this identity is the configured Mediator privately coaching
    *  someone about a shared chat it also observes -- the generic decrypted
    *  transcript of that shared chat (not yet wrapped in any prompt framing). */
   mediatorSharedContext?: string;
   /** Set when the inbound message was an Attachment with decryptable metadata. */
   attachment?: DecryptedAttachment;
+  /** This identity's memory of `chatId`: recent turns and a short note,
+   *  loaded (or rebuilt from chat history, on a cold start) before this
+   *  handler runs and persisted after it returns. A plain mutable object --
+   *  write to `session.note` directly (e.g. session.note.goal, or push onto
+   *  session.note.consulted) to have it survive a restart and ride along a
+   *  hand-off. Ignore it entirely and nothing changes. */
+  session: Session;
   /** Encrypts `text` for every current chat member (+ this identity's own
    *  copy), posts it, drains this reply's delegation trail onto it, and
    *  emits an agent_reply_sent metric. Handles a typing-indicator heartbeat
@@ -141,6 +158,11 @@ export interface HandoffConfirmedContext {
   identity: AgentIdentity;
   chatId: SaltId;
   reason?: string;
+  /** Set only when this hand-off was triggered automatically by the
+   *  consulted agent's request_floor call rather than a model-chosen
+   *  hand_off_to_agent/hand_back_to_concierge: the consult lane's decrypted
+   *  transcript so far (capped), for the briefing to draw on. */
+  consultTranscript?: string;
   reply(text: string): Promise<void>;
 }
 
@@ -190,6 +212,14 @@ export interface WebhookServerOptions {
    *  "observe the shared chat silently, only speak in private coaching
    *  chats" gate. */
   mediatorAgentId?: SaltId;
+  /** Where each hosted identity's per-chat session (recent turns + a short
+   *  note) is kept. Defaults to an in-memory store (lost on restart --
+   *  onMessage still gets a session on a cold start, rebuilt from the
+   *  chat's own history). Pass `sessions.FileSessionStore(dir)` to persist
+   *  across restarts; see sessions.ts for the trust boundary that store's
+   *  own doc comment states plainly (plaintext on disk, no extra
+   *  encryption -- the same trust level identities.json already assumes). */
+  sessionStore?: SessionStore;
   logger?: Logger;
   onMessage?: (ctx: MessageContext) => Promise<void> | void;
   onCardInteraction?: (ctx: CardInteractionContext) => Promise<void> | void;
@@ -211,6 +241,8 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   const logger = options.logger ?? consoleLogger;
   const verifySignatures = options.verifySignatures !== false;
   const signatureTolerance = options.signatureToleranceSeconds ?? 300;
+  const sessionStore = options.sessionStore ?? sessions.MemorySessionStore();
+  const mapKey = (id: SaltId): string => String(id).toLowerCase();
 
   const app = express();
   // Keep the raw bytes: the HMAC covers exactly what salt-api sent, and
@@ -328,8 +360,28 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // identity just stops answering the other one there, until a human sends
   // something new (which resets the count).
   const MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT = 2;
+  // A consult lane (actions.ts's consult_agent, chatMeta.lane_kind ===
+  // "consult") is a real working conversation between two agents, not an
+  // accidental loop -- it needs real back-and-forth room, so it gets its
+  // own, much higher ceiling instead of the ordinary chat's cap.
+  const CONSULT_RUNAWAY_LIMIT = 20;
   // Keyed by the lowercased chat id, like every other id-keyed map here.
   const agentToAgentReplyCounts = new Map<string, number>();
+  // laneChatId (lowercased) -> its room's chat id (lowercased), learned the
+  // first time a message is seen in that lane. A human speaking in the ROOM
+  // should reset every consult lane rooted there too -- a lane's own count
+  // otherwise only resets from someone speaking IN the lane itself, and a
+  // busy pair of agents burning through CONSULT_RUNAWAY_LIMIT would stay
+  // capped even right after the person who asked for the consult weighs in.
+  const laneRoomOf = new Map<string, string>();
+  // roomId (lowercased) -> the consult lane chat id a request_floor message
+  // just triggered an automatic hand-off from. Set by the floor-request
+  // handler right before calling client.handOff, consumed by
+  // handleHandoffConfirmed once salt-api's own handoff_confirmed webhook
+  // arrives for that room -- that's what lets it attach consultTranscript.
+  // Best-effort: a second floor request for the same room before the first
+  // hand-off confirms would overwrite this, which is an acceptable rarity.
+  const pendingConsultHandoffs = new Map<string, SaltId>();
 
   // chat_opened has no message_id to dedupe on (it isn't a Message at all),
   // and delivery can be retried -- so a retried delivery must not make this
@@ -364,8 +416,31 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
   // private key that was actually a member of that chat, so trying each
   // known identity in turn and keeping whichever one succeeds is both
   // correct and cheap for the small number of identities a process hosts.
-  async function resolveIdentity(ciphertext: string): Promise<{ identity: AgentIdentity; plaintext: string } | null> {
+  async function resolveIdentity(
+    ciphertext: string,
+    headerAgentId?: SaltId
+  ): Promise<{ identity: AgentIdentity; plaintext: string } | null> {
+    // salt-api signs every callback for a specific RECIPIENT identity and
+    // names it in X-Salt-Agent-Id (see rejectionReason above) -- when that
+    // names one of ours, try it first. Skips the ambiguity trial-decryption
+    // has when this process hosts more than one identity that's a member of
+    // the same chat (a delegation or consult lane makes that possible): any
+    // member's key opens the multi-recipient blob, so without the header,
+    // which one "wins" is just whichever was registered first.
+    if (headerAgentId) {
+      const preferred = identities.get(headerAgentId);
+      if (preferred) {
+        try {
+          const plaintext = await pgp.decrypt(ciphertext, preferred.privateKey, pgpPassphrase);
+          return { identity: preferred, plaintext };
+        } catch {
+          // The header named a real hosted identity, but this ciphertext
+          // isn't addressed to it -- fall through to trial decryption.
+        }
+      }
+    }
     for (const candidate of identities.all()) {
+      if (headerAgentId && sameId(candidate.saltAppId, headerAgentId)) continue; // already tried above
       try {
         const plaintext = await pgp.decrypt(ciphertext, candidate.privateKey, pgpPassphrase);
         return { identity: candidate, plaintext };
@@ -401,6 +476,81 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       }
     }
     return lines.length ? lines.join("\n") : "(no messages yet)";
+  }
+
+  // Same idea as buildSharedChatContext, but for a session's cold-start
+  // rebuild: structured turns instead of joined display lines, capped to
+  // the same MAX_TRANSCRIPT_TURNS a live session is bounded to, and this
+  // identity's own messages come back tagged "assistant" rather than folded
+  // into "someone: ...". Messages from before `identity` joined fail to
+  // decrypt and are skipped -- same degrade-gracefully convention.
+  async function rebuildTranscriptTail(identity: AgentIdentity, chatId: SaltId): Promise<SessionTurn[]> {
+    let messages: unknown[];
+    try {
+      messages = await client.getChatMessages(identity.apiKey, chatId);
+    } catch (err) {
+      logger.error(`[session] fetching chat ${chatId} for cold-start rebuild failed: ${(err as Error).message}`);
+      return [];
+    }
+    const turns: SessionTurn[] = [];
+    for (const raw of messages) {
+      const m = raw as {
+        event_type?: string;
+        message?: string;
+        user?: { id?: SaltId; username?: string; display_name?: string };
+        created_at?: string;
+      };
+      if (m.event_type || typeof m.message !== "string" || !PGP_MESSAGE_RE.test(m.message)) continue;
+      let plaintext: string;
+      try {
+        plaintext = await pgp.decrypt(m.message, identity.privateKey, pgpPassphrase);
+      } catch {
+        continue; // predates this identity joining the chat -- skip silently.
+      }
+      const { text: afterDepth } = delegations.parseIncoming(plaintext);
+      const content = delegations.stripConsultMarker(afterDepth);
+      const isSelf = sameId(m.user?.id, identity.saltAppId);
+      turns.push({
+        role: isSelf ? "assistant" : "user",
+        content,
+        at: m.created_at ? Date.parse(m.created_at) : Date.now(),
+        from: isSelf ? undefined : m.user?.username || m.user?.display_name || String(m.user?.id ?? "someone"),
+      });
+    }
+    return turns.length > sessions.MAX_TRANSCRIPT_TURNS ? turns.slice(-sessions.MAX_TRANSCRIPT_TURNS) : turns;
+  }
+
+  // Loads the stored session for (identity, chatId), or -- on a cold start --
+  // builds a fresh one from the chat's own history. Never throws: a session
+  // store or rebuild failure falls back to an empty session rather than
+  // blocking the message it's here to support.
+  async function loadOrRebuildSession(identity: AgentIdentity, chatId: SaltId, chatMeta?: RawChatMeta): Promise<Session> {
+    const roomId = (chatMeta?.coaching_for_chat_id as SaltId) || chatId;
+    try {
+      const existing = await sessionStore.get(identity.saltAppId, chatId);
+      if (existing) return existing;
+    } catch (err) {
+      logger.error(`[session] loading ${chatId} failed: ${(err as Error).message}`);
+    }
+    const role: Session["role"] = chatMeta?.lane_kind === "consult" ? "consult" : chatMeta?.coaching_for_chat_id ? "lane" : "active";
+    const session = sessions.emptySession(chatId, roomId, role);
+    try {
+      session.transcriptTail = await rebuildTranscriptTail(identity, chatId);
+    } catch (err) {
+      logger.error(`[session] rebuilding ${chatId} failed: ${(err as Error).message}`);
+    }
+    return session;
+  }
+
+  // The consult lane's own transcript, for a hand-off briefing that was
+  // triggered by a request_floor call rather than chosen by a model turn --
+  // see handleHandoffConfirmed. Capped to the last few exchanges; a consult
+  // lane that ran long doesn't need its entire history in a briefing.
+  const MAX_CONSULT_TRANSCRIPT_LINES = 30;
+  async function buildConsultTranscript(identity: AgentIdentity, laneId: SaltId): Promise<string> {
+    const full = await buildSharedChatContext(identity, laneId);
+    const lines = full.split("\n");
+    return lines.length > MAX_CONSULT_TRANSCRIPT_LINES ? lines.slice(-MAX_CONSULT_TRANSCRIPT_LINES).join("\n") : full;
   }
 
   // Decrypts an attachment's PGP metadata blob (key/iv/filename/content_type),
@@ -532,7 +682,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     };
   }
 
-  async function handleMessage(body: { message: Record<string, unknown>; chat?: RawChatMeta }): Promise<void> {
+  async function handleMessage(body: { message: Record<string, unknown>; chat?: RawChatMeta }, headerAgentId?: SaltId): Promise<void> {
     const message = body.message;
     const chatId = message.chat_id as SaltId;
     const chatMeta = body.chat;
@@ -543,7 +693,7 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const ciphertext = message.message;
     if (typeof ciphertext !== "string" || !PGP_MESSAGE_RE.test(ciphertext)) return;
 
-    const resolved = await resolveIdentity(ciphertext);
+    const resolved = await resolveIdentity(ciphertext, headerAgentId);
     if (!resolved) {
       logger.error(`[chat ${chatId}] no known identity could decrypt this message; ignoring.`);
       return;
@@ -581,6 +731,25 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // infinite loop.
     if (sameId(senderId, identity.saltAppId)) return;
 
+    // request_floor (actions.ts): the consulted agent is asking to be
+    // brought into the room directly instead of relaying further through
+    // this lane. Wire protocol, never a prompt -- and only actionable by
+    // whichever hosted identity actually opened this lane as the asker.
+    if (caption.startsWith(delegations.FLOOR_REQUEST_MARKER)) {
+      const asker = delegations.consultAskerFor(chatId);
+      if (asker && sameId(asker.askerId, identity.saltAppId)) {
+        const reason = caption.slice(delegations.FLOOR_REQUEST_MARKER.length).replace(/^\n/, "").trim() || undefined;
+        pendingConsultHandoffs.set(mapKey(asker.roomId), chatId);
+        try {
+          await client.handOff(identity.apiKey, asker.roomId, senderId, reason);
+        } catch (err) {
+          pendingConsultHandoffs.delete(mapKey(asker.roomId));
+          logger.error(`[chat ${asker.roomId}] auto hand-off on floor request failed: ${(err as Error).message}`);
+        }
+      }
+      return;
+    }
+
     // Mediated Chat: this identity is the configured Mediator, and this
     // message is in the SHARED chat it silently observes -- present for
     // context, but it only actually speaks in each human's own private
@@ -596,19 +765,30 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // A human sender always resets the count -- only agent-to-agent
     // volleys are capped, never a real conversation with a person.
     const senderIsAgent = !!identities.get(senderId) || senderRaw.account_type === "Agent";
-    const replyCountKey = String(chatId).toLowerCase();
+    const replyCountKey = mapKey(chatId);
+    if (chatMeta?.coaching_for_chat_id) {
+      laneRoomOf.set(replyCountKey, mapKey(chatMeta.coaching_for_chat_id));
+    }
     if (senderIsAgent) {
+      const limit = chatMeta?.lane_kind === "consult" ? CONSULT_RUNAWAY_LIMIT : MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT;
       const count = (agentToAgentReplyCounts.get(replyCountKey) || 0) + 1;
       agentToAgentReplyCounts.set(replyCountKey, count);
-      if (count > MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT) {
+      if (count > limit) {
         logger.error(`[chat ${chatId}] agent-to-agent reply cap reached; not auto-replying to ${senderId} again.`);
         return;
       }
     } else {
       agentToAgentReplyCounts.delete(replyCountKey);
+      // A human speaking in a ROOM also resets every consult lane rooted
+      // there -- otherwise a lane capped mid-conversation stays capped even
+      // right after the person who asked for it weighs in.
+      for (const [laneKey, roomKey] of laneRoomOf) {
+        if (roomKey === replyCountKey) agentToAgentReplyCounts.delete(laneKey);
+      }
     }
 
-    const { depth, text: strippedCaption } = delegations.parseIncoming(caption);
+    const { depth, text: afterDepthMarker } = delegations.parseIncoming(caption);
+    const strippedCaption = delegations.stripConsultMarker(afterDepthMarker);
 
     let mediatorSharedContext: string | undefined;
     let attachment: DecryptedAttachment | undefined;
@@ -625,6 +805,21 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
 
     if (!options.onMessage) return;
+
+    const roomId: SaltId = (chatMeta?.coaching_for_chat_id as SaltId) || chatId;
+    const session = await loadOrRebuildSession(identity, chatId, chatMeta);
+
+    // Wraps the shared reply() closure to also remember what was sent, so
+    // it can be appended to the session as an assistant turn once the
+    // handler returns successfully -- see the persistence step below.
+    // Nothing about what actually gets sent changes.
+    const repliesForSession: string[] = [];
+    const baseReply = makeReply(identity, chatId, senderRaw);
+    const trackedReply = async (text: string): Promise<void> => {
+      repliesForSession.push(text);
+      await baseReply(text);
+    };
+
     const ctx: MessageContext = {
       identity,
       chatId,
@@ -633,12 +828,30 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       text: strippedCaption,
       delegationDepth: depth,
       chatMeta,
+      roomId,
       mediatorSharedContext,
       attachment,
-      reply: makeReply(identity, chatId, senderRaw),
+      session,
+      reply: trackedReply,
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
+      try {
+        sessions.appendTurn(session, {
+          role: "user",
+          content: strippedCaption,
+          at: Date.now(),
+          from: String(senderRaw.username || senderRaw.display_name || senderId),
+        });
+        for (const replyText of repliesForSession) {
+          sessions.appendTurn(session, { role: "assistant", content: replyText, at: Date.now() });
+        }
+        session.note = sessions.boundNote(session.note);
+        session.updatedAt = Date.now();
+        await sessionStore.put(identity.saltAppId, chatId, session);
+      } catch (err) {
+        logger.error(`[session] persisting ${chatId} failed: ${(err as Error).message}`);
+      }
     } catch (err) {
       logger.error(`[chat ${chatId}] onMessage failed: ${(err as Error).message}`);
       // Discard any trail entries a partial run recorded -- there's no
@@ -755,7 +968,39 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     const identity = identities.get(String(body.from_agent_id));
     if (!identity || !options.onHandoffConfirmed) return;
     const chatId = body.chat_id;
-    const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, reply: makeReply(identity, chatId) };
+
+    // A request_floor call may have just auto-triggered this same hand-off
+    // (webhook.ts's floor-request handler, above) -- if so, give the
+    // briefing its consult lane's transcript.
+    const laneId = pendingConsultHandoffs.get(mapKey(chatId));
+    if (laneId) pendingConsultHandoffs.delete(mapKey(chatId));
+    let consultTranscript: string | undefined;
+    if (laneId) {
+      try {
+        consultTranscript = await buildConsultTranscript(identity, laneId);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] fetching consult transcript for hand-off failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Appends the outgoing session's note (if any) as the briefing's final
+    // wire-protocol line -- see sessions.ts's SESSION_NOTE_MARKER and
+    // handleHandoffReceived below, which parses it back out on the other
+    // end. Transparent to the consumer: whatever text they reply() with is
+    // what a human sees; this just rides along after it.
+    const baseReply = makeReply(identity, chatId);
+    const reply = async (text: string): Promise<void> => {
+      let noteLine: string | undefined;
+      try {
+        const session = await sessionStore.get(identity.saltAppId, chatId);
+        noteLine = sessions.formatSessionNoteLine(session?.note);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] reading session for hand-off note failed: ${(err as Error).message}`);
+      }
+      await baseReply(noteLine ? `${text}\n${noteLine}` : text);
+    };
+
+    const ctx: HandoffConfirmedContext = { identity, chatId, reason: body.reason, consultTranscript, reply };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
     } catch (err) {
@@ -779,6 +1024,25 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       if (context.includes(HANDOFF_BRIEFING_MARKER)) break;
       await new Promise((r) => setTimeout(r, 2000));
     }
+
+    // The outgoing agent's session note, if its briefing carried one --
+    // seeds this identity's own session for `chatId` so it picks up
+    // whatever goal/waitingOn/consulted state the previous agent had.
+    // Stripped from `context` either way: wire protocol, never something
+    // the incoming agent's own prompt-building should see verbatim.
+    const note = sessions.extractSessionNote(context);
+    if (note) {
+      try {
+        const existing = (await sessionStore.get(identity.saltAppId, chatId)) ?? sessions.emptySession(chatId, chatId);
+        existing.note = sessions.boundNote(note);
+        existing.updatedAt = Date.now();
+        await sessionStore.put(identity.saltAppId, chatId, existing);
+      } catch (err) {
+        logger.error(`[session] persisting handed-off note for ${chatId} failed: ${(err as Error).message}`);
+      }
+    }
+    context = sessions.stripSessionNoteLines(context);
+
     const ctx: HandoffReceivedContext = { identity, chatId, reason: body.reason, context, reply: makeReply(identity, chatId) };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
@@ -787,13 +1051,13 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     }
   }
 
-  async function dispatch(body: Record<string, unknown>): Promise<void> {
+  async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);
     if (body?.type === "chat_opened") return handleChatOpened(body as never);
     if (body?.type === "handoff_confirmed") return handleHandoffConfirmed(body as never);
     if (body?.type === "handoff_received") return handleHandoffReceived(body as never);
-    if (body?.message) return handleMessage(body as never);
+    if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
   // salt-api's WebhookJob POSTs here with { chat, message } (or a typed
@@ -818,7 +1082,8 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
           return;
         }
         res.status(200).json({ status: "accepted" });
-        dispatch(req.body).catch((err) => logger.error(`[webhook] unhandled error: ${(err as Error).message}`));
+        const headerAgentId = req.get("X-Salt-Agent-Id") || undefined;
+        dispatch(req.body, headerAgentId).catch((err) => logger.error(`[webhook] unhandled error: ${(err as Error).message}`));
       })
       .catch((err) => {
         logger.error(`[webhook] verification failed: ${(err as Error).message}`);
