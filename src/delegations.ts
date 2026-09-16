@@ -161,3 +161,59 @@ export function drainTrail(identityId: SaltId, mainChatId: SaltId): DelegationTr
   trails.delete(key);
   return entries;
 }
+
+// --- Consult lanes ---------------------------------------------------------
+//
+// A consult is a delegation that happens INLINE, in a lane off a chat both
+// parties are already in (actions.ts's consult_agent), rather than in a
+// separate 1:1 (delegate_to_agent). The reply-matching above (register/
+// resolveIfPending) is reused as-is -- consult_agent registers a pending
+// wait on the lane's own chat id exactly like delegate_to_agent does on a
+// delegation chat's id. What's new is the wire marker the CONSULT PROMPT
+// itself carries (stripped before the consulted agent's onMessage ever
+// sees it, same convention as the depth marker above), and a small
+// registry so the asking agent's OWN webhook.ts recognizes a request_floor
+// message arriving back in a lane it opened.
+
+const CONSULT_MARKER_RE = /^\[\[SALT-CONSULT room=[^\]\n]+\]\]\n/;
+
+/** Prefixes a consult prompt so the receiving end can strip it before the task text reaches that identity's agent logic. `roomId` is informational only -- the receiving side gets the authoritative room id from the lane's own `coaching_for_chat_id`, already server-verified. */
+export function wrapConsult(roomId: SaltId, text: string): string {
+  return `[[SALT-CONSULT room=${roomId}]]\n${text}`;
+}
+
+/** Strips a leading SALT-CONSULT marker, if present. A no-op on anything else (an ordinary message, or an agent's plain-text reply). */
+export function stripConsultMarker(text: string): string {
+  return text.replace(CONSULT_MARKER_RE, "");
+}
+
+/** The exact marker request_floor (actions.ts) posts into a consult lane to ask the asker to hand off rather than keep relaying through the lane. webhook.ts treats a message starting with this as wire protocol -- never an onMessage prompt -- for whichever identity opened that lane. */
+export const FLOOR_REQUEST_MARKER = "[[SALT-FLOOR-REQUEST]]";
+
+interface ConsultAsker {
+  askerId: SaltId;
+  /** The shared chat this consult lane was opened from -- where the asker's hand-off (if any) actually happens. */
+  roomId: SaltId;
+}
+
+// laneChatId (lowercased) -> who opened it and from where. Bounded the same
+// way webhook.ts bounds its own dedup sets: a long-lived process consults a
+// great many lanes over time, and none of them need to be remembered once
+// they're old enough that a floor request on them is no longer plausible.
+const MAX_CONSULT_ASKERS = 2000;
+const consultAskers = new Map<string, ConsultAsker>();
+
+/** Records that `askerId` opened `laneChatId` as a consult lane off `roomId`. Called by consult_agent right after the lane is opened. */
+export function registerConsultAsker(laneChatId: SaltId, askerId: SaltId, roomId: SaltId): void {
+  const key = mapKey(laneChatId);
+  consultAskers.set(key, { askerId, roomId });
+  if (consultAskers.size > MAX_CONSULT_ASKERS) {
+    const oldest = consultAskers.keys().next().value;
+    if (oldest !== undefined) consultAskers.delete(oldest);
+  }
+}
+
+/** Who opened `laneChatId` as a consult lane, and from where -- or undefined if this process didn't (or has forgotten). */
+export function consultAskerFor(laneChatId: SaltId): ConsultAsker | undefined {
+  return consultAskers.get(mapKey(laneChatId));
+}
