@@ -92,7 +92,7 @@ const OTHER_AGENT_ID = "00000000-0000-0000-0000-0000000000d4";
 
 // Builds a chat of `members`, delivers one message from `sender`, and returns
 // whatever the agent posted back.
-async function replyTo(t, { members, sender, text = "hello", answer = "sure thing" }) {
+async function replyTo(t, { members, sender, text = "hello", answer = "sure thing", mentions }) {
   const agentKeys = await sdk.generateKeypair("agent-pass");
   const memberKeys = await sdk.generateKeypair("member-pass");
 
@@ -134,6 +134,7 @@ async function replyTo(t, { members, sender, text = "hello", answer = "sure thin
         sender_message: armored,
         message_type: "User",
         user: sender,
+        mentions,
         created_at: new Date().toISOString(),
       },
     },
@@ -176,10 +177,16 @@ test("in a 1:1 the reply is left alone -- there is only one person it could be f
 });
 
 test("another agent is never addressed automatically -- that is how ping-pong starts", async (t) => {
+  // A person (ada) is in this room, so webhook.ts's mention-gating (see
+  // reply-context-sessions.test.js / hand-off tests) only lets an
+  // agent-authored message through when it names US -- mention this
+  // identity so the reply happens at all, then check it doesn't ALSO bolt
+  // an "@scribe" onto the front of it.
   const { posted, agentKeys } = await replyTo(t, {
     members: [human(ADA_ID, "ada"), bot(OTHER_AGENT_ID, "scribe"), bot(AGENT_ID, "helper")],
     sender: bot(OTHER_AGENT_ID, "scribe"),
     answer: "noted",
+    mentions: [AGENT_ID],
   });
 
   assert.equal(posted.length, 1, "the agent still answered");

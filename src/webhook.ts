@@ -723,6 +723,30 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     };
   }
 
+  // True when `chatId` has at least one human (account_type !== "Agent")
+  // member who is NOT a silent observer. A consult lane's human -- the
+  // delegation chain's auditor added per actions.ts's delegation-
+  // observability note -- is only ever an observer there, so a lane reads as
+  // agent-only even though a person can technically decrypt it. `chatMeta`'s
+  // own member list is used when a caller already supplied one (mainly
+  // tests); the real webhook payload's `chat` never carries members (see
+  // salt-api's WebhookJob#user_send allowlist), so this normally falls back
+  // to fetching the roster -- the same call makeReply above already makes to
+  // encrypt a reply.
+  async function chatHasNonObserverHuman(identity: AgentIdentity, chatId: SaltId, chatMeta?: RawChatMeta): Promise<boolean> {
+    const inlineMembers = Array.isArray(chatMeta?.users) ? (chatMeta!.users as Array<{ account_type?: string; observer?: boolean }>) : undefined;
+    let members = inlineMembers;
+    if (!members) {
+      try {
+        members = await client.getChatMembers(identity.apiKey, chatId);
+      } catch (err) {
+        logger.error(`[chat ${chatId}] fetching members for mention-gating failed: ${(err as Error).message}`);
+        return false;
+      }
+    }
+    return members.some((m) => m.account_type !== "Agent" && !(m as { observer?: boolean }).observer);
+  }
+
   async function handleMessage(body: { message: Record<string, unknown>; chat?: RawChatMeta }, headerAgentId?: SaltId): Promise<void> {
     const message = body.message;
     const chatId = message.chat_id as SaltId;
@@ -740,6 +764,14 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       return;
     }
     let { identity, plaintext: caption } = resolved;
+
+    // Wire protocol, never a prompt: a hand-off briefing is consumed by
+    // handleHandoffReceived's poll (above HANDOFF_BRIEFING_MARKER's
+    // definition), and a bare session-note line is consumed by whichever
+    // hand-off leg reads it back out (sessions.ts). Either one reaching
+    // onMessage reads to a viewer as this identity replying to its own
+    // colleague's internal handoff chatter.
+    if (caption.startsWith(HANDOFF_BRIEFING_MARKER) || caption.startsWith(sessions.SESSION_NOTE_MARKER)) return;
 
     // GACM routing fix: salt-api sends one webhook delivery PER agent
     // member, but they all land on this shared server and message-id dedup
@@ -811,12 +843,27 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
       laneRoomOf.set(replyCountKey, mapKey(chatMeta.coaching_for_chat_id));
     }
     if (senderIsAgent) {
-      const limit = chatMeta?.lane_kind === "consult" ? CONSULT_RUNAWAY_LIMIT : MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT;
-      const count = (agentToAgentReplyCounts.get(replyCountKey) || 0) + 1;
-      agentToAgentReplyCounts.set(replyCountKey, count);
-      if (count > limit) {
-        logger.error(`[chat ${chatId}] agent-to-agent reply cap reached; not auto-replying to ${senderId} again.`);
-        return;
+      // A real person changes the rule entirely: an agent-authored message
+      // is only ours to answer when it @mentions us -- the same gate
+      // salt-api applies to whether the webhook is even sent in a group
+      // chat, belt-and-suspenders for whatever still reaches us (a hand-off
+      // farewell, a briefing after item 1 above missed a variant, another
+      // agent's aside). Two agents alone in a lane have no one to perform
+      // for, so the runaway cap below still governs those exactly as before.
+      if (await chatHasNonObserverHuman(identity, chatId, chatMeta)) {
+        const mentions = (Array.isArray(message.mentions) ? (message.mentions as unknown[]) : []).map(String);
+        if (!mentions.some((id) => sameId(id, identity.saltAppId))) {
+          logger.error(`[chat ${chatId}] agent message not addressed to us in a chat with a person present; not auto-replying to ${senderId}.`);
+          return;
+        }
+      } else {
+        const limit = chatMeta?.lane_kind === "consult" ? CONSULT_RUNAWAY_LIMIT : MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT;
+        const count = (agentToAgentReplyCounts.get(replyCountKey) || 0) + 1;
+        agentToAgentReplyCounts.set(replyCountKey, count);
+        if (count > limit) {
+          logger.error(`[chat ${chatId}] agent-to-agent reply cap reached; not auto-replying to ${senderId} again.`);
+          return;
+        }
       }
     } else {
       agentToAgentReplyCounts.delete(replyCountKey);
