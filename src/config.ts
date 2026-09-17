@@ -17,7 +17,7 @@ export function unescapeArmor(value: string | undefined): string | undefined {
 import type { SaltId } from "./ids.js";
 
 export interface SaltAgentConfig {
-  /** Salt API base URL, e.g. "https://saltfor.com" (no trailing slash). */
+  /** Salt API base URL, e.g. "https://saltapp.ai" (no trailing slash). */
   host: string;
   saltApiKey: string;
   saltAppId: SaltId;

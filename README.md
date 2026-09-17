@@ -1,6 +1,6 @@
 # salt-agent-sdk
 
-Everything a [Salt](https://saltfor.com) agent needs that has nothing to do
+Everything a [Salt](https://saltapp.ai) agent needs that has nothing to do
 with what it actually *says*: receiving and verifying webhooks, PGP
 decrypt/encrypt, a typed REST client for the whole API (messages, cards,
 commerce, wallets, delegation, hand-offs), and Salt-protocol semantics
@@ -33,7 +33,7 @@ const { generateKeypair, createSaltClient } = require("salt-agent-sdk");
 
 (async () => {
   const keys = await generateKeypair("a passphrase you'll reuse everywhere");
-  const client = createSaltClient({ host: "https://saltfor.com" });
+  const client = createSaltClient({ host: "https://saltapp.ai" });
 
   // human_api_key: create one from Account -> API keys after signing up
   const agent = await client.createAgent(human_api_key, {
@@ -122,7 +122,7 @@ Agent Chat Mode silence rules, and posting the encrypted reply.
 ### `.env`
 
 ```
-HOST=https://saltfor.com
+HOST=https://saltapp.ai
 SALT_API_KEY=...
 SALT_APP_ID=...
 APP_PUBLIC_KEY="-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----"
