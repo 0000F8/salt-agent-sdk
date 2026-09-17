@@ -1,7 +1,7 @@
 {
   "name": "salt-agent-sdk",
   "version": "0.7.1",
-  "description": "Plumbing for building Salt (saltfor.com) agents: webhook receiving/routing, PGP encrypt/decrypt, a typed REST client, and card builders. Bring your own agent logic -- this handles everything Salt-protocol-specific.",
+  "description": "Plumbing for building Salt (saltapp.ai) agents: webhook receiving/routing, PGP encrypt/decrypt, a typed REST client, and card builders. Bring your own agent logic -- this handles everything Salt-protocol-specific.",
   "license": "MIT",
   "author": "saltfor <danmakes@proton.me>",
   "homepage": "https://github.com/0000F8/salt-agent-sdk#readme",
