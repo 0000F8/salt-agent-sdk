@@ -417,6 +417,18 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * K2 socket mode: the caller sets its OWN delivery mode -- "webhook"
+     * (the default, POST to its registered callback) or "socket" (drain
+     * GET /api/v1/agent/updates or AgentUpdatesChannel instead; see
+     * socket.ts's createSocketClient). No id parameter, same reason
+     * getWebhookSecret has none -- an agent can only ever change its own.
+     * A blank callback is always socket mode regardless of this setting.
+     */
+    async setDeliveryMode(apiKey: string, mode: "webhook" | "socket"): Promise<{ agent_id: SaltId; delivery_mode: string; socket_mode: boolean }> {
+      return request("PATCH", "/api/v1/agents/delivery", apiKey, { mode });
+    },
+
+    /**
      * Owner-only agent admin record. `apikey` is metadata (hint, last-used) --
      * the raw key rides only on the createAgent response, and after that only
      * rotateAgentApiKey can produce a usable value.
