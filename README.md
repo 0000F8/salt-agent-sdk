@@ -148,6 +148,108 @@ PORT=5100
 (Armored PGP blocks may be a single line with literal `\n` instead of real
 newlines — `loadSaltAgentConfig` normalises either.)
 
+## Socket mode: an agent on your laptop, no public URL
+
+`createWebhookServer` needs a public HTTPS endpoint salt-api can POST to.
+If your agent runs somewhere that doesn't have one — your laptop, a local
+LangGraph script, Claude Code, a container with no ingress — use
+`createSocketClient` instead. It polls `GET /api/v1/agent/updates`
+(adaptively — see below) for exactly what a webhook would have delivered,
+verifies each envelope the same way, and dispatches to the SAME handlers.
+Nothing about `onMessage`/`onCardInteraction`/etc. changes; only
+`.listen(port)` becomes `.start()`.
+
+salt-api's own endpoint is a SHORT poll (the wait is clamped to 0–2
+seconds server-side); `AgentUpdatesChannel` over Action Cable is the real
+push path. This client polls it as a fallback/catch-up, adaptively: ~1s
+between polls right after something arrives, backing off toward ~5s the
+longer nothing does.
+
+First, tell salt-api this identity has no callback to POST to (a one-time
+call — or just never set `webhook` when you create the agent):
+
+```js
+await client.setDeliveryMode(config.saltApiKey, "socket"); // PATCH /api/v1/agents/delivery
+```
+
+Then:
+
+```js
+require("dotenv").config();
+const { createSocketClient, createSaltClient, createIdentityStore, loadSaltAgentConfig } = require("salt-agent-sdk");
+
+const config = loadSaltAgentConfig();
+const client = createSaltClient({ host: config.host });
+const identities = createIdentityStore();
+identities.register({ saltAppId: config.saltAppId, apiKey: config.saltApiKey, publicKey: config.appPublicKey, privateKey: config.appPrivateKey });
+
+const socket = createSocketClient({
+  host: config.host,
+  apiKey: config.saltApiKey,
+  agentId: config.saltAppId,
+  client,
+  identities,
+  pgpPassphrase: config.pgpPassphrase,
+  // Cursor + dedupe persistence default to files under
+  // ~/.salt/agents/<agentId>/ -- pass MemoryCursorStore()/MemoryDedupeStore()
+  // explicitly if you'd rather NOT persist across restarts.
+  async onMessage(ctx) {
+    const answer = await askWhateverModelYouWant(ctx.text);
+    await ctx.reply(answer);
+  },
+});
+
+socket.start();
+process.on("SIGINT", () => socket.stop().then(() => process.exit(0)));
+```
+
+No `app.listen`, no port, no ngrok. `socket.stop()` aborts the in-flight
+poll immediately rather than waiting out its timeout, so shutdown is fast.
+Signature verification here uses a much wider tolerance than the webhook
+path (an envelope can sit in the outbox for days before this client ever
+polls it), so replay protection comes from the cursor plus a persistent
+per-agent delivery-id dedupe set instead of the signature's own timestamp
+— both default to the same `~/.salt/agents/<agentId>/` files as the cursor.
+
+## `ctx.ask` / `ctx.approve`: a quick question, inline
+
+Sometimes an agent needs a person's word before it continues — one more
+tool call, a clarification, permission to spend. `ctx.ask` posts the
+question as a card (one button per option, plus by default an invitation
+to just type a reply) and resolves with whichever answer arrives first —
+a tap or a plain message. Available on every context that has `reply()`,
+and works identically under webhook or socket mode:
+
+```js
+async onMessage(ctx) {
+  const { approved } = await ctx.approve("Spend $12 on that lookup?");
+  if (!approved) return ctx.reply("Okay, I'll skip it.");
+
+  const { answer } = await ctx.ask("Which city?", { options: ["Lisbon", "Porto"] });
+  await ctx.reply(`Checking ${answer}...`);
+}
+```
+
+`ask(question, {options?, freeText?, timeoutMs?, answererId?})` resolves
+`{answer, by, via: "button" | "message"}`; `approve(summary, {timeoutMs?,
+answererId?})` is Yes/No sugar (an exact "yes"/"y", case-insensitive, with
+an optional trailing "." or "!" — "yeah" doesn't count) resolving
+`{approved, by, via}`. Both reject on timeout (default 10 minutes) and
+update the card in place to show the chosen answer. Only one `ask` can be
+pending per (identity, chat) at a time.
+
+**Exactly one person may answer.** `ctx.ask`/`ctx.approve` default
+`answererId` to whoever's message triggered the current `onMessage` call
+(the buyer for `onInvoicePaid`, whoever opened the chat for
+`onChatOpened`) — pass it explicitly to ask someone else, and you must
+pass it explicitly from `onHandoffConfirmed`/`onHandoffReceived`, which
+have no natural default (`ask()` throws synchronously with neither). A
+tap or reply from anyone else, or from ANY agent, is ignored outright —
+enforced twice, server-side via the card button's own `restricted_to`
+(salt-api refuses the tap, 403) and client-side here (which also covers
+the free-text path, since the server has no equivalent gate on a plain
+message).
+
 ## Plugging in an existing agent
 
 The whole point of `onMessage` is that it's just a function: `(ctx) =>
@@ -364,7 +466,9 @@ either side beyond exposing both tools.
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH`, `wrapConsult`, `stripConsultMarker`, `FLOOR_REQUEST_MARKER`, `registerConsultAsker`, `consultAskerFor` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail), plus the consult-lane wire markers webhook.ts and actions.ts share. |
 | `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format). |
 | `sessions.ts` | `MemorySessionStore()`, `FileSessionStore(dir)`, `emptySession`, `appendTurn`, `boundNote`, `formatSessionNoteLine`, `extractSessionNote`, `stripSessionNoteLines` | A hosted identity's per-chat memory (recent turns + a short note): the `SessionStore` interface, both implementations, and the hand-off note wire format (see **Sessions**, above). |
-| `webhook.ts` | `createWebhookServer(options)` | The webhook server itself: signature check, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist, and the `ctx.reply()` helper. |
+| `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a long-poll loop instead. |
+| `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
+| `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: polls `GET /api/v1/agent/updates` adaptively for an agent with no public URL, verifying (at a much wider signature tolerance than the webhook path) and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
 | `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 17 Salt-platform actions, provider-agnostic. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
@@ -414,7 +518,9 @@ optional callback — only implement the ones you need:
 Every context above except `onCardInteraction` carries `session`, and
 whatever you `reply()` with is appended as an assistant turn and persisted
 after your handler returns — by the next `onMessage` call for that chat,
-it's already in `session.transcriptTail`.
+it's already in `session.transcriptTail`. Every one of those same contexts
+also carries `ask(question, opts)` and `approve(summary, opts)` — see
+**`ctx.ask` / `ctx.approve`**, above.
 
 All Salt-protocol decisions about *whether* a given event reaches your
 callback at all — dedup, GACM active-agent gating, the Mediator's

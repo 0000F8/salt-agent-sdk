@@ -7,5 +7,7 @@ export * from "./delegations";
 export * from "./work";
 export * from "./sessions";
 export * from "./webhook";
+export * from "./ask";
+export * from "./socket";
 export * from "./actions";
 export * from "./config";
