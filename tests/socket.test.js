@@ -139,7 +139,12 @@ test("advances the cursor across polls and dispatches every valid update in orde
   await new Promise((r) => setTimeout(r, sdk.ACTIVE_POLL_DELAY_MS + 300));
 
   assert.deepStrictEqual(received, ["hi 1", "hi 2"]);
-  assert.match(fetchImpl.calls[0], /after=0/);
+  // Round 3 (server-side ack): with no local cursor, the first poll omits
+  // `after` entirely so salt-api's own stored ack applies -- it must NOT
+  // send after=0, which is a wire distinction the server treats the same
+  // way, but the client should still prefer to say nothing over a number
+  // it doesn't actually have grounds for.
+  assert.doesNotMatch(fetchImpl.calls[0], /after=/, "the first poll with no local cursor must omit after entirely");
   assert.ok(fetchImpl.calls.some((u) => /after=102/.test(u)), "the second poll used the cursor the first response returned");
 });
 
@@ -195,7 +200,16 @@ test("rejects a badly-signed envelope without dispatching it, while a validly-si
 // necessarily forged -- salt-api rotates a signing key with no push
 // notification, so the first sign of a rotation is exactly a signature
 // that fails against whatever secret this process had cached.
-test("N4: a signature that fails against the cached secret self-heals once the fresh secret verifies it", async (t) => {
+// R1 (round 3, 2026-09-18): round 2's per-envelope evict-and-refetch (N4)
+// is gone -- serve-time signing (LANES.md) means the socket path never
+// sees a stale signature any more. What's left is a much narrower,
+// rate-limited recheck aimed at the webhook path (a real POST, signed at
+// SEND time, can still race a genuine rotation): at most one uncached
+// fetch per agent per 60s, and it only replaces the cache if the fresh
+// value actually verifies. This still self-heals a genuine one-off
+// rotation on the socket path too (nothing routes around verifyEnvelope),
+// just without round 2's per-envelope, ungated retries.
+test("R1: a signature that fails against the cached secret self-heals once the fresh secret verifies it", async (t) => {
   const agentKeys = await sdk.generateKeypair("agent-pass-n4a");
   const AGENT_ID = "sock-n4a";
   const store = sdk.createIdentityStore(tempStore());
@@ -280,7 +294,7 @@ test("N4: a signature that fails against the cached secret self-heals once the f
   assert.strictEqual(secretCalls.length, 2, "exactly one priming fetch plus exactly one refetch-after-bad-signature");
 });
 
-test("N4: a signature that STILL fails after a genuine secret change is retried once, then treated as definitive", async (t) => {
+test("R1: a signature that still fails after the bounded recheck is definitive IMMEDIATELY -- no transient retry any more", async (t) => {
   const agentKeys = await sdk.generateKeypair("agent-pass-n4b");
   const AGENT_ID = "sock-n4b";
   const store = sdk.createIdentityStore(tempStore());
@@ -315,7 +329,7 @@ test("N4: a signature that STILL fails after a genuine secret change is retried 
   };
   // Signed with a secret the mocked client will never actually return.
   const row = updateRow(1, AGENT_ID, "secret-bogus", "message", body);
-  const fetchImpl = makeQueueFetch([{ body: { updates: [row], cursor: 1 }, delayMs: 5 }]);
+  const fetchImpl = makeQueueFetch([{ body: { updates: [row], cursor: 1 }, delayMs: 5 }, { body: { updates: [], cursor: 1 }, delayMs: 30 }]);
 
   const logs = [];
   const logger = { info() {}, error: (msg) => logs.push(msg) };
@@ -342,14 +356,93 @@ test("N4: a signature that STILL fails after a genuine secret change is retried 
   t.after(() => socket.stop());
 
   socket.start();
-  // Long enough for attempt 1 (transient, halts, ~10ms backoff) and
-  // attempt 2 (definitive, advances past it for good) -- well short of a
-  // third re-verification cycle ever mattering.
   await new Promise((r) => setTimeout(r, 150));
 
   assert.deepStrictEqual(received, [], "a genuinely bad signature must never be dispatched, rotation or not");
-  assert.ok(logs.some((l) => /retrying once after a secret rotation/.test(l)), "expected exactly one transient retry to have been logged");
-  assert.ok(logs.some((l) => /rejected update 1 \(message\): bad signature/.test(l)), "expected the retry to then be treated as definitive");
+  assert.ok(
+    !logs.some((l) => /retrying once after a secret rotation/.test(l)),
+    "round 2's transient-retry-after-rotation grace must be gone entirely"
+  );
+  assert.ok(
+    logs.some((l) => /rejected update 1 \(message\): bad signature/.test(l)),
+    "must be rejected as definitively bad on the very first (and only) attempt"
+  );
+  // secretCalls: 1 for the initial cache-miss fetch, 1 for the single
+  // bounded recheck the bad signature triggers. Never more, however many
+  // times this same row is re-served within the 60s rate-limit window.
+  assert.strictEqual(secretCalls, 2, "the bounded recheck must fire at most once, not once per bad envelope");
+});
+
+// R1's explicit acceptance test: the webhook (real POST) path must not
+// let a burst of forged requests turn into a burst of getWebhookSecret
+// calls -- a single-flight, 60s-rate-limited recheck bounds it to at
+// most one extra call regardless of how many forged POSTs arrive.
+test("R1: 50 forged POSTs to the webhook path cause at most one getWebhookSecret call", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass-n4c");
+  const AGENT_ID = "20000000-0000-0000-0000-0000000000c1";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  let secretCalls = 0;
+  const client = {
+    async getWebhookSecret() {
+      secretCalls++;
+      return "secret-real"; // never matches the forged signatures below
+    },
+    async getChatMembers() {
+      return [];
+    },
+    async postMessage() {
+      return {};
+    },
+    async signalTyping() {},
+    trackEvent() {},
+  };
+
+  const dispatched = [];
+  const server = sdk.createWebhookServer({
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-n4c",
+    logger: silent,
+    async onMessage(ctx) {
+      dispatched.push(ctx);
+    },
+  });
+  const listening = server.app.listen(0);
+  t.after(() => listening.close());
+  const port = listening.address().port;
+
+  const body = JSON.stringify({ chat: { id: "chat-n4c" }, message: { chat_id: "chat-n4c", message_id: "m-n4c" } });
+  const forgedPost = () => {
+    const t0 = Math.floor(Date.now() / 1000);
+    return fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Salt-Agent-Id": AGENT_ID, "X-Salt-Signature": `t=${t0},v1=${"0".repeat(64)}` },
+      body,
+    });
+  };
+
+  // Prime the cache with ONE real request first (the still-unbounded
+  // concurrent-first-miss path in secretForAgent is a separate, pre-
+  // existing concern from R1's bounded recheck) so the 50 forged POSTs
+  // below all hit an already-warm cache and exercise ONLY the bounded,
+  // single-flight recheck this fix adds.
+  const primedHeaders = signHeaders(AGENT_ID, "secret-real", body);
+  const primed = await fetch(`http://127.0.0.1:${port}/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...primedHeaders },
+    body,
+  });
+  assert.equal(primed.status, 200);
+  assert.strictEqual(secretCalls, 1, "priming must cost exactly one getWebhookSecret call");
+
+  const responses = await Promise.all(Array.from({ length: 50 }, () => forgedPost()));
+  assert.ok(responses.every((r) => r.status === 401), "every forged POST must be rejected 401");
+  // The cache was already warm, so none of the 50 forged requests could
+  // race a cache-miss fetch -- only the bounded recheck can fire here,
+  // and it's single-flight + rate-limited to at most one call.
+  assert.strictEqual(secretCalls, 2, "50 forged POSTs against an already-cached secret must cause at most one ADDITIONAL getWebhookSecret call");
 });
 
 test("backs off after a failed poll and recovers once the server answers again", async (t) => {
@@ -690,9 +783,14 @@ test("N10: FileDedupeStore creates the directory 0700 and the file 0600", async 
   assert.strictEqual(fs.statSync(path.join(dir, "agent-x.seen.json")).mode & 0o777, 0o600);
 });
 
-// --- N2: fail closed at start -----------------------------------------------
+// --- N2/round 3: relaxed to a warning + in-memory fallback -----------------
 
-test("N2: start() throws synchronously when the default state directory can't be created/written, and never dispatches", async (t) => {
+// Round 3 (2026-09-18): round 2's N2 made an unwritable default state
+// directory a hard, synchronous refusal to start. That's relaxed here --
+// salt-api's server-side ack (LANES.md) means a lost cursor/dedupe store
+// is no longer a replay risk, just a cache, so this now warns clearly and
+// falls back to in-memory stores for the run instead of ever throwing.
+test("round 3: an unwritable default state directory warns and falls back to in-memory stores, never throws", async (t) => {
   if (process.getuid && process.getuid() === 0) {
     t.skip("running as root -- permission bits on the read-only HOME would be bypassed");
     return;
@@ -708,24 +806,55 @@ test("N2: start() throws synchronously when the default state directory can't be
     fs.rmSync(roRoot, { recursive: true, force: true });
   });
 
-  const { store, client } = baseIdentitiesAndClient("sock-n2", "secret-n2");
-  const socket = sdk.createSocketClient({
-    host: "http://example.invalid",
-    apiKey: "the-key",
-    agentId: "sock-n2",
-    client,
-    identities: store,
-    pgpPassphrase: "agent-pass-n2",
-    logger: silent,
-    fetchImpl: async () => {
-      throw new Error("must never be called -- start() should have thrown before any poll");
-    },
-  });
+  const agentKeys = await sdk.generateKeypair("agent-pass-n2warn");
+  const AGENT_ID = "sock-n2warn";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+  const { client } = baseIdentitiesAndClient(AGENT_ID, "secret-agent");
 
-  assert.throws(
-    () => socket.start(),
-    /state directory/,
-    "start() must throw synchronously rather than silently falling back to in-memory stores"
+  const warnings = [];
+  const logger = { info() {}, error: (msg) => warnings.push(msg) };
+
+  const armored = await encryptForPublicKey("hi", agentKeys.publicKey);
+  const body = {
+    chat: { id: "chat-n2warn" },
+    message: {
+      chat_id: "chat-n2warn", message_id: "m-n2warn", message: armored, sender_message: armored,
+      user: { id: "human-n2warn", username: "dan", account_type: "User" }, created_at: new Date().toISOString(),
+    },
+  };
+  const row = updateRow(1, AGENT_ID, "secret-agent", "message", body);
+  const fetchImpl = makeQueueFetch([{ body: { updates: [row], cursor: 1 }, delayMs: 5 }, { body: { updates: [], cursor: 1 }, delayMs: 30 }]);
+
+  // Constructing the client is where the directory is checked now (not
+  // start()) -- neither construction nor start() may ever throw here.
+  let socket;
+  const received = [];
+  assert.doesNotThrow(() => {
+    socket = sdk.createSocketClient({
+      host: "http://example.invalid",
+      apiKey: "the-key",
+      agentId: AGENT_ID,
+      client,
+      identities: store,
+      pgpPassphrase: "agent-pass-n2warn",
+      logger,
+      fetchImpl,
+      timeoutSeconds: 1,
+      async onMessage(ctx) {
+        received.push(ctx.text);
+      },
+    });
+  }, "constructing the client under an unwritable default HOME must never throw");
+  t.after(() => socket.stop());
+
+  assert.doesNotThrow(() => socket.start(), "start() must never throw either");
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.deepStrictEqual(received, ["hi"], "dispatch must still work via the in-memory fallback");
+  assert.ok(
+    warnings.some((w) => /WARNING/.test(w) && /in-memory/i.test(w)),
+    "expected a clear warning about the fallback to in-memory stores"
   );
 });
 

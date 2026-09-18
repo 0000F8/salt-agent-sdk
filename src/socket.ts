@@ -28,23 +28,35 @@
 //       AgentUpdatesChannel over Action Cable is the real push path; this
 //       is the fallback/catch-up, polled ADAPTIVELY (see ACTIVE_POLL_DELAY_MS/
 //       IDLE_POLL_DELAY_MS below) rather than in a tight loop.
-//   M5/F3: a socket envelope can sit in the outbox for days before this
-//       client ever sees it, so its embedded signing timestamp is routinely
-//       "stale" by the webhook path's ~300s tolerance. Verification here
-//       uses a MUCH wider tolerance (SOCKET_SIGNATURE_TOLERANCE_SECONDS,
-//       matching salt-api's AgentUpdate::RETENTION + 1h of slack). Replay
-//       protection comes from the cursor plus a persistent per-agent
-//       delivery_id dedupe (DedupeStore) instead of the timestamp. A
-//       verification failure that LOOKS transient (a network error
-//       fetching the signing key, never a bad/forged signature) halts this
-//       batch and does NOT advance the cursor past it -- retried with
-//       backoff instead, or a real update sitting behind a network blip
-//       would be skipped forever.
-//   The default cursor/dedupe stores are now FILE-based
-//   (~/.salt/agents/<agentId>/{cursor,seen}.json) -- memory is opt-in, not
-//   the default, since silently losing the cursor/dedupe set on every
-//   restart is exactly the kind of thing that should be a deliberate
-//   choice, not an accident of not passing an option.
+//   ROUND 3 (2026-09-18) -- serve-time signing + server-side ack:
+//       salt-api now signs every outbox envelope FRESH, over the stored
+//       body, with the agent's CURRENT webhook secret, at the moment it's
+//       SERVED (long poll, Cable replay, or a live broadcast frame) --
+//       never once at enqueue time. So this client never sees a signature
+//       that's "stale" by rotation OR by sitting in the outbox for days;
+//       verification here uses the SAME standard tolerance as the webhook
+//       path (createDispatcher's default, ~300s), not a widened one.
+//       salt-api also now remembers this agent's last-acked cursor
+//       server-side (`users.agent_updates_acked_id`, the Telegram-offset
+//       model): a poll or Cable subscribe with NO local cursor resumes
+//       from there instead of replaying up to 7 days of backlog, so a
+//       missing/lost cursorStore is no longer a REPLAY risk -- just a
+//       cache. Replay protection is therefore the server ack, PLUS this
+//       client's own cursor, PLUS the persistent per-agent delivery_id
+//       dedupe (DedupeStore) below -- never the envelope's timestamp,
+//       which is why the fail-closed start from round 2 relaxed to a
+//       clear warning-and-fall-back-to-memory (see ensureStateDirWritable's
+//       call site) rather than refusing to start at all.
+//   A verification failure that LOOKS transient (a network error fetching
+//   the signing key, never a bad/forged signature) halts this batch and
+//   does NOT advance the cursor past it -- retried with backoff instead,
+//   or a real update sitting behind a network blip would be skipped
+//   forever.
+//   The default cursor/dedupe stores are still FILE-based
+//   (~/.salt/agents/<agentId>/{cursor,seen}.json) -- memory is opt-in
+//   for a caller that wants no local persistence at all, but an
+//   unwritable default directory is now a soft warning + in-memory
+//   fallback, not a hard refusal to start (see above).
 
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
@@ -82,44 +94,68 @@ const FILE_MODE = 0o600;
 
 async function writeJsonAtomic(target: string, data: unknown): Promise<void> {
   const dir = path.dirname(target);
-  await fs.mkdir(dir, { recursive: true, mode: DIR_MODE });
-  // mkdir's `mode` is masked by the process umask on creation and is a
-  // no-op if the directory already existed with looser permissions from
-  // before this fix -- chmod explicitly so both cases converge.
-  await fs.chmod(dir, DIR_MODE).catch(() => {});
+  // L3 (round 3, 2026-09-18): mkdir's return value is the path of the
+  // first directory it actually created, or undefined if the whole path
+  // already existed -- only chmod when THIS call created it. A directory
+  // that already existed is the caller's (or a previous run's) to manage;
+  // forcing 0700 on it would silently tighten permissions on something
+  // this SDK doesn't own.
+  const created = await fs.mkdir(dir, { recursive: true, mode: DIR_MODE });
+  if (created) await fs.chmod(dir, DIR_MODE).catch(() => {});
   const tmp = `${target}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
+  // The temp file is always freshly created by this call, so it's always
+  // ours to chmod.
   await fs.writeFile(tmp, JSON.stringify(data), { mode: FILE_MODE });
   await fs.chmod(tmp, FILE_MODE).catch(() => {});
   await fs.rename(tmp, target);
 }
 
-// N2 (second security review, 2026-09-18): "fail closed at start" -- unless
-// the caller passed BOTH stores explicitly, createSocketClient's start()
-// must create the default state directory (0700) and prove it's actually
-// writable BEFORE the poll loop (and therefore any dispatch) ever runs,
-// throwing synchronously rather than silently falling back to an
-// in-memory store. Synchronous on purpose: start() itself is documented as
-// synchronous, and a caller relying on the default file-backed stores
-// needs to learn about a read-only/unwritable HOME immediately, not from
-// a buried async rejection several event-loop turns later.
+// Creates the default state directory (0700, and only chmod'd if THIS
+// call created it -- L3, same reasoning as writeJsonAtomic above) and
+// proves it's actually writable with a probe file. Throws on failure;
+// see resolveDefaultStores below for what the caller does with that
+// (round 2 treated this as fail-closed -- refuse to start at all; round 3
+// relaxes it to a warning + in-memory fallback, since the server-side ack
+// means a lost cursor/dedupe store is no longer a replay risk).
 function ensureStateDirWritable(dir: string): void {
   try {
-    fsSync.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-    try {
-      fsSync.chmodSync(dir, DIR_MODE);
-    } catch {
-      // Best-effort; an unwritable directory still fails the probe below.
+    const created = fsSync.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+    if (created) {
+      try {
+        fsSync.chmodSync(dir, DIR_MODE);
+      } catch {
+        // Best-effort; an unwritable directory still fails the probe below.
+      }
     }
     const probe = path.join(dir, `.writable-check-${process.pid}-${Math.random().toString(16).slice(2)}`);
     fsSync.writeFileSync(probe, "", { mode: FILE_MODE });
     fsSync.unlinkSync(probe);
   } catch (err) {
-    throw new Error(
-      `[socket] state directory ${dir} could not be created or is not writable -- refusing to start rather than ` +
-        `silently falling back to in-memory cursor/dedupe stores (which would lose the poll cursor and replay ` +
-        `protection on every restart). Pass cursorStore/dedupeStore explicitly to opt out of file persistence, or ` +
-        `fix the directory's permissions. Underlying error: ${(err as Error).message}`
+    throw new Error(`state directory ${dir} could not be created or is not writable: ${(err as Error).message}`);
+  }
+}
+
+// Round 3 (2026-09-18): resolves the default file-backed stores for
+// whichever of cursorStore/dedupeStore the caller didn't pass explicitly,
+// falling back to in-memory stores with a clear warning log if the
+// default directory can't be created/written -- rather than round 2's
+// synchronous throw. Safe now because salt-api remembers this agent's
+// last-acked cursor server-side (the Telegram-offset model): losing the
+// local cursor/dedupe set on restart means re-fetching from the SERVER's
+// ack, at worst a small amount of re-verification/re-dedupe work, never a
+// skipped or endlessly-replayed update.
+function resolveDefaultStores(stateDir: string, agentId: SaltId, logger: Logger): { cursorStore: CursorStore; dedupeStore: DedupeStore } {
+  try {
+    ensureStateDirWritable(stateDir);
+    return { cursorStore: FileCursorStore(stateDir), dedupeStore: FileDedupeStore(stateDir) };
+  } catch (err) {
+    logger.error(
+      `[socket ${agentId}] WARNING: ${(err as Error).message} -- falling back to IN-MEMORY cursor/dedupe stores for ` +
+        `this run. This is safe: salt-api remembers this agent's last-acked position server-side and a poll/subscribe ` +
+        `with no local cursor resumes from there. Pass cursorStore/dedupeStore explicitly to silence this, or fix the ` +
+        `directory's permissions to restore persistence across restarts.`
     );
+    return { cursorStore: MemoryCursorStore(), dedupeStore: MemoryDedupeStore() };
   }
 }
 
@@ -280,12 +316,6 @@ interface RawAgentUpdatesResponse {
   cursor: number;
 }
 
-// M5/F3: matches salt-api's AgentUpdate::RETENTION (7 days) plus an hour of
-// slack -- an envelope can legitimately sit in the outbox that long before
-// this client ever sees it. The webhook path's ~300s default stays as-is
-// for createWebhookServer; only the socket path needs this much room.
-export const SOCKET_SIGNATURE_TOLERANCE_SECONDS = 7 * 24 * 60 * 60 + 60 * 60;
-
 // Adaptive polling (H1's short-poll decision, LANES.md): the server itself
 // only ever HOLDS a request for up to ~2s when there's nothing to return,
 // so without an extra pause between polls an idle agent would still hit
@@ -362,17 +392,24 @@ class PollHttpError extends Error {
   }
 }
 
+// L4 (round 3, 2026-09-18): a misconfigured or hostile Retry-After must
+// not be able to park this client indefinitely -- clamp to 15 minutes,
+// comfortably above every real throttle window in rack_attack.rb (the
+// longest is the 5-minute blanket one) while still bounding the wait.
+const MAX_RETRY_AFTER_MS = 15 * 60 * 1000;
+
 /** Rack::Attack (and HTTP generally) sends Retry-After as either a plain
- *  integer number of seconds or an HTTP-date; either is honoured. */
+ *  integer number of seconds or an HTTP-date; either is honoured, clamped
+ *  to MAX_RETRY_AFTER_MS. */
 function parseRetryAfterMs(value: string | null | undefined): number | undefined {
   if (!value) return undefined;
   const trimmed = value.trim();
   if (/^\d+$/.test(trimmed)) {
     const seconds = Number(trimmed);
-    return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
+    return Number.isFinite(seconds) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, seconds * 1000)) : undefined;
   }
   const asDate = Date.parse(trimmed);
-  return Number.isNaN(asDate) ? undefined : Math.max(0, asDate - Date.now());
+  return Number.isNaN(asDate) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, asDate - Date.now()));
 }
 
 /**
@@ -380,10 +417,12 @@ function parseRetryAfterMs(value: string | null | undefined): number | undefined
  * GET /api/v1/agent/updates (adaptively -- see ACTIVE_POLL_DELAY_MS/
  * IDLE_POLL_DELAY_MS), verifying each envelope with the exact same check
  * createWebhookServer applies to a webhook POST (createDispatcher's
- * verifyEnvelope, both headers + body, at SOCKET_SIGNATURE_TOLERANCE_SECONDS),
- * and dispatching it to the SAME onMessage/onCardInteraction/etc. handlers.
- * See this file's header comment for the one-line switch from
- * createWebhookServer, and for what the 2026-09-18 security review changed.
+ * verifyEnvelope, standard tolerance -- round 3, 2026-09-18: salt-api
+ * signs each envelope fresh at serve time, so this no longer needs a
+ * widened one), and dispatching it to the SAME onMessage/onCardInteraction/
+ * etc. handlers. See this file's header comment for the one-line switch
+ * from createWebhookServer, and for what the 2026-09-18 security reviews
+ * changed.
  */
 export function createSocketClient(options: SocketClientOptions): SocketClient {
   const logger = options.logger ?? consoleLogger;
@@ -391,13 +430,16 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   const host = options.host.replace(/\/$/, "");
   const fetchImpl = options.fetchImpl ?? fetch;
   const stateDir = defaultStateDir(options.agentId);
-  // N2: only when at least one default (file-backed) store is actually
-  // going to be used -- a caller passing BOTH cursorStore and dedupeStore
-  // explicitly has opted out of file persistence entirely, and this
-  // directory is never touched on their behalf.
+  // Round 3: resolved once, synchronously, right here -- only when at
+  // least one default (file-backed) store is actually needed (a caller
+  // passing BOTH cursorStore and dedupeStore explicitly has opted out of
+  // file persistence entirely, and this directory is never touched on
+  // their behalf). No longer throws on an unwritable directory -- see
+  // resolveDefaultStores.
   const needsStateDir = options.cursorStore === undefined || options.dedupeStore === undefined;
-  const cursorStore = options.cursorStore ?? FileCursorStore(stateDir);
-  const dedupeStore = options.dedupeStore ?? FileDedupeStore(stateDir);
+  const defaults = needsStateDir ? resolveDefaultStores(stateDir, options.agentId, logger) : undefined;
+  const cursorStore = options.cursorStore ?? defaults!.cursorStore;
+  const dedupeStore = options.dedupeStore ?? defaults!.dedupeStore;
   const timeoutSeconds = options.timeoutSeconds ?? 2;
   const limit = options.limit ?? 100;
   const minBackoffMs = options.minBackoffMs ?? 1000;
@@ -432,9 +474,11 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
     const headers = update.headers || {};
     let result: Awaited<ReturnType<typeof dispatcher.verifyEnvelope>>;
     try {
-      result = await dispatcher.verifyEnvelope(headers["X-Salt-Agent-Id"], headers["X-Salt-Signature"], update.body, {
-        toleranceSeconds: SOCKET_SIGNATURE_TOLERANCE_SECONDS,
-      });
+      // Round 3: no widened tolerance -- salt-api signs this envelope
+      // fresh, over the stored body, at the moment it's served, so its
+      // timestamp is always fresh too. The standard (createDispatcher
+      // default, ~300s) tolerance applies exactly like the webhook path.
+      result = await dispatcher.verifyEnvelope(headers["X-Salt-Agent-Id"], headers["X-Salt-Signature"], update.body);
     } catch (err) {
       logger.error(`[socket ${agentId}] verifying update ${update.id} threw: ${(err as Error).message}; will retry`);
       return "halt";
@@ -473,7 +517,17 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   }
 
   async function pollOnce(cursor: number): Promise<{ cursor: number; hadActivity: boolean; halted: boolean }> {
-    const url = `${host}/api/v1/agent/updates?after=${cursor}&timeout=${timeoutSeconds}&limit=${limit}`;
+    // Round 3 (server-side ack, LANES.md): with no local cursor (cursor
+    // is exactly 0 -- never polled, or a fresh/lost cursorStore), poll
+    // WITHOUT `after` at all so salt-api resumes from this agent's own
+    // stored ack instead of replaying up to 7 days of backlog. Once the
+    // cursor has advanced past 0, `after` is sent as always -- the server
+    // treats a missing `after` and `after=0` identically (both resume
+    // from its stored ack), but omitting it once there IS a real local
+    // cursor would throw away this client's own, possibly-more-advanced,
+    // position.
+    const afterParam = cursor > 0 ? `&after=${cursor}` : "";
+    const url = `${host}/api/v1/agent/updates?timeout=${timeoutSeconds}&limit=${limit}${afterParam}`;
     abortController = new AbortController();
     let res: Response;
     try {
@@ -566,13 +620,9 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   return {
     start() {
       if (loopPromise) return; // already running
-      // N2: fail closed BEFORE any dispatch, synchronously -- a caller
-      // relying on the file-backed defaults must learn about an
-      // unwritable/unwritable-to-create state directory (read-only HOME,
-      // permissions, out of disk) right here, not several polls in, and
-      // never by silently limping along on an in-memory fallback that
-      // would lose the cursor and dedupe set on every restart.
-      if (needsStateDir) ensureStateDirWritable(stateDir);
+      // Round 3: no fail-closed check here any more -- resolveDefaultStores
+      // already handled (and, if necessary, warned about and fell back
+      // from) an unwritable state directory at construction time, above.
       stopped = false;
       loopPromise = loop().catch((err) => logger.error(`[socket ${agentId}] loop exited unexpectedly: ${(err as Error).message}`));
     },
