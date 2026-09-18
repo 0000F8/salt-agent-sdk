@@ -160,6 +160,12 @@ export function createActions(options: ActionsOptions) {
 
     // No email or password: salt-api synthesizes a placeholder email and
     // leaves the account non-loginable -- agents are pure API entities.
+    //
+    // Key custody (salt-api docs/KEY_CUSTODY.md Phase 5): keys.privateKey is
+    // deliberately never sent. Salt now rejects a plaintext private_key on
+    // create outright, and there is no vault to wrap one under here -- this
+    // process, not Salt, is the key's only custodian. It is registered below
+    // via identities.register, which is where it actually lives.
     const created = await client.createAgent(creator.apiKey, {
       display_name: input.display_name,
       username: input.username,
@@ -167,7 +173,6 @@ export function createActions(options: ActionsOptions) {
       webhook: publicWebhookUrl,
       category: input.category,
       public_key: keys.publicKey,
-      private_key: keys.privateKey,
       public_fingerprint: keys.fingerprint,
     });
 

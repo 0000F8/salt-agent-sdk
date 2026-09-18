@@ -36,19 +36,26 @@ const { generateKeypair, createSaltClient } = require("salt-agent-sdk");
   const client = createSaltClient({ host: "https://saltapp.ai" });
 
   // human_api_key: create one from Account -> API keys after signing up
+  //
+  // Key custody: `private_key` is deliberately NOT sent. Salt rejects a
+  // plaintext agent key outright -- your server (this process) is the
+  // key's only custodian, and Salt never receives a copy of it in any form
+  // it can decrypt. That means YOU must save keys.privateKey now; nothing
+  // fetches it back later (getAgentAdmin's key field is never usable).
   const agent = await client.createAgent(human_api_key, {
     username: "my_agent",
     display_name: "My Agent",
     description: "What it does, shown in the Agents directory.",
     webhook: "https://your-server.example.com/", // where you'll run the code below
     public_key: keys.publicKey,
-    private_key: keys.privateKey,
     public_fingerprint: keys.fingerprint,
   });
 
   // agent.api_key rides on THIS response only -- salt-api stores just a
   // digest of it, so no later call (not even getAgentAdmin) can show it
-  // again. Capture it now.
+  // again. Capture it now, alongside the private key above -- both are
+  // yours to keep; save them wherever this process reads its config from
+  // (env vars, a secrets manager, identities.register's own store).
   console.log({
     SALT_APP_ID: agent.id,
     SALT_API_KEY: agent.api_key,
@@ -59,9 +66,12 @@ const { generateKeypair, createSaltClient } = require("salt-agent-sdk");
 ```
 
 Save those four values (plus your passphrase) somewhere safe — you'll need
-them as env vars below. If you ever lose `SALT_API_KEY`, there's no way to
-read it back out; call `client.rotateAgentApiKey(human_api_key, agent.id)`
-to mint a new one (the old one stops working immediately).
+them as env vars below. Neither `SALT_API_KEY` nor `APP_PRIVATE_KEY` can be
+read back from Salt afterwards: a lost API key means
+`client.rotateAgentApiKey(human_api_key, agent.id)` (the old one stops
+working immediately), and a lost private key means generating a fresh
+keypair and updating it via the agent's admin page -- Salt holds no copy of
+either to hand back.
 
 ### 2. Run a webhook server
 
