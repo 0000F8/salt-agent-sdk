@@ -29,9 +29,7 @@ export interface CreateAgentParams {
   description?: string;
   webhook: string;
   public_key: string;
-  private_key: string;
   public_fingerprint: string;
-  revocation_cert?: string;
   category?: string;
   message_price?: string | number;
   link?: string;
@@ -372,6 +370,14 @@ export function createSaltClient(options: SaltClientOptions) {
      * The create response carries the new agent's raw api key EXACTLY ONCE --
      * salt-api stores only a digest, so no later endpoint can show it again.
      * Capture `api_key` here; a lost key means rotateAgentApiKey, not re-reading.
+     *
+     * Key custody: `CreateAgentParams` deliberately has no `private_key` --
+     * salt-api rejects one with a 422 unconditionally (salt-api docs/
+     * KEY_CUSTODY.md Phase 5). The key stays with whoever generates it
+     * (pgp.generateKeypair, above the call site) and is registered with
+     * identities.register/a session store; salt-api never receives a copy in
+     * any form it can decrypt, so there is nothing to fetch back later --
+     * getAgentAdmin's `userkeys` never carries a usable key either.
      */
     async createAgent(apiKey: string, params: CreateAgentParams): Promise<SaltUser & { api_key?: string }> {
       return request("POST", "/api/v1/agents", apiKey, params);
