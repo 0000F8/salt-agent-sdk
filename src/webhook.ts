@@ -319,6 +319,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // One signing key per identity, fetched lazily with that identity's own api
   // key and cached. A miss is not fatal on its own -- verifyRequest decides.
   const secretCache = new Map<string, string>();
+  // N4 (second security review, 2026-09-18): tracks, per agent, whether a
+  // one-time "still fails right after a genuine secret rotation" grace has
+  // already been spent -- see the bad-signature branch of verifyEnvelope.
+  const grantedTransientRetry = new Set<string>();
   async function secretForAgent(agentId: SaltId): Promise<string | undefined> {
     const cacheKey = String(agentId).toLowerCase();
     const cached = secretCache.get(cacheKey);
@@ -387,14 +391,56 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     const secret = await secretForAgent(agentId);
     if (!secret) return { ok: false, reason: `no signing key for agent ${agentId}`, transient: true };
 
-    const expected = createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
+    const cacheKey = String(agentId).toLowerCase();
 
     // Constant-time: a fast string compare leaks the digest a byte at a time.
-    const a = Buffer.from(v1, "utf8");
-    const b = Buffer.from(expected, "utf8");
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: "bad signature", transient: false };
+    const verify = (withSecret: string): boolean => {
+      const expected = createHmac("sha256", withSecret).update(`${t}.${rawBody}`).digest("hex");
+      const a = Buffer.from(v1, "utf8");
+      const b = Buffer.from(expected, "utf8");
+      return a.length === b.length && timingSafeEqual(a, b);
+    };
 
-    return { ok: true };
+    if (verify(secret)) {
+      grantedTransientRetry.delete(cacheKey);
+      return { ok: true };
+    }
+
+    // N4 (second security review, 2026-09-18): before concluding "forged",
+    // rule out a stale cached secret. salt-api rotates a signing key with
+    // no push notification to this process -- the FIRST and only sign of a
+    // rotation is exactly this: a signature that fails against whatever we
+    // had cached. Evict the cache and refetch once so a genuine rotation
+    // self-heals without ever treating a rotated key as an attack.
+    secretCache.delete(cacheKey);
+    let freshSecret: string | undefined;
+    try {
+      freshSecret = await secretForAgent(agentId);
+    } catch (err) {
+      logger.error(`[webhook] refetching signing key for agent ${agentId} after a bad signature failed: ${(err as Error).message}`);
+    }
+
+    if (freshSecret && freshSecret !== secret) {
+      if (verify(freshSecret)) {
+        grantedTransientRetry.delete(cacheKey);
+        return { ok: true };
+      }
+      // The secret really did just change AND the fresh value still
+      // doesn't verify -- give this exactly one transient retry per agent
+      // (e.g. a second rotation racing this one) before calling it
+      // definitively bad, so a single unlucky race doesn't get treated as
+      // a forged signature outright.
+      if (!grantedTransientRetry.has(cacheKey)) {
+        grantedTransientRetry.add(cacheKey);
+        return { ok: false, reason: "bad signature (retrying once after a secret rotation)", transient: true };
+      }
+      grantedTransientRetry.delete(cacheKey);
+      return { ok: false, reason: "bad signature", transient: false };
+    }
+
+    // The secret came back unchanged (or couldn't be refetched at all) --
+    // no rotation story to tell, so this is definitively a bad signature.
+    return { ok: false, reason: "bad signature", transient: false };
   }
 
   // Salt fires one webhook per chat member with a callback URL
