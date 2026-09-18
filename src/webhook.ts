@@ -319,10 +319,6 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // One signing key per identity, fetched lazily with that identity's own api
   // key and cached. A miss is not fatal on its own -- verifyRequest decides.
   const secretCache = new Map<string, string>();
-  // N4 (second security review, 2026-09-18): tracks, per agent, whether a
-  // one-time "still fails right after a genuine secret rotation" grace has
-  // already been spent -- see the bad-signature branch of verifyEnvelope.
-  const grantedTransientRetry = new Set<string>();
   async function secretForAgent(agentId: SaltId): Promise<string | undefined> {
     const cacheKey = String(agentId).toLowerCase();
     const cached = secretCache.get(cacheKey);
@@ -343,6 +339,46 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  // R1 (round 3, 2026-09-18): a bounded, rate-limited recheck for the ONE
+  // case that can still legitimately race a rotation now that salt-api
+  // signs socket-mode envelopes fresh at serve time (LANES.md) -- a real
+  // webhook POST, which IS signed at send time by the enqueuing job, can
+  // still land here with a signature made against a secret that rotated
+  // a moment after the job read it but before this cache picked up the
+  // change. At most one uncached fetch per agent per 60s, single-flight
+  // (a burst of bad signatures for one agent shares the one in-flight
+  // check rather than each firing its own), and it NEVER evicts/replaces
+  // the cached secret unless the freshly fetched one actually verifies
+  // the failing envelope -- a fetch that doesn't fix the problem leaves
+  // the cache exactly as it was. Round 2's per-envelope evict-and-refetch
+  // (and its one-time "transient" grace) is gone entirely: with
+  // serve-time signing the socket path never needs it, and this bounded
+  // version is what's left for the webhook path.
+  const UNCACHED_CHECK_MIN_INTERVAL_MS = 60_000;
+  const lastUncachedCheckAt = new Map<string, number>();
+  const uncachedCheckInFlight = new Map<string, Promise<string | undefined>>();
+  function uncachedSecretCheck(agentId: SaltId, cacheKey: string): Promise<string | undefined> {
+    const inFlight = uncachedCheckInFlight.get(cacheKey);
+    if (inFlight) return inFlight;
+    const lastAt = lastUncachedCheckAt.get(cacheKey) ?? 0;
+    if (Date.now() - lastAt < UNCACHED_CHECK_MIN_INTERVAL_MS) return Promise.resolve(undefined);
+    lastUncachedCheckAt.set(cacheKey, Date.now());
+    const promise = (async () => {
+      const identity = identities.get(agentId);
+      if (!identity) return undefined;
+      try {
+        return await client.getWebhookSecret(identity.apiKey);
+      } catch (err) {
+        logger.error(`[webhook] uncached signing-key recheck for agent ${agentId} failed: ${(err as Error).message}`);
+        return undefined;
+      }
+    })().finally(() => {
+      uncachedCheckInFlight.delete(cacheKey);
+    });
+    uncachedCheckInFlight.set(cacheKey, promise);
+    return promise;
+  }
+
   // Verifies one envelope's signature. Takes the two headers and the raw
   // body explicitly rather than an Express Request -- the SAME check runs
   // for a webhook POST (createWebhookServer passes req.get(...) and the
@@ -350,14 +386,11 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // AgentUpdate row's `headers`/`body` fields verbatim), so this function
   // must not assume either transport.
   //
-  // `toleranceSeconds` overrides the webhook path's default
-  // (signatureTolerance, ~300s): socket.ts passes a MUCH larger one (M5/F3,
-  // security review 2026-09-18) -- a socket-mode envelope can sit in the
-  // outbox for up to AgentUpdate::RETENTION (7 days server-side) before a
-  // client ever sees it, so its embedded timestamp is routinely "stale" by
-  // the webhook path's clock. Replay protection for THAT path comes from
-  // the cursor plus a persistent delivery_id dedupe instead (see socket.ts)
-  // -- never from the timestamp once the tolerance is that wide.
+  // `toleranceSeconds` overrides the default (signatureTolerance, ~300s)
+  // for a caller with its own reason to -- round 3 removed socket.ts's
+  // widened one (serve-time signing means a socket envelope's timestamp
+  // is always fresh too), so both transports use the same standard window
+  // by default now.
   //
   // `transient: true` marks a failure that might resolve on retry (right
   // now, only "no signing key" -- secretForAgent already swallows its own
@@ -401,45 +434,17 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       return a.length === b.length && timingSafeEqual(a, b);
     };
 
-    if (verify(secret)) {
-      grantedTransientRetry.delete(cacheKey);
+    if (verify(secret)) return { ok: true };
+
+    // Pre-round-2 behaviour, restored: a bad signature is definitive --
+    // UNLESS the bounded recheck above finds a genuinely different
+    // secret that verifies it, in which case it self-heals silently and
+    // the cache picks up the new value. Never transient, never retried.
+    const fresh = await uncachedSecretCheck(agentId, cacheKey);
+    if (fresh && fresh !== secret && verify(fresh)) {
+      secretCache.set(cacheKey, fresh);
       return { ok: true };
     }
-
-    // N4 (second security review, 2026-09-18): before concluding "forged",
-    // rule out a stale cached secret. salt-api rotates a signing key with
-    // no push notification to this process -- the FIRST and only sign of a
-    // rotation is exactly this: a signature that fails against whatever we
-    // had cached. Evict the cache and refetch once so a genuine rotation
-    // self-heals without ever treating a rotated key as an attack.
-    secretCache.delete(cacheKey);
-    let freshSecret: string | undefined;
-    try {
-      freshSecret = await secretForAgent(agentId);
-    } catch (err) {
-      logger.error(`[webhook] refetching signing key for agent ${agentId} after a bad signature failed: ${(err as Error).message}`);
-    }
-
-    if (freshSecret && freshSecret !== secret) {
-      if (verify(freshSecret)) {
-        grantedTransientRetry.delete(cacheKey);
-        return { ok: true };
-      }
-      // The secret really did just change AND the fresh value still
-      // doesn't verify -- give this exactly one transient retry per agent
-      // (e.g. a second rotation racing this one) before calling it
-      // definitively bad, so a single unlucky race doesn't get treated as
-      // a forged signature outright.
-      if (!grantedTransientRetry.has(cacheKey)) {
-        grantedTransientRetry.add(cacheKey);
-        return { ok: false, reason: "bad signature (retrying once after a secret rotation)", transient: true };
-      }
-      grantedTransientRetry.delete(cacheKey);
-      return { ok: false, reason: "bad signature", transient: false };
-    }
-
-    // The secret came back unchanged (or couldn't be refetched at all) --
-    // no rotation story to tell, so this is definitively a bad signature.
     return { ok: false, reason: "bad signature", transient: false };
   }
 
