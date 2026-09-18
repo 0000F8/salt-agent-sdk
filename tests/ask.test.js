@@ -306,3 +306,172 @@ test("ask() rejects on timeout, and clears its pending state so a later ask() in
   assert.match(errors[0], /No answer within/);
   assert.strictEqual(secondAskSettled, true);
 });
+
+// --- M2 (security review, 2026-09-18) ---------------------------------------
+
+test("the posted card's buttons carry restricted_to: [answererId] (the message's sender, by default)", async (t) => {
+  const posted = [];
+  const api = withSecret({
+    async postCard(apiKey, chatId, blocks, text) {
+      posted.push({ chatId, blocks, text });
+      return { id: "card-restrict" };
+    },
+    async updateCard() {
+      return {};
+    },
+  });
+
+  const { postMessageFrom } = await startAgent(t, {
+    api,
+    async onMessage(ctx) {
+      ctx.ask("Continue?", { options: ["Yes", "No"], timeoutMs: 30 }).catch(() => {});
+    },
+  });
+
+  await postMessageFrom({ id: "human-restrict", username: "dan", account_type: "User" }, "chat-restrict", "hello");
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.strictEqual(posted.length, 1);
+  const actions = posted[0].blocks.find((b) => b.type === "actions");
+  for (const button of actions.elements) {
+    assert.deepStrictEqual(button.restricted_to, ["human-restrict"]);
+  }
+});
+
+test("a tap or reply from someone other than the named answerer is ignored, and the ask keeps waiting", async (t) => {
+  const api = withSecret({
+    async postCard() {
+      return { id: "card-other" };
+    },
+    async updateCard() {
+      return {};
+    },
+  });
+
+  let askResult;
+  let asked = false;
+  const { postMessageFrom, postCardInteraction } = await startAgent(t, {
+    api,
+    async onMessage(ctx) {
+      // A bystander's message that ask.ts correctly refuses to consume
+      // falls through to a fresh onMessage call, same as any other new
+      // message -- guard on `asked`, not `askResult`, or this would try
+      // (and synchronously fail) to start a SECOND ask while one is
+      // already pending for this (identity, chat).
+      if (!asked) {
+        asked = true;
+        ctx.ask("Continue?", { options: ["Yes"], freeText: true, timeoutMs: 5000 }).then((r) => (askResult = r));
+      }
+    },
+  });
+
+  await postMessageFrom({ id: "human-owner", username: "dan", account_type: "User" }, "chat-other", "hello");
+  await new Promise((r) => setTimeout(r, 100));
+
+  // A DIFFERENT human's tap on the same card/action must be ignored.
+  const posted = await postCardInteraction("chat-other", "card-other", "ask_0_ignored", { id: "human-bystander", username: "bystander", account_type: "User" });
+  assert.equal(posted.status, 200);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.strictEqual(askResult, undefined, "a bystander's tap must not resolve the ask");
+
+  // A different human's typed reply must also be ignored (never even a fresh onMessage).
+  await postMessageFrom({ id: "human-bystander", username: "bystander", account_type: "User" }, "chat-other", "Yes");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.strictEqual(askResult, undefined, "a bystander's typed reply must not resolve the ask either");
+
+  // The actual owner can still answer afterwards.
+  await postMessageFrom({ id: "human-owner", username: "dan", account_type: "User" }, "chat-other", "Yes");
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepStrictEqual(askResult, { answer: "Yes", by: "human-owner", via: "message" });
+});
+
+test("approve(): an exact 'yes'/'y' (optionally with . or !) approves; a near-miss like 'yeah' does not", async (t) => {
+  const api = withSecret({
+    async postCard() {
+      return { id: `card-${Math.random()}` };
+    },
+    async updateCard() {
+      return {};
+    },
+  });
+
+  const results = [];
+  const { postMessageFrom } = await startAgent(t, {
+    api,
+    async onMessage(ctx) {
+      if (results.length === 0) {
+        results.push(await ctx.approve("Proceed?", { timeoutMs: 5000 }));
+      }
+    },
+  });
+
+  await postMessageFrom({ id: "human-yeah", username: "dan", account_type: "User" }, "chat-yeah", "hello");
+  await new Promise((r) => setTimeout(r, 80));
+  await postMessageFrom({ id: "human-yeah", username: "dan", account_type: "User" }, "chat-yeah", "yeah");
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.strictEqual(results.length, 1);
+  assert.strictEqual(results[0].approved, false, "'yeah' is a near-miss, not an exact yes/y");
+});
+
+test("approve(): 'Yes.' with a trailing period still approves", async (t) => {
+  const api = withSecret({
+    async postCard() {
+      return { id: `card-${Math.random()}` };
+    },
+    async updateCard() {
+      return {};
+    },
+  });
+
+  const results = [];
+  const { postMessageFrom } = await startAgent(t, {
+    api,
+    async onMessage(ctx) {
+      if (results.length === 0) {
+        results.push(await ctx.approve("Proceed?", { timeoutMs: 5000 }));
+      }
+    },
+  });
+
+  await postMessageFrom({ id: "human-period", username: "dan", account_type: "User" }, "chat-period", "hello");
+  await new Promise((r) => setTimeout(r, 80));
+  await postMessageFrom({ id: "human-period", username: "dan", account_type: "User" }, "chat-period", "Yes.");
+  await new Promise((r) => setTimeout(r, 80));
+
+  assert.strictEqual(results.length, 1);
+  assert.strictEqual(results[0].approved, true);
+});
+
+test("ask() without any resolvable answerer (e.g. from a hand-off context) rejects synchronously", async (t) => {
+  const api = withSecret();
+  const agentKeys = await sdk.generateKeypair("agent-pass-noanswerer");
+  const AGENT_ID = `ask-noans-${Math.random().toString(16).slice(2)}`;
+  const store = sdk.createIdentityStore(tempStore("salt-ask-noans-"));
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "key-agent", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  let caught;
+  const server = sdk.createWebhookServer({
+    client: api,
+    identities: store,
+    pgpPassphrase: "agent-pass-noanswerer",
+    logger: silent,
+    async onHandoffConfirmed(ctx) {
+      try {
+        await ctx.ask("Anything to hand off?");
+      } catch (err) {
+        caught = err;
+      }
+    },
+  });
+  const listening = server.app.listen(0);
+  t.after(() => listening.close());
+  const port = listening.address().port;
+
+  const res = await signedPost(port, { type: "handoff_confirmed", from_agent_id: AGENT_ID, chat_id: "chat-noans", reason: "done" }, AGENT_ID, "secret-agent");
+  assert.equal(res.status, 200);
+  await new Promise((r) => setTimeout(r, 100));
+
+  assert.ok(caught, "expected ask() to reject synchronously without a resolvable answerer");
+  assert.match(caught.message, /needs an answerer/);
+});
