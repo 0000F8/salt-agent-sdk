@@ -339,40 +339,62 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
-  // Returns null when the envelope is authentic, or a reason string to
-  // reject. Takes the two headers and the raw body explicitly rather than
-  // an Express Request -- the SAME check runs for a webhook POST
-  // (createWebhookServer passes req.get(...) and the captured rawBody) and
-  // for a socket-mode envelope (socket.ts passes the AgentUpdate row's
-  // `headers`/`body` fields verbatim), so this function must not assume
-  // either transport.
-  async function verifyEnvelope(agentId: string | undefined, signature: string | undefined, rawBody: string): Promise<string | null> {
-    if (!verifySignatures) return null;
+  // Verifies one envelope's signature. Takes the two headers and the raw
+  // body explicitly rather than an Express Request -- the SAME check runs
+  // for a webhook POST (createWebhookServer passes req.get(...) and the
+  // captured rawBody) and for a socket-mode envelope (socket.ts passes the
+  // AgentUpdate row's `headers`/`body` fields verbatim), so this function
+  // must not assume either transport.
+  //
+  // `toleranceSeconds` overrides the webhook path's default
+  // (signatureTolerance, ~300s): socket.ts passes a MUCH larger one (M5/F3,
+  // security review 2026-09-18) -- a socket-mode envelope can sit in the
+  // outbox for up to AgentUpdate::RETENTION (7 days server-side) before a
+  // client ever sees it, so its embedded timestamp is routinely "stale" by
+  // the webhook path's clock. Replay protection for THAT path comes from
+  // the cursor plus a persistent delivery_id dedupe instead (see socket.ts)
+  // -- never from the timestamp once the tolerance is that wide.
+  //
+  // `transient: true` marks a failure that might resolve on retry (right
+  // now, only "no signing key" -- secretForAgent already swallows its own
+  // network errors and returns undefined either way, so this can't
+  // distinguish "genuinely no such identity" from "the fetch failed" any
+  // more finely than that) -- socket.ts must not advance its cursor past a
+  // row that failed for a transient reason, or a real update sitting
+  // behind a network blip would be skipped forever.
+  async function verifyEnvelope(
+    agentId: string | undefined,
+    signature: string | undefined,
+    rawBody: string,
+    opts?: { toleranceSeconds?: number }
+  ): Promise<{ ok: true } | { ok: false; reason: string; transient: boolean }> {
+    if (!verifySignatures) return { ok: true };
 
     // Taken as sent. `Number(...)` here made agentId NaN for every real
     // request, NaN is falsy, and so EVERY signed webhook was rejected as
     // "missing signature" -- the header was present and correctly formed.
-    if (!agentId || !signature) return "missing signature";
+    if (!agentId || !signature) return { ok: false, reason: "missing signature", transient: false };
 
     const t = /t=(\d+)/.exec(signature)?.[1];
     const v1 = /v1=([0-9a-f]+)/.exec(signature)?.[1];
-    if (!t || !v1) return "malformed signature";
+    if (!t || !v1) return { ok: false, reason: "malformed signature", transient: false };
 
     // Replay window. Also rejects a clock far in the future.
+    const tolerance = opts?.toleranceSeconds ?? signatureTolerance;
     const age = Math.abs(Math.floor(Date.now() / 1000) - Number(t));
-    if (age > signatureTolerance) return `stale signature (${age}s old)`;
+    if (age > tolerance) return { ok: false, reason: `stale signature (${age}s old)`, transient: false };
 
     const secret = await secretForAgent(agentId);
-    if (!secret) return `no signing key for agent ${agentId}`;
+    if (!secret) return { ok: false, reason: `no signing key for agent ${agentId}`, transient: true };
 
     const expected = createHmac("sha256", secret).update(`${t}.${rawBody}`).digest("hex");
 
     // Constant-time: a fast string compare leaks the digest a byte at a time.
     const a = Buffer.from(v1, "utf8");
     const b = Buffer.from(expected, "utf8");
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return "bad signature";
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: "bad signature", transient: false };
 
-    return null;
+    return { ok: true };
   }
 
   // Salt fires one webhook per chat member with a callback URL
@@ -748,14 +770,29 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // live in ask.ts; resolveCardInteraction/resolveMessage below (wired into
   // handleCardInteraction/handleMessage) are what settle a wait this
   // creates.
-  function makeAsk(identity: AgentIdentity, chatId: SaltId): (question: string, opts?: AskOptions) => Promise<AskResult> {
-    return (question: string, opts?: AskOptions) => asks.ask(client, identity, chatId, question, opts);
+  //
+  // `defaultAnswererId` (M2, security review) is each context's natural
+  // "whoever this turn is answering" -- see the individual ctx-construction
+  // call sites for what each context type passes (a message's senderRaw,
+  // chat_opened's openedBy, invoice_paid's buyer; the two hand-off contexts
+  // have no natural default and pass none, so their ask()/approve() calls
+  // must supply `answererId` explicitly). A caller's own `opts.answererId`
+  // always wins over this default.
+  function makeAsk(
+    identity: AgentIdentity,
+    chatId: SaltId,
+    defaultAnswererId?: SaltId
+  ): (question: string, opts?: AskOptions) => Promise<AskResult> {
+    return (question: string, opts?: AskOptions) =>
+      asks.ask(client, identity, chatId, question, { answererId: defaultAnswererId, ...opts });
   }
   function makeApprove(
     identity: AgentIdentity,
-    chatId: SaltId
-  ): (summary: string, opts?: { timeoutMs?: number }) => Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }> {
-    return (summary: string, opts?: { timeoutMs?: number }) => asks.approve(client, identity, chatId, summary, opts);
+    chatId: SaltId,
+    defaultAnswererId?: SaltId
+  ): (summary: string, opts?: { timeoutMs?: number; answererId?: SaltId }) => Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }> {
+    return (summary: string, opts?: { timeoutMs?: number; answererId?: SaltId }) =>
+      asks.approve(client, identity, chatId, summary, { answererId: defaultAnswererId, ...opts });
   }
 
   // True when `chatId` has at least one human (account_type !== "Agent")
@@ -840,7 +877,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // gets its own webhook/turn, same reasoning as the mention-gating
     // below); `caption` is the raw decrypted text, same as delegations'
     // check just above.
-    if (asks.resolveMessage(chatId, senderId, senderRaw.account_type !== "Agent", caption)) return;
+    if (asks.resolveMessage(identity.saltAppId, chatId, senderId, senderRaw.account_type !== "Agent", caption)) return;
 
     // Never reply to our own messages (the reply we post is itself
     // delivered back to us as a webhook) -- this is what prevents an
@@ -964,8 +1001,11 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       attachment,
       session,
       reply: trackedReply,
-      ask: makeAsk(identity, chatId),
-      approve: makeApprove(identity, chatId),
+      // M2: default answerer is whoever sent THIS message -- never an
+      // agent (an agent sender has its own webhook/turn; ctx.ask is for
+      // asking a person).
+      ask: makeAsk(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
+      approve: makeApprove(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
@@ -1006,7 +1046,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // also see -- checked before identity resolution/onCardInteraction even
     // matter, since this can settle an ask() with no consumer handler
     // registered for cards at all.
-    if (asks.resolveCardInteraction(body.chat_id, body.card_id, body.action_id, body.user)) return;
+    if (asks.resolveCardInteraction(body.owner_id, body.chat_id, body.card_id, body.action_id, body.user)) return;
 
     const identity = identities.get(String(body.owner_id));
     if (!identity || !options.onCardInteraction) return;
@@ -1059,8 +1099,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       transferRequestId: body.transfer_request_id,
       session,
       reply: trackedReply,
-      ask: makeAsk(identity, chatId),
-      approve: makeApprove(identity, chatId),
+      // M2: default answerer is the buyer (never an agent -- an agent
+      // buyer has no need to be asked a question through its own purchase).
+      ask: makeAsk(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
+      approve: makeApprove(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
@@ -1122,8 +1164,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       openedAt: body.opened_at as string,
       session,
       reply: trackedReply,
-      ask: makeAsk(identity, chatId),
-      approve: makeApprove(identity, chatId),
+      // M2: default answerer is whoever opened the chat (never an agent).
+      ask: makeAsk(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
+      approve: makeApprove(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
@@ -1176,6 +1219,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       consultTranscript,
       session,
       reply,
+      // M2: no natural default here (a hand-off has no single "whoever
+      // this answers") -- ask()/approve() from this context must be given
+      // answererId explicitly, or they throw synchronously.
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
     };
@@ -1247,6 +1293,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       context,
       session,
       reply: trackedReply,
+      // M2: no natural default here either -- see HandoffConfirmedContext's comment above.
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
     };
@@ -1274,8 +1321,12 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
  *  Express POST route, socket.ts's long-poll loop) needs: verify an
  *  envelope's signature, then hand its body to the right handler. */
 export interface Dispatcher {
-  /** null when authentic; otherwise a reason string to log and reject on. */
-  verifyEnvelope(agentId: string | undefined, signature: string | undefined, rawBody: string): Promise<string | null>;
+  verifyEnvelope(
+    agentId: string | undefined,
+    signature: string | undefined,
+    rawBody: string,
+    opts?: { toleranceSeconds?: number }
+  ): Promise<{ ok: true } | { ok: false; reason: string; transient: boolean }>;
   dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void>;
 }
 
@@ -1331,9 +1382,9 @@ export function createWebhookServer(options: WebhookServerOptions): { app: Expre
     // actionable.
     dispatcher
       .verifyEnvelope(req.get("X-Salt-Agent-Id") || undefined, req.get("X-Salt-Signature") || undefined, rawBody)
-      .then((reason) => {
-        if (reason) {
-          logger.error(`[webhook] rejected: ${reason}`);
+      .then((result) => {
+        if (!result.ok) {
+          logger.error(`[webhook] rejected: ${result.reason}`);
           res.status(401).json({ error: "invalid signature" });
           return;
         }

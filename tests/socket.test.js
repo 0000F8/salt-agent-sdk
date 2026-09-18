@@ -116,6 +116,8 @@ test("advances the cursor across polls and dispatches every valid update in orde
     identities: store,
     pgpPassphrase: "agent-pass",
     logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
     fetchImpl,
     timeoutSeconds: 1,
     async onMessage(ctx) {
@@ -125,7 +127,10 @@ test("advances the cursor across polls and dispatches every valid update in orde
   t.after(() => socket.stop());
 
   socket.start();
-  await new Promise((r) => setTimeout(r, 150));
+  // Adaptive polling (H1/M5) waits ACTIVE_POLL_DELAY_MS (1s) after a poll
+  // that had activity before firing the next one -- wait past that, not
+  // just past the mocked network delay, to actually observe poll #2.
+  await new Promise((r) => setTimeout(r, sdk.ACTIVE_POLL_DELAY_MS + 300));
 
   assert.deepStrictEqual(received, ["hi 1", "hi 2"]);
   assert.match(fetchImpl.calls[0], /after=0/);
@@ -164,6 +169,8 @@ test("rejects a badly-signed envelope without dispatching it, while a validly-si
     identities: store,
     pgpPassphrase: "agent-pass-2",
     logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
     fetchImpl,
     timeoutSeconds: 1,
     async onMessage(ctx) {
@@ -207,6 +214,8 @@ test("backs off after a failed poll and recovers once the server answers again",
     identities: store,
     pgpPassphrase: "agent-pass-3",
     logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
     fetchImpl,
     timeoutSeconds: 1,
     minBackoffMs: 10,
@@ -253,6 +262,8 @@ test("stop() aborts an in-flight long-poll immediately rather than waiting it ou
     identities: store,
     pgpPassphrase: "unused",
     logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
     fetchImpl,
     timeoutSeconds: 25,
   });
@@ -290,6 +301,8 @@ test("start() is idempotent, and stop() then start() again resumes cleanly", asy
     identities: store,
     pgpPassphrase: "unused",
     logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
     fetchImpl,
   });
   t.after(() => socket.stop());
@@ -304,4 +317,162 @@ test("start() is idempotent, and stop() then start() again resumes cleanly", asy
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(fetchImpl.calls.length > callsAfterFirstStop, "polling resumed after stop() + start()");
   await socket.stop();
+});
+
+// --- M5/F3 (security review, 2026-09-18) ------------------------------------
+
+test("a duplicate delivery_id (e.g. replayed via the Cable backlog + long-poll overlap) is never dispatched twice", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass-dedupe");
+  const AGENT_ID = "sock-dedupe";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+  const { client } = baseIdentitiesAndClient(AGENT_ID, "secret-agent");
+
+  const armored = await encryptForPublicKey("hi", agentKeys.publicKey);
+  const body = {
+    chat: { id: "chat-dedupe" },
+    message: { chat_id: "chat-dedupe", message_id: "m-dedupe", message: armored, sender_message: armored, user: { id: "human-1", username: "dan", account_type: "User" }, created_at: new Date().toISOString() },
+  };
+  // Same delivery_id on both rows (different ids, as if replayed once via
+  // the backlog and once live) -- the SAME envelope, seen twice.
+  const raw = JSON.stringify(body);
+  const headers = signHeaders(AGENT_ID, "secret-agent", raw);
+  const row1 = { id: 1, delivery_id: "dupe-id", event: "message", headers, body: raw, created_at: new Date().toISOString() };
+  const row2 = { id: 2, delivery_id: "dupe-id", event: "message", headers, body: raw, created_at: new Date().toISOString() };
+
+  const fetchImpl = makeQueueFetch([
+    { body: { updates: [row1, row2], cursor: 2 }, delayMs: 5 },
+    { body: { updates: [], cursor: 2 }, delayMs: 30 },
+  ]);
+
+  const received = [];
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: AGENT_ID,
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-dedupe",
+    logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl,
+    timeoutSeconds: 1,
+    async onMessage(ctx) {
+      received.push(ctx.text);
+    },
+  });
+  t.after(() => socket.stop());
+
+  socket.start();
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.deepStrictEqual(received, ["hi"], "the second row (same delivery_id) must be skipped, not re-dispatched");
+});
+
+test("a transient verification failure (no signing key) halts the batch and never advances the cursor past it", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass-transient");
+  const AGENT_ID = "sock-transient";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  // getWebhookSecret fails (network down) on the FIRST call, then recovers
+  // -- exactly the shape a transient outage takes.
+  let secretCalls = 0;
+  const client = {
+    async getWebhookSecret() {
+      secretCalls++;
+      if (secretCalls === 1) throw new Error("network down");
+      return "secret-agent";
+    },
+    async getChatMembers() {
+      return [];
+    },
+    async postMessage() {
+      return {};
+    },
+    async signalTyping() {},
+    trackEvent() {},
+  };
+
+  const armored = await encryptForPublicKey("hi", agentKeys.publicKey);
+  const body = {
+    chat: { id: "chat-transient" },
+    message: { chat_id: "chat-transient", message_id: "m-transient", message: armored, sender_message: armored, user: { id: "human-1", username: "dan", account_type: "User" }, created_at: new Date().toISOString() },
+  };
+  const row = updateRow(1, AGENT_ID, "secret-agent", "message", body);
+
+  // The SAME row (same id) is served on every poll -- if the client
+  // advanced its cursor past it despite the transient failure, it would
+  // never see it again and this would never reach onMessage at all.
+  const fetchImpl = makeQueueFetch([{ body: { updates: [row], cursor: 1 }, delayMs: 5 }]);
+
+  const received = [];
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: AGENT_ID,
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-transient",
+    logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl,
+    timeoutSeconds: 1,
+    minBackoffMs: 10,
+    maxBackoffMs: 50,
+    async onMessage(ctx) {
+      received.push(ctx.text);
+    },
+  });
+  t.after(() => socket.stop());
+
+  socket.start();
+  await new Promise((r) => setTimeout(r, 200));
+
+  assert.deepStrictEqual(received, ["hi"], "the retry (after the transient failure resolved) must still see the same row");
+  assert.ok(secretCalls >= 2, "expected at least one failed attempt and one retry");
+});
+
+// --- File-based default stores ----------------------------------------------
+
+test("FileCursorStore round-trips through a real file, atomically, and defaults missing to 0", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-cursorstore-"));
+  const cursorStore = sdk.FileCursorStore(dir);
+
+  assert.strictEqual(await cursorStore.get("agent-x"), 0);
+  await cursorStore.put("agent-x", 42);
+  assert.strictEqual(await cursorStore.get("agent-x"), 42);
+
+  const raw = fs.readFileSync(path.join(dir, "cursor.json"), "utf8");
+  assert.deepStrictEqual(JSON.parse(raw), { cursor: 42 });
+  // Atomic write: no leftover temp file.
+  assert.deepStrictEqual(fs.readdirSync(dir), ["cursor.json"]);
+});
+
+test("FileDedupeStore round-trips through a real file and bounds to `max` entries", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-dedupestore-"));
+  const dedupeStore = sdk.FileDedupeStore(dir, 3);
+
+  assert.strictEqual(await dedupeStore.has("agent-x", "a"), false);
+  await dedupeStore.add("agent-x", "a");
+  await dedupeStore.add("agent-x", "b");
+  await dedupeStore.add("agent-x", "c");
+  assert.strictEqual(await dedupeStore.has("agent-x", "a"), true);
+
+  await dedupeStore.add("agent-x", "d"); // pushes "a" out (bound = 3)
+  assert.strictEqual(await dedupeStore.has("agent-x", "a"), false);
+  assert.strictEqual(await dedupeStore.has("agent-x", "d"), true);
+
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "seen.json"), "utf8"));
+  assert.deepStrictEqual(raw, ["b", "c", "d"]);
+});
+
+test("FileDedupeStore persists across a fresh store instance pointed at the same directory", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-dedupestore-persist-"));
+  await sdk.FileDedupeStore(dir).add("agent-x", "seen-once");
+
+  const reopened = sdk.FileDedupeStore(dir);
+  assert.strictEqual(await reopened.has("agent-x", "seen-once"), true);
 });
