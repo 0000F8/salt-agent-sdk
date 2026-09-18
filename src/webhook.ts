@@ -441,9 +441,12 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // secret that verifies it, in which case it self-heals silently and
     // the cache picks up the new value. Never transient, never retried.
     const fresh = await uncachedSecretCheck(agentId, cacheKey);
-    if (fresh && fresh !== secret && verify(fresh)) {
+    // The fresh secret comes from salt-api under the agent's own key, so it is
+    // authoritative: adopt it whenever it differs, even if THIS envelope doesn't
+    // verify under it, or a leaked old secret stays accepted after a rotation.
+    if (fresh && fresh !== secret) {
       secretCache.set(cacheKey, fresh);
-      return { ok: true };
+      if (verify(fresh)) return { ok: true };
     }
     return { ok: false, reason: "bad signature", transient: false };
   }
