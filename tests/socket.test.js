@@ -57,7 +57,13 @@ function makeQueueFetch(responses) {
     i++;
     await abortableDelay(entry.delayMs ?? 5, opts && opts.signal);
     if (entry.throws) throw entry.throws;
-    return { ok: entry.status === undefined || (entry.status >= 200 && entry.status < 300), status: entry.status ?? 200, json: async () => entry.body };
+    const headerMap = new Map(Object.entries(entry.headers || {}));
+    return {
+      ok: entry.status === undefined || (entry.status >= 200 && entry.status < 300),
+      status: entry.status ?? 200,
+      headers: { get: (name) => headerMap.get(name) ?? null },
+      json: async () => entry.body,
+    };
   };
   fn.calls = calls;
   return fn;
@@ -183,6 +189,167 @@ test("rejects a badly-signed envelope without dispatching it, while a validly-si
   await new Promise((r) => setTimeout(r, 150));
 
   assert.deepStrictEqual(received, ["good"], "the forged envelope never reached onMessage");
+});
+
+// N4 (second security review, 2026-09-18): a bad signature is not
+// necessarily forged -- salt-api rotates a signing key with no push
+// notification, so the first sign of a rotation is exactly a signature
+// that fails against whatever secret this process had cached.
+test("N4: a signature that fails against the cached secret self-heals once the fresh secret verifies it", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass-n4a");
+  const AGENT_ID = "sock-n4a";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  const secretCalls = [];
+  const client = {
+    async getWebhookSecret(apiKey) {
+      secretCalls.push(apiKey);
+      // The first fetch primes the cache with the OLD secret; everything
+      // after that returns the NEW one -- exactly what
+      // GET /api/v1/agents/webhook_secret looks like across a rotation.
+      return secretCalls.length === 1 ? "secret-old" : "secret-new";
+    },
+    async getChatMembers() {
+      return [];
+    },
+    async postMessage() {
+      return {};
+    },
+    async signalTyping() {},
+    trackEvent() {},
+  };
+
+  const armored1 = await encryptForPublicKey("priming", agentKeys.publicKey);
+  const primeRow = updateRow(1, AGENT_ID, "secret-old", "message", {
+    chat: { id: "chat-n4a-1" },
+    message: {
+      chat_id: "chat-n4a-1", message_id: "m-n4a-1", message: armored1, sender_message: armored1,
+      user: { id: "human-n4a", username: "dan", account_type: "User" }, created_at: new Date().toISOString(),
+    },
+  });
+
+  const armored2 = await encryptForPublicKey("post-rotation", agentKeys.publicKey);
+  // Signed with the ROTATED secret while the dispatcher's cache still
+  // holds "secret-old" from the priming row above.
+  const rotatedRow = updateRow(2, AGENT_ID, "secret-new", "message", {
+    chat: { id: "chat-n4a-2" },
+    message: {
+      chat_id: "chat-n4a-2", message_id: "m-n4a-2", message: armored2, sender_message: armored2,
+      user: { id: "human-n4a", username: "dan", account_type: "User" }, created_at: new Date().toISOString(),
+    },
+  });
+
+  // Both rows in the SAME poll response -- handleOne processes them
+  // sequentially within one pollOnce call, so this doesn't need to wait
+  // out the adaptive inter-poll delay to observe the second row.
+  const fetchImpl = makeQueueFetch([
+    { body: { updates: [primeRow, rotatedRow], cursor: 2 }, delayMs: 5 },
+    { body: { updates: [], cursor: 2 }, delayMs: 30 },
+  ]);
+
+  const received = [];
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: AGENT_ID,
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-n4a",
+    logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl,
+    timeoutSeconds: 1,
+    minBackoffMs: 10,
+    maxBackoffMs: 50,
+    async onMessage(ctx) {
+      received.push(ctx.text);
+    },
+  });
+  t.after(() => socket.stop());
+
+  socket.start();
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.deepStrictEqual(
+    received,
+    ["priming", "post-rotation"],
+    "the post-rotation envelope must self-heal and dispatch on the FIRST attempt, no retry needed"
+  );
+  assert.strictEqual(secretCalls.length, 2, "exactly one priming fetch plus exactly one refetch-after-bad-signature");
+});
+
+test("N4: a signature that STILL fails after a genuine secret change is retried once, then treated as definitive", async (t) => {
+  const agentKeys = await sdk.generateKeypair("agent-pass-n4b");
+  const AGENT_ID = "sock-n4b";
+  const store = sdk.createIdentityStore(tempStore());
+  store.register({ saltAppId: AGENT_ID, username: "helper", apiKey: "the-key", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey });
+
+  // Keeps "rotating" on every single call, but never to the value the
+  // envelope below was actually signed with -- simulates a signature that
+  // is genuinely forged/corrupted rather than merely stale.
+  let secretCalls = 0;
+  const client = {
+    async getWebhookSecret() {
+      secretCalls++;
+      return `secret-v${secretCalls}`;
+    },
+    async getChatMembers() {
+      return [];
+    },
+    async postMessage() {
+      return {};
+    },
+    async signalTyping() {},
+    trackEvent() {},
+  };
+
+  const armored = await encryptForPublicKey("never-delivered", agentKeys.publicKey);
+  const body = {
+    chat: { id: "chat-n4b" },
+    message: {
+      chat_id: "chat-n4b", message_id: "m-n4b", message: armored, sender_message: armored,
+      user: { id: "human-n4b", username: "dan", account_type: "User" }, created_at: new Date().toISOString(),
+    },
+  };
+  // Signed with a secret the mocked client will never actually return.
+  const row = updateRow(1, AGENT_ID, "secret-bogus", "message", body);
+  const fetchImpl = makeQueueFetch([{ body: { updates: [row], cursor: 1 }, delayMs: 5 }]);
+
+  const logs = [];
+  const logger = { info() {}, error: (msg) => logs.push(msg) };
+
+  const received = [];
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: AGENT_ID,
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-n4b",
+    logger,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl,
+    timeoutSeconds: 1,
+    minBackoffMs: 10,
+    maxBackoffMs: 20,
+    async onMessage(ctx) {
+      received.push(ctx.text);
+    },
+  });
+  t.after(() => socket.stop());
+
+  socket.start();
+  // Long enough for attempt 1 (transient, halts, ~10ms backoff) and
+  // attempt 2 (definitive, advances past it for good) -- well short of a
+  // third re-verification cycle ever mattering.
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.deepStrictEqual(received, [], "a genuinely bad signature must never be dispatched, rotation or not");
+  assert.ok(logs.some((l) => /retrying once after a secret rotation/.test(l)), "expected exactly one transient retry to have been logged");
+  assert.ok(logs.some((l) => /rejected update 1 \(message\): bad signature/.test(l)), "expected the retry to then be treated as definitive");
 });
 
 test("backs off after a failed poll and recovers once the server answers again", async (t) => {
@@ -445,10 +612,34 @@ test("FileCursorStore round-trips through a real file, atomically, and defaults 
   await cursorStore.put("agent-x", 42);
   assert.strictEqual(await cursorStore.get("agent-x"), 42);
 
-  const raw = fs.readFileSync(path.join(dir, "cursor.json"), "utf8");
+  const raw = fs.readFileSync(path.join(dir, "agent-x.cursor.json"), "utf8");
   assert.deepStrictEqual(JSON.parse(raw), { cursor: 42 });
   // Atomic write: no leftover temp file.
-  assert.deepStrictEqual(fs.readdirSync(dir), ["cursor.json"]);
+  assert.deepStrictEqual(fs.readdirSync(dir), ["agent-x.cursor.json"]);
+});
+
+// N9 (second security review, 2026-09-18): a directory shared by more
+// than one identity used to collide on the single fixed `cursor.json` --
+// one agent's cursor clobbering another's. The file is now keyed by
+// agent id, so a shared directory is safe.
+test("N9: FileCursorStore given a SHARED directory keeps two agents' cursors independent", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-cursorstore-shared-"));
+  const cursorStore = sdk.FileCursorStore(dir);
+
+  await cursorStore.put("agent-one", 10);
+  await cursorStore.put("agent-two", 999);
+
+  assert.strictEqual(await cursorStore.get("agent-one"), 10, "agent-two's write must not clobber agent-one's cursor");
+  assert.strictEqual(await cursorStore.get("agent-two"), 999);
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ["agent-one.cursor.json", "agent-two.cursor.json"]);
+});
+
+test("N10: FileCursorStore creates the directory 0700 and the file 0600", async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "salt-cursorstore-perm-")), "nested");
+  await sdk.FileCursorStore(dir).put("agent-x", 1);
+
+  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.strictEqual(fs.statSync(path.join(dir, "agent-x.cursor.json")).mode & 0o777, 0o600);
 });
 
 test("FileDedupeStore round-trips through a real file and bounds to `max` entries", async () => {
@@ -465,7 +656,7 @@ test("FileDedupeStore round-trips through a real file and bounds to `max` entrie
   assert.strictEqual(await dedupeStore.has("agent-x", "a"), false);
   assert.strictEqual(await dedupeStore.has("agent-x", "d"), true);
 
-  const raw = JSON.parse(fs.readFileSync(path.join(dir, "seen.json"), "utf8"));
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, "agent-x.seen.json"), "utf8"));
   assert.deepStrictEqual(raw, ["b", "c", "d"]);
 });
 
@@ -475,4 +666,135 @@ test("FileDedupeStore persists across a fresh store instance pointed at the same
 
   const reopened = sdk.FileDedupeStore(dir);
   assert.strictEqual(await reopened.has("agent-x", "seen-once"), true);
+});
+
+test("N9: FileDedupeStore given a SHARED directory keeps two agents' dedupe sets independent", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-dedupestore-shared-"));
+  const dedupeStore = sdk.FileDedupeStore(dir);
+
+  await dedupeStore.add("agent-one", "delivery-shared-id");
+  assert.strictEqual(await dedupeStore.has("agent-one", "delivery-shared-id"), true);
+  assert.strictEqual(
+    await dedupeStore.has("agent-two", "delivery-shared-id"),
+    false,
+    "agent-two must not see agent-one's dedupe entry even when the delivery_id string collides"
+  );
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ["agent-one.seen.json"]);
+});
+
+test("N10: FileDedupeStore creates the directory 0700 and the file 0600", async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "salt-dedupestore-perm-")), "nested");
+  await sdk.FileDedupeStore(dir).add("agent-x", "a");
+
+  assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.strictEqual(fs.statSync(path.join(dir, "agent-x.seen.json")).mode & 0o777, 0o600);
+});
+
+// --- N2: fail closed at start -----------------------------------------------
+
+test("N2: start() throws synchronously when the default state directory can't be created/written, and never dispatches", async (t) => {
+  if (process.getuid && process.getuid() === 0) {
+    t.skip("running as root -- permission bits on the read-only HOME would be bypassed");
+    return;
+  }
+
+  const roRoot = fs.mkdtempSync(path.join(os.tmpdir(), "salt-readonly-home-"));
+  fs.chmodSync(roRoot, 0o500); // read + execute only -- cannot create a subdirectory inside it
+  const originalHome = process.env.HOME;
+  process.env.HOME = roRoot;
+  t.after(() => {
+    process.env.HOME = originalHome;
+    fs.chmodSync(roRoot, 0o700);
+    fs.rmSync(roRoot, { recursive: true, force: true });
+  });
+
+  const { store, client } = baseIdentitiesAndClient("sock-n2", "secret-n2");
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: "sock-n2",
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-n2",
+    logger: silent,
+    fetchImpl: async () => {
+      throw new Error("must never be called -- start() should have thrown before any poll");
+    },
+  });
+
+  assert.throws(
+    () => socket.start(),
+    /state directory/,
+    "start() must throw synchronously rather than silently falling back to in-memory stores"
+  );
+});
+
+test("N2: passing BOTH cursorStore and dedupeStore explicitly opts out of the state-directory check entirely", async (t) => {
+  if (process.getuid && process.getuid() === 0) {
+    t.skip("running as root -- permission bits on the read-only HOME would be bypassed");
+    return;
+  }
+
+  const roRoot = fs.mkdtempSync(path.join(os.tmpdir(), "salt-readonly-home-optout-"));
+  fs.chmodSync(roRoot, 0o500);
+  const originalHome = process.env.HOME;
+  process.env.HOME = roRoot;
+  t.after(() => {
+    process.env.HOME = originalHome;
+    fs.chmodSync(roRoot, 0o700);
+    fs.rmSync(roRoot, { recursive: true, force: true });
+  });
+
+  const { store, client } = baseIdentitiesAndClient("sock-n2b", "secret-n2b");
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: "sock-n2b",
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-n2b",
+    logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl: makeQueueFetch([{ body: { updates: [], cursor: 0 }, delayMs: 5 }]),
+  });
+  t.after(() => socket.stop());
+
+  assert.doesNotThrow(() => socket.start(), "the unwritable default HOME must never be touched when both stores are explicit");
+});
+
+// --- Retry-After -------------------------------------------------------------
+
+test("Retry-After on a 429 from the poll endpoint overrides the exponential backoff wait (second security review, 2026-09-18)", async (t) => {
+  const AGENT_ID = "sock-429";
+  const { store, client } = baseIdentitiesAndClient(AGENT_ID, "secret-429");
+
+  const fetchImpl = makeQueueFetch([
+    { status: 429, headers: { "Retry-After": "2" }, body: {}, delayMs: 5 },
+    { body: { updates: [], cursor: 0 }, delayMs: 5 },
+  ]);
+
+  const socket = sdk.createSocketClient({
+    host: "http://example.invalid",
+    apiKey: "the-key",
+    agentId: AGENT_ID,
+    client,
+    identities: store,
+    pgpPassphrase: "agent-pass-429",
+    logger: silent,
+    cursorStore: sdk.MemoryCursorStore(),
+    dedupeStore: sdk.MemoryDedupeStore(),
+    fetchImpl,
+    timeoutSeconds: 1,
+    minBackoffMs: 10,
+    maxBackoffMs: 50,
+  });
+  t.after(() => socket.stop());
+
+  socket.start();
+  // The mocked Retry-After is 2s; if it were ignored in favor of the 10ms
+  // exponential backoff, a second call would already have happened well
+  // within this window.
+  await new Promise((r) => setTimeout(r, 400));
+  assert.strictEqual(fetchImpl.calls.length, 1, "must still be honouring the 2s Retry-After, not the 10ms exponential backoff");
 });

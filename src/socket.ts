@@ -46,6 +46,7 @@
 //   restart is exactly the kind of thing that should be a deliberate
 //   choice, not an accident of not passing an option.
 
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
@@ -57,18 +58,69 @@ const consoleLogger: Logger = {
   error: (msg) => console.error(msg),
 };
 
+/** Lowercased, filesystem-safe form of an agent id -- used both for
+ *  defaultStateDir's own directory name and (N9) to key individual files
+ *  inside a directory that FileCursorStore/FileDedupeStore were given. */
+function safeIdSegment(agentId: SaltId): string {
+  return String(agentId).toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+}
+
 /** `~/.salt/agents/<agentId>` -- the default home for BOTH the cursor and
  *  dedupe files for one identity, unless the caller passes its own stores. */
 function defaultStateDir(agentId: SaltId): string {
-  const safe = String(agentId).toLowerCase().replace(/[^a-z0-9_-]/g, "_");
-  return path.join(homedir(), ".salt", "agents", safe);
+  return path.join(homedir(), ".salt", "agents", safeIdSegment(agentId));
 }
 
+// N2/N10 (second security review, 2026-09-18): directories 0700, files
+// 0600 -- these are per-agent secrets-adjacent (a dedupe/cursor file
+// mostly isn't sensitive on its own, but the directory convention is
+// shared with sessions.ts's FileSessionStore, which DOES hold transcript
+// content, so the permission discipline is enforced once, here, for
+// every consumer of writeJsonAtomic rather than trusted to each caller).
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
 async function writeJsonAtomic(target: string, data: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(target), { recursive: true });
+  const dir = path.dirname(target);
+  await fs.mkdir(dir, { recursive: true, mode: DIR_MODE });
+  // mkdir's `mode` is masked by the process umask on creation and is a
+  // no-op if the directory already existed with looser permissions from
+  // before this fix -- chmod explicitly so both cases converge.
+  await fs.chmod(dir, DIR_MODE).catch(() => {});
   const tmp = `${target}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data));
+  await fs.writeFile(tmp, JSON.stringify(data), { mode: FILE_MODE });
+  await fs.chmod(tmp, FILE_MODE).catch(() => {});
   await fs.rename(tmp, target);
+}
+
+// N2 (second security review, 2026-09-18): "fail closed at start" -- unless
+// the caller passed BOTH stores explicitly, createSocketClient's start()
+// must create the default state directory (0700) and prove it's actually
+// writable BEFORE the poll loop (and therefore any dispatch) ever runs,
+// throwing synchronously rather than silently falling back to an
+// in-memory store. Synchronous on purpose: start() itself is documented as
+// synchronous, and a caller relying on the default file-backed stores
+// needs to learn about a read-only/unwritable HOME immediately, not from
+// a buried async rejection several event-loop turns later.
+function ensureStateDirWritable(dir: string): void {
+  try {
+    fsSync.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+    try {
+      fsSync.chmodSync(dir, DIR_MODE);
+    } catch {
+      // Best-effort; an unwritable directory still fails the probe below.
+    }
+    const probe = path.join(dir, `.writable-check-${process.pid}-${Math.random().toString(16).slice(2)}`);
+    fsSync.writeFileSync(probe, "", { mode: FILE_MODE });
+    fsSync.unlinkSync(probe);
+  } catch (err) {
+    throw new Error(
+      `[socket] state directory ${dir} could not be created or is not writable -- refusing to start rather than ` +
+        `silently falling back to in-memory cursor/dedupe stores (which would lose the poll cursor and replay ` +
+        `protection on every restart). Pass cursorStore/dedupeStore explicitly to opt out of file persistence, or ` +
+        `fix the directory's permissions. Underlying error: ${(err as Error).message}`
+    );
+  }
 }
 
 // --- Cursor persistence ----------------------------------------------------
@@ -97,20 +149,22 @@ export function MemoryCursorStore(): CursorStore {
 }
 
 /**
- * One JSON file, `cursor.json`, inside `dir` -- written atomically (temp
- * file + rename), the same convention sessions.ts's FileSessionStore uses.
- * `dir` is meant to be ONE IDENTITY'S OWN directory (see defaultStateDir) --
- * unlike sessions.ts's shared-directory-with-one-file-per-key convention,
- * this holds exactly one value, so there's nothing to key by inside it; a
- * process draining several identities passes a different `dir` per
- * identity (createSocketClient's default already does this for you).
+ * `<agentId>.cursor.json` inside `dir` -- written atomically (temp file +
+ * rename), the same convention sessions.ts's FileSessionStore uses. `dir`
+ * defaults to one identity's own directory (see defaultStateDir), but N9
+ * (second security review, 2026-09-18) keys the FILENAME by agent id too:
+ * a caller pointing several identities at one SHARED directory (rather
+ * than createSocketClient's per-identity default) used to collide on the
+ * same fixed `cursor.json` -- one agent's cursor silently clobbering
+ * another's. Keying by id makes a shared directory safe the same way
+ * sessions.ts's one-file-per-key convention already is.
  */
 export function FileCursorStore(dir: string): CursorStore {
-  const file = path.join(dir, "cursor.json");
+  const fileFor = (agentId: SaltId) => path.join(dir, `${safeIdSegment(agentId)}.cursor.json`);
   return {
-    async get() {
+    async get(agentId) {
       try {
-        const raw = await fs.readFile(file, "utf8");
+        const raw = await fs.readFile(fileFor(agentId), "utf8");
         const parsed = JSON.parse(raw) as { cursor?: unknown };
         return typeof parsed.cursor === "number" && Number.isFinite(parsed.cursor) ? parsed.cursor : 0;
       } catch (err) {
@@ -118,8 +172,8 @@ export function FileCursorStore(dir: string): CursorStore {
         throw err;
       }
     },
-    async put(_agentId, cursor) {
-      await writeJsonAtomic(file, { cursor });
+    async put(agentId, cursor) {
+      await writeJsonAtomic(fileFor(agentId), { cursor });
     },
   };
 }
@@ -163,40 +217,48 @@ export function MemoryDedupeStore(max: number = DEFAULT_DEDUPE_MAX): DedupeStore
 }
 
 /**
- * One JSON file, `seen.json`, inside `dir` (an ordered array of the last
- * `max` delivery ids, oldest first) -- same atomic-write convention as
- * FileCursorStore. `dir` is one identity's own directory; agentId is
- * accepted only to satisfy DedupeStore's shape.
+ * `<agentId>.seen.json` inside `dir` (an ordered array of the last `max`
+ * delivery ids, oldest first) -- same atomic-write convention as
+ * FileCursorStore. N9 (second security review, 2026-09-18): the filename
+ * is keyed by agent id, same reasoning as FileCursorStore above -- a
+ * shared `dir` across identities must not let one identity's dedupe set
+ * clobber another's (or worse, let identity B's real deliveries appear
+ * "already seen" because they share a delivery_id namespace collision
+ * with identity A's file).
  */
 export function FileDedupeStore(dir: string, max: number = DEFAULT_DEDUPE_MAX): DedupeStore {
-  const file = path.join(dir, "seen.json");
-  let cache: string[] | null = null; // mirrors the file within one process so `has` doesn't re-read on every check
+  const fileFor = (agentId: SaltId) => path.join(dir, `${safeIdSegment(agentId)}.seen.json`);
+  const cache = new Map<string, string[]>(); // mirrors each agent's file within one process so `has` doesn't re-read on every check
 
-  async function load(): Promise<string[]> {
-    if (cache) return cache;
+  async function load(agentId: SaltId): Promise<string[]> {
+    const key = safeIdSegment(agentId);
+    const cached = cache.get(key);
+    if (cached) return cached;
+    let list: string[];
     try {
-      const raw = await fs.readFile(file, "utf8");
+      const raw = await fs.readFile(fileFor(agentId), "utf8");
       const parsed = JSON.parse(raw);
-      cache = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+      list = Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") cache = [];
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") list = [];
       else throw err;
     }
-    return cache;
+    cache.set(key, list);
+    return list;
   }
 
   return {
-    async has(_agentId, deliveryId) {
-      const list = await load();
+    async has(agentId, deliveryId) {
+      const list = await load(agentId);
       return list.includes(deliveryId);
     },
-    async add(_agentId, deliveryId) {
-      const list = await load();
+    async add(agentId, deliveryId) {
+      const list = await load(agentId);
       if (list.includes(deliveryId)) return;
       list.push(deliveryId);
       while (list.length > max) list.shift();
-      cache = list;
-      await writeJsonAtomic(file, list);
+      cache.set(safeIdSegment(agentId), list);
+      await writeJsonAtomic(fileFor(agentId), list);
     },
   };
 }
@@ -285,6 +347,34 @@ export interface SocketClient {
 
 type RowOutcome = "advance" | "halt";
 
+// Honours Retry-After on a 429 from the poll endpoint (N3's own throttle,
+// or the blanket req/ip one on any other path this client might hit) --
+// second security review, 2026-09-18. Carries the parsed wait (in ms, if
+// any) alongside the thrown error so the loop's backoff can use the
+// server's own authoritative figure instead of guessing with exponential
+// backoff, which could easily be far shorter than the throttle window.
+class PollHttpError extends Error {
+  readonly retryAfterMs?: number;
+  constructor(message: string, retryAfterMs?: number) {
+    super(message);
+    this.name = "PollHttpError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/** Rack::Attack (and HTTP generally) sends Retry-After as either a plain
+ *  integer number of seconds or an HTTP-date; either is honoured. */
+function parseRetryAfterMs(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isFinite(seconds) ? Math.max(0, seconds * 1000) : undefined;
+  }
+  const asDate = Date.parse(trimmed);
+  return Number.isNaN(asDate) ? undefined : Math.max(0, asDate - Date.now());
+}
+
 /**
  * Drains one identity's K2 socket-mode outbox by polling
  * GET /api/v1/agent/updates (adaptively -- see ACTIVE_POLL_DELAY_MS/
@@ -301,6 +391,11 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   const host = options.host.replace(/\/$/, "");
   const fetchImpl = options.fetchImpl ?? fetch;
   const stateDir = defaultStateDir(options.agentId);
+  // N2: only when at least one default (file-backed) store is actually
+  // going to be used -- a caller passing BOTH cursorStore and dedupeStore
+  // explicitly has opted out of file persistence entirely, and this
+  // directory is never touched on their behalf.
+  const needsStateDir = options.cursorStore === undefined || options.dedupeStore === undefined;
   const cursorStore = options.cursorStore ?? FileCursorStore(stateDir);
   const dedupeStore = options.dedupeStore ?? FileDedupeStore(stateDir);
   const timeoutSeconds = options.timeoutSeconds ?? 2;
@@ -387,7 +482,8 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
       abortController = null;
     }
     if (!res.ok) {
-      throw new Error(`GET /api/v1/agent/updates -> ${res.status}`);
+      const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res.headers?.get?.("Retry-After") ?? null) : undefined;
+      throw new PollHttpError(`GET /api/v1/agent/updates -> ${res.status}`, retryAfterMs);
     }
     const parsed = (await res.json()) as RawAgentUpdatesResponse;
     const updates = parsed.updates || [];
@@ -448,8 +544,20 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
         await sleep(idleDelayMs);
       } catch (err) {
         if (stopped) break; // an abort from stop() surfaces here as a fetch error -- not a real failure
-        logger.error(`[socket ${agentId}] poll failed: ${(err as Error).message}; retrying in ${backoff}ms`);
-        await sleep(backoff);
+        // Retry-After (second security review, 2026-09-18) is the
+        // server's own authoritative wait, not a guess -- when a 429
+        // carried one, it overrides (rather than merely floors) the
+        // exponential backoff for THIS wait, since the throttle window
+        // it's protecting (e.g. 5 minutes) can easily exceed maxBackoffMs.
+        // The exponential counter still advances underneath so a
+        // subsequent failure with no Retry-After keeps escalating sanely.
+        const retryAfterMs = err instanceof PollHttpError ? err.retryAfterMs : undefined;
+        const waitMs = retryAfterMs ?? backoff;
+        logger.error(
+          `[socket ${agentId}] poll failed: ${(err as Error).message}; retrying in ${waitMs}ms` +
+            (retryAfterMs !== undefined ? " (Retry-After)" : "")
+        );
+        await sleep(waitMs);
         backoff = Math.min(backoff * 2, maxBackoffMs);
       }
     }
@@ -458,6 +566,13 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   return {
     start() {
       if (loopPromise) return; // already running
+      // N2: fail closed BEFORE any dispatch, synchronously -- a caller
+      // relying on the file-backed defaults must learn about an
+      // unwritable/unwritable-to-create state directory (read-only HOME,
+      // permissions, out of disk) right here, not several polls in, and
+      // never by silently limping along on an in-memory fallback that
+      // would lose the cursor and dedupe set on every restart.
+      if (needsStateDir) ensureStateDirWritable(stateDir);
       stopped = false;
       loopPromise = loop().catch((err) => logger.error(`[socket ${agentId}] loop exited unexpectedly: ${(err as Error).message}`));
     },
