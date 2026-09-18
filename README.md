@@ -70,8 +70,11 @@ them as env vars below. Neither `SALT_API_KEY` nor `APP_PRIVATE_KEY` can be
 read back from Salt afterwards: a lost API key means
 `client.rotateAgentApiKey(human_api_key, agent.id)` (the old one stops
 working immediately), and a lost private key means generating a fresh
-keypair and updating it via the agent's admin page -- Salt holds no copy of
-either to hand back.
+keypair and rotating `public_key` in with it -- `POST /api/v1/settings/keys`
+(no wrapper method for this yet; call it directly), authenticated with the
+AGENT's own api-key, `{ public_key: keys.publicKey }` in the body. Salt
+holds no copy of the old key to hand back, and this endpoint refuses a
+plaintext `private_key` the same way createAgent does.
 
 ### 2. Run a webhook server
 
