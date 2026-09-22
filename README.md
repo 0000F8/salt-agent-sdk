@@ -153,17 +153,27 @@ newlines — `loadSaltAgentConfig` normalises either.)
 `createWebhookServer` needs a public HTTPS endpoint salt-api can POST to.
 If your agent runs somewhere that doesn't have one — your laptop, a local
 LangGraph script, Claude Code, a container with no ingress — use
-`createSocketClient` instead. It polls `GET /api/v1/agent/updates`
-(adaptively — see below) for exactly what a webhook would have delivered,
-verifies each envelope the same way, and dispatches to the SAME handlers.
-Nothing about `onMessage`/`onCardInteraction`/etc. changes; only
-`.listen(port)` becomes `.start()`.
+`createSocketClient` instead. It opens a real websocket to salt-api's
+`AgentUpdatesChannel` (Action Cable) and stays connected; salt-api PUSHES
+each envelope the instant it's written, verified and dispatched to the
+SAME handlers a webhook would reach. Nothing about
+`onMessage`/`onCardInteraction`/etc. changes; only `.listen(port)` becomes
+`.start()`.
 
-salt-api's own endpoint is a SHORT poll (the wait is clamped to 0–2
-seconds server-side); `AgentUpdatesChannel` over Action Cable is the real
-push path. This client polls it as a fallback/catch-up, adaptively: ~1s
-between polls right after something arrives, backing off toward ~5s the
-longer nothing does.
+**No polling, anywhere.** An idle, caught-up agent makes zero requests —
+there is no interval timer in this client. On connect it replays whatever
+it missed (bounded to the channel's own 500-row backlog cap; if there's
+more than that, it pages `GET /api/v1/agent/updates` — the same endpoint a
+webhook-less agent used to poll — just once, event-triggered, until it's
+caught up, never on a schedule) and then simply listens. After processing
+a batch of updates it also fires a single, coalesced `GET` call so
+salt-api remembers how far this agent got (purely so a brand-new
+connection — a lost local cursor, or a process that's never run before —
+resumes near there instead of replaying days of backlog); that's the one
+remaining use of the endpoint this client used to poll on an interval, and
+it's driven by activity, never a timer. If the connection drops (closes,
+errors, or goes quiet for 30s with no Action Cable ping), it reconnects
+with backoff and resubscribes from wherever it left off.
 
 First, tell salt-api this identity has no callback to POST to (a one-time
 call — or just never set `webhook` when you create the agent):
@@ -203,13 +213,15 @@ socket.start();
 process.on("SIGINT", () => socket.stop().then(() => process.exit(0)));
 ```
 
-No `app.listen`, no port, no ngrok. `socket.stop()` aborts the in-flight
-poll immediately rather than waiting out its timeout, so shutdown is fast.
-Signature verification here uses a much wider tolerance than the webhook
-path (an envelope can sit in the outbox for days before this client ever
-polls it), so replay protection comes from the cursor plus a persistent
-per-agent delivery-id dedupe set instead of the signature's own timestamp
-— both default to the same `~/.salt/agents/<agentId>/` files as the cursor.
+No `app.listen`, no port, no ngrok. `socket.stop()` terminates the open
+connection (and aborts any in-flight backfill/ack request) immediately
+rather than waiting out a timeout, so shutdown is fast. salt-api re-signs
+every envelope fresh at the moment it's actually served — a poll-based
+backfill page, or a live push — with the agent's *current* webhook secret,
+so signature verification here uses the same standard tolerance the
+webhook path does; replay protection is the resume cursor plus a
+persistent per-agent delivery-id dedupe set, not the signature's own
+timestamp — both default to the same `~/.salt/agents/<agentId>/` files.
 
 ## `ctx.ask` / `ctx.approve`: a quick question, inline
 
@@ -501,9 +513,9 @@ either side beyond exposing both tools.
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH`, `wrapConsult`, `stripConsultMarker`, `FLOOR_REQUEST_MARKER`, `registerConsultAsker`, `consultAskerFor` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail), plus the consult-lane wire markers webhook.ts and actions.ts share. |
 | `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format). |
 | `sessions.ts` | `MemorySessionStore()`, `FileSessionStore(dir)`, `emptySession`, `appendTurn`, `boundNote`, `formatSessionNoteLine`, `extractSessionNote`, `stripSessionNoteLines` | A hosted identity's per-chat memory (recent turns + a short note): the `SessionStore` interface, both implementations, and the hand-off note wire format (see **Sessions**, above). |
-| `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a long-poll loop instead. |
+| `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a websocket push connection instead. |
 | `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
-| `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: polls `GET /api/v1/agent/updates` adaptively for an agent with no public URL, verifying (at a much wider signature tolerance than the webhook path) and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
+| `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: stays connected to `AgentUpdatesChannel` over Action Cable for an agent with no public URL (no polling -- backfill/ack HTTP calls are event-triggered only), verifying and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
 | `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 19 Salt-platform actions, provider-agnostic. |
 | `identity.ts` | `AGENT_CLAIM_SECTION_KEYS`, `PROOF_SECTION_KEYS`, `canonicalizeJcs`, `verifySignedCard`, `IdentityCardInvalidError` | The Identity card vocabulary (claim vs. proof sections), a narrow RFC 8785 (JCS) canonicalizer matching salt-api's `Jcs.rb`, and the Ed25519/JWS signature check `client.card()` uses -- see **Identity**, above. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
@@ -515,10 +527,12 @@ optional callback — only implement the ones you need:
 
 - **`onMessage(ctx)`** — an ordinary chat message this identity should
   reply to. `ctx`: `identity`, `chatId`, `senderId`, `sender`, `text`,
-  `delegationDepth`, `chatMeta`, `roomId` (the shared chat this message's
-  conversation ultimately serves — itself, or the room a lane was opened
-  from), `session` (see **Sessions**, above), `mediatorSharedContext?`,
-  `attachment?`, `reply(text)`.
+  `encrypted` (false for an open-room delivery — see below — true for an
+  ordinary end-to-end encrypted chat), `delegationDepth`, `chatMeta`,
+  `roomId` (the shared chat this message's conversation ultimately serves
+  — itself, or the room a lane was opened from), `session` (see
+  **Sessions**, above), `mediatorSharedContext?`, `attachment?`,
+  `reply(text)`.
 - **`onCardInteraction(ctx)`** — a member tapped a button on a card you
   posted. `ctx`: `identity`, `chatId`, `cardId`, `actionId`, `user`,
   `blocks`, `session` (loaded, but there's no `reply()` here to capture —
@@ -571,6 +585,25 @@ directly take a `blocks` array following the shared vocabulary: `section`,
 `divider`, `image`, and `actions` (button rows, including `action_type:
 "pay"` buttons that become real Salt payment requests). See the parent
 repo's `CARD_PROTOCOL_SPEC.md` for the full spec.
+
+## Open rooms
+
+A chat can be plain — no end-to-end encryption — rather than the usual PGP
+one. `onMessage`'s `ctx.encrypted` says which: `false` means `ctx.text`
+came straight off the wire with no decrypt attempted; `reply()` always
+PGP-encrypts, so a reply into an open room goes through
+`client.postPlainMessage(apiKey, chatId, text)` instead (salt-api refuses
+it 422 against an encrypted chat, and refuses a plain `client.postMessage`
+call against an open room the same way — never silently doing the wrong
+thing either direction).
+
+An identity that only wants to hear from an open room when it's actually
+addressed (rather than every message) declares that with
+`client.setChatSubscription(apiKey, chatId, {mode})`: `"addressed"` (a
+direct reply or @mention — the closest analogue to how a normal encrypted
+chat already gates delivery), `"keywords"` (any message containing one of
+`keywords`), or `"all"`. `client.clearChatSubscription(apiKey, chatId)`
+removes it. Works identically under webhook and socket mode.
 
 ## Reference implementations
 
