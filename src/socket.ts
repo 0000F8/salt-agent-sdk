@@ -1,10 +1,11 @@
 // K2 socket mode (design-fleet/runs/2026-09-17-distribution/LANES.md
-// "Socket mode contract"): an agent with no public URL -- OpenClaw, a local
-// LangGraph script, Claude Code on a laptop -- can't receive a webhook
-// POST. This is the Slack Socket Mode / Telegram getUpdates precedent: SHORT-
-// poll `GET /api/v1/agent/updates` for exactly what a webhook would have
-// delivered, verify each envelope the same way, and hand it to the SAME
-// handlers.
+// "Socket mode contract"), now PUSH, not poll (2026-09-22, owner: "DO NOT
+// USE POLLING as a mechanic EVER"): an agent with no public URL -- OpenClaw,
+// a local LangGraph script, Claude Code on a laptop -- can't receive a
+// webhook POST. `createSocketClient` opens a real websocket to salt-api's
+// Action Cable (`AgentUpdatesChannel`) and stays connected; salt-api PUSHES
+// each envelope the instant it's written. An idle, caught-up agent makes
+// ZERO requests -- there is no interval timer anywhere in this file.
 //
 // "The same handlers" is not a promise made by convention -- it's
 // createDispatcher (webhook.ts), the one place both createWebhookServer and
@@ -18,50 +19,105 @@
 // onMessage/onCardInteraction/onInvoicePaid/onChatOpened/onHandoffConfirmed/
 // onHandoffReceived never change.
 //
-// One drain per (host) identity, since salt-api's outbox and its auth are
-// both per-agent -- a process hosting several socket-mode identities runs
-// one createSocketClient per identity, each feeding the same or a shared
-// dispatcher.
+// WIRE PROTOCOL (Action Cable, `wss://<host>/cable`, the agent's own
+// `api-key` on the handshake HEADER -- never a query param, the same
+// ALB/CloudWatch-access-log-leak reasoning the REST api-key path already
+// documents -- see salt-api's ApplicationCable::Connection and
+// AgentUpdatesChannel):
+//   1. Connect. Server sends {type:"welcome"}.
+//   2. Subscribe: {command:"subscribe", identifier: JSON.stringify({channel:
+//      "AgentUpdatesChannel", after: <local cursor>})} -- `after` OMITTED
+//      entirely (not sent as 0) when there is no local cursor yet, so
+//      salt-api's own server-side ack applies instead of replaying from
+//      scratch (same convention the old poll client used).
+//   3. Server replies {type:"confirm_subscription", identifier} or
+//      {type:"reject_subscription", identifier}, then REPLAYS the backlog
+//      from the resolved cursor as ordinary envelope frames -- the same
+//      shape as a poll row, wrapped as {identifier, message: {id,
+//      delivery_id, event, headers, body, created_at}} -- ending with
+//      {identifier, message: {type:"replay_done", cursor, more?}}. Live
+//      broadcasts arrive as that identical envelope shape, interleaved with
+//      (and continuing after) the replay.
+//   4. {type:"ping", message:<unix ts>} arrives roughly every 3s -- the
+//      liveness signal. No ping for 30s means the connection is dead (a
+//      half-open TCP socket may never emit its own 'close') -- terminate
+//      and reconnect.
+//   5. {type:"disconnect", reason, reconnect} means salt-api is closing this
+//      connection on purpose (e.g. a deploy) -- always reconnect regardless
+//      of the `reconnect` value; salt-api never asks a client to stay down
+//      for good.
 //
-// SECURITY REVIEW (2026-09-18), what changed here and why:
-//   H1: salt-api's long-poll became a SHORT poll (server-clamped to 0..2s).
-//       AgentUpdatesChannel over Action Cable is the real push path; this
-//       is the fallback/catch-up, polled ADAPTIVELY (see ACTIVE_POLL_DELAY_MS/
-//       IDLE_POLL_DELAY_MS below) rather than in a tight loop.
-//   ROUND 3 (2026-09-18) -- serve-time signing + server-side ack:
-//       salt-api now signs every outbox envelope FRESH, over the stored
-//       body, with the agent's CURRENT webhook secret, at the moment it's
-//       SERVED (long poll, Cable replay, or a live broadcast frame) --
-//       never once at enqueue time. So this client never sees a signature
-//       that's "stale" by rotation OR by sitting in the outbox for days;
-//       verification here uses the SAME standard tolerance as the webhook
-//       path (createDispatcher's default, ~300s), not a widened one.
-//       salt-api also now remembers this agent's last-acked cursor
-//       server-side (`users.agent_updates_acked_id`, the Telegram-offset
-//       model): a poll or Cable subscribe with NO local cursor resumes
-//       from there instead of replaying up to 7 days of backlog, so a
-//       missing/lost cursorStore is no longer a REPLAY risk -- just a
-//       cache. Replay protection is therefore the server ack, PLUS this
-//       client's own cursor, PLUS the persistent per-agent delivery_id
-//       dedupe (DedupeStore) below -- never the envelope's timestamp,
-//       which is why the fail-closed start from round 2 relaxed to a
-//       clear warning-and-fall-back-to-memory (see ensureStateDirWritable's
-//       call site) rather than refusing to start at all.
-//   A verification failure that LOOKS transient (a network error fetching
-//   the signing key, never a bad/forged signature) halts this batch and
-//   does NOT advance the cursor past it -- retried with backoff instead,
-//   or a real update sitting behind a network blip would be skipped
-//   forever.
-//   The default cursor/dedupe stores are still FILE-based
-//   (~/.salt/agents/<agentId>/{cursor,seen}.json) -- memory is opt-in
-//   for a caller that wants no local persistence at all, but an
-//   unwritable default directory is now a soft warning + in-memory
-//   fallback, not a hard refusal to start (see above).
+// CURSOR PERSISTENCE (LANES.md, fix N8): the local cursorStore is written
+// ONLY from a real poll-shaped response -- a `replay_done` frame's
+// `cursor`, a backfill GET page's `cursor`, or the ack GET's `cursor` --
+// NEVER from a live envelope frame's own `id` directly. Two different live
+// broadcasts for the same agent have no cross-broadcast ordering guarantee
+// (they can originate from two different Puma processes/transactions), so
+// persisting from whichever arrived first risks writing a cursor that's
+// ahead of one still in flight; on a later reconnect that row would never
+// be replayed again (the server's ack only ever moves forward, never
+// rewinds). Live frames are still DISPATCHED the moment they arrive (once
+// this connection has caught up) -- this restriction is only about what
+// gets written to disk / used to resume, never about delivering a message
+// to onMessage.
+//
+// A ROW THAT FAILS VERIFICATION TRANSIENTLY (a network error fetching the
+// signing key -- never a bad signature) is a harder case here than it was
+// for the poll client: a poll simply re-fetches the same un-advanced row on
+// its next round trip, but a websocket replay happens exactly once per
+// connection -- there is no "poll again" to retry a single bad row without
+// re-processing everything after it too. So this client does NOT halt the
+// rest of the stream on a transient failure (that would block every later,
+// perfectly good message behind one hiccup); instead it remembers the
+// LOWEST id that failed transiently (pendingFailureId, below) and clamps
+// every cursor persistence to stop just short of it, so the NEXT reconnect
+// naturally re-replays from that row forward -- giving it another chance
+// -- while dedupe silently no-ops whatever already succeeded the first
+// time.
+//
+// ACK: after a batch of frames is processed (replay, backfill, or live),
+// this client tells salt-api how far it got with a single, coalesced
+// `GET /api/v1/agent/updates?after=<highest processed id>&timeout=0&limit=1`
+// call -- there is no dedicated ack action on the channel; `after` on this
+// endpoint already IS salt-api's ack (see AgentUpdatesController). This is
+// event-driven: at most one ack in flight, and at most one more queued
+// behind it for whatever arrived while it was out -- never a timer. Its
+// only purpose is so a FRESH connection (a lost local cursorStore, or a
+// process that has never held one) resumes near here instead of replaying
+// up to 7 days of backlog; this client's own resume point still comes only
+// from cursorStore, per the persistence rule above.
+//
+// BACKFILL: `replay_done.more: true` means AgentUpdatesChannel's own
+// MAX_BACKLOG_REPLAY (500 rows) actually truncated the backlog. The socket
+// alone cannot deliver more than that over the wire, so this client pages
+// `GET /api/v1/agent/updates?after=<cursor>&timeout=0` (a real poll
+// response has no such cap beyond its own `limit`) until a page comes back
+// empty. This is the ONLY remaining use of the poll endpoint's `timeout`
+// parameter, and it fires only when `more` says so -- never on an
+// interval. Live frames that arrive WHILE backfill is running are buffered
+// (never dropped) and drained -- in id order RELATIVE TO EACH OTHER, never
+// interleaved with backfill's own dispatch order -- once the backfill loop
+// empties out; DedupeStore makes any overlap between a buffered live frame
+// and a backfilled row harmless either way.
+//
+// RECONNECT: on close (clean or not), a dead-ping timeout, or a rejected
+// subscription, reconnect with exponential backoff (RECONNECT_MIN_DELAY_MS
+// .. RECONNECT_MAX_DELAY_MS, jittered), resubscribing with whatever
+// cursorStore now holds. A 429 on the handshake itself (the blanket
+// api-key/ip ceiling in rack_attack.rb covers /cable the same as any other
+// path) honours Retry-After exactly like the old poll client did,
+// overriding the backoff for that one wait.
+//
+// verifyEnvelope/dispatch are unchanged from the poll-based client: every
+// envelope, however it arrived (replay, backfill page, ack response, or a
+// live frame), goes through the SAME signature check and the SAME
+// dispatcher webhook.ts uses.
 
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import WebSocket from "ws";
 import { createDispatcher, type Logger, type WebhookServerOptions } from "./webhook.js";
 import type { SaltId } from "./ids.js";
 
@@ -151,7 +207,7 @@ function resolveDefaultStores(stateDir: string, agentId: SaltId, logger: Logger)
   } catch (err) {
     logger.error(
       `[socket ${agentId}] WARNING: ${(err as Error).message} -- falling back to IN-MEMORY cursor/dedupe stores for ` +
-        `this run. This is safe: salt-api remembers this agent's last-acked position server-side and a poll/subscribe ` +
+        `this run. This is safe: salt-api remembers this agent's last-acked position server-side and a subscribe/poll ` +
         `with no local cursor resumes from there. Pass cursorStore/dedupeStore explicitly to silence this, or fix the ` +
         `directory's permissions to restore persistence across restarts.`
     );
@@ -167,9 +223,9 @@ export interface CursorStore {
   put(agentId: SaltId, cursor: number): Promise<void>;
 }
 
-/** In-memory cursor store. Lost on restart (a fresh process re-reads from
- *  cursor 0 -- everything AgentUpdatePruneJob hasn't pruned yet, up to
- *  AgentUpdate::RETENTION). Opt in explicitly; the default is
+/** In-memory cursor store. Lost on restart (a fresh process re-subscribes
+ *  from cursor 0, which resumes from salt-api's own server-side ack --
+ *  see this file's header comment). Opt in explicitly; the default is
  *  FileCursorStore -- see createSocketClient. */
 export function MemoryCursorStore(): CursorStore {
   const cursors = new Map<string, number>();
@@ -299,9 +355,11 @@ export function FileDedupeStore(dir: string, max: number = DEFAULT_DEDUPE_MAX): 
   };
 }
 
-// --- The short-poll client --------------------------------------------------
+// --- The push client ---------------------------------------------------------
 
-/** The wire shape of one row from GET /api/v1/agent/updates -- see LANES.md's socket mode contract. */
+/** The wire shape of one envelope -- a channel frame's `message` (replay or
+ *  live), or one row from GET /api/v1/agent/updates (backfill/ack). See
+ *  this file's header comment for the full contract. */
 interface RawAgentUpdate {
   id: number;
   delivery_id: string;
@@ -316,73 +374,84 @@ interface RawAgentUpdatesResponse {
   cursor: number;
 }
 
-// Adaptive polling (H1's short-poll decision, LANES.md): the server itself
-// only ever HOLDS a request for up to ~2s when there's nothing to return,
-// so without an extra pause between polls an idle agent would still hit
-// the endpoint every ~2s indefinitely. Right after real activity, poll
-// again soon (ACTIVE_POLL_DELAY_MS); back off toward IDLE_POLL_DELAY_MS one
-// step at a time the longer nothing shows up, and snap back to
-// ACTIVE_POLL_DELAY_MS the moment something does.
-export const ACTIVE_POLL_DELAY_MS = 1000;
-export const IDLE_POLL_DELAY_MS = 5000;
+interface ReplayDoneFrame {
+  type: "replay_done";
+  cursor?: number;
+  more?: boolean;
+}
+
+/** Exponential reconnect backoff bounds (jittered). Not a poll interval --
+ *  these only govern the wait between one dropped/closed connection and
+ *  the next connection attempt. */
+export const RECONNECT_MIN_DELAY_MS = 1000;
+export const RECONNECT_MAX_DELAY_MS = 60_000;
+
+/** No Action Cable ping for this long means the connection is presumed
+ *  dead (a half-open TCP socket may never emit its own 'close'/'error'). */
+export const PING_TIMEOUT_MS = 30_000;
 
 export interface SocketClientOptions extends WebhookServerOptions {
-  /** The salt-api deployment's origin, e.g. "https://saltapp.ai" -- the
-   *  poll request is plain fetch (there is no long-poll-aware method on
-   *  SaltClient), so it needs the host directly rather than through
-   *  `client`. No trailing slash required either way. */
+  /** The salt-api deployment's origin, e.g. "https://saltapp.ai" (or
+   *  "http://localhost:3000" in dev) -- rewritten to a ws(s):// `/cable`
+   *  URL for the websocket, and used as-is for the backfill/ack HTTP
+   *  calls. No trailing slash required either way. */
   host: string;
-  /** This identity's OWN api-key. GET /api/v1/agent/updates authenticates
-   *  per-agent and drains only that agent's own outbox -- this is NOT the
-   *  same thing as `identities`, which can hold several hosted identities
-   *  for DECRYPT/ROUTE purposes; a process socket-draining more than one of
-   *  them runs one createSocketClient per identity. */
+  /** This identity's OWN api-key, sent as the `api-key` header on the
+   *  websocket handshake and on every backfill/ack HTTP call. Not the same
+   *  thing as `identities`, which can hold several hosted identities for
+   *  DECRYPT/ROUTE purposes -- a process draining more than one identity's
+   *  outbox runs one createSocketClient per identity. */
   apiKey: string;
   /** That identity's Salt id -- the cursor/dedupe stores' default directory
    *  key, and used in log lines. */
   agentId: SaltId;
-  /** Where the poll cursor is persisted across restarts. Defaults to
-   *  `FileCursorStore(~/.salt/agents/<agentId>)` -- pass `MemoryCursorStore()`
-   *  explicitly to opt OUT of persistence instead. */
+  /** Where the resume cursor is persisted across restarts/reconnects.
+   *  Defaults to `FileCursorStore(~/.salt/agents/<agentId>)` -- pass
+   *  `MemoryCursorStore()` explicitly to opt OUT of persistence instead. */
   cursorStore?: CursorStore;
   /** Persistent per-agent delivery_id dedupe (M5/F3) -- replay protection
    *  that doesn't rely on the envelope's own timestamp. Defaults to
    *  `FileDedupeStore(~/.salt/agents/<agentId>)`; pass `MemoryDedupeStore()`
    *  explicitly to opt out of persistence. */
   dedupeStore?: DedupeStore;
-  /** Seconds the server should hold the request open waiting for new rows.
-   *  Server-clamped to [0, 2] regardless of what's sent here (H1) --
-   *  defaults to 2, the most useful value now that anything higher is
-   *  wasted on the wire. */
-  timeoutSeconds?: number;
-  /** Max rows per response. Defaults to 100 (the server's own default). */
+  /** Max rows per backfill page (only fetched when replay_done.more is
+   *  true -- see this file's header comment). Defaults to 100. */
   limit?: number;
-  /** Base retry delay after a failed poll (a network error, a non-2xx
-   *  response, or a transient verification failure -- M5/F3), doubling
-   *  each consecutive failure up to `maxBackoffMs`. Reset after any clean
-   *  round trip. */
+  /** Reconnect backoff bounds (ms), exponential + jittered. Also used for
+   *  a failed backfill/ack HTTP call's own retry wait. Defaults to
+   *  RECONNECT_MIN_DELAY_MS..RECONNECT_MAX_DELAY_MS (1s..60s). */
   minBackoffMs?: number;
   maxBackoffMs?: number;
-  /** Override fetch (e.g. for tests). Defaults to global fetch. */
+  /** Override fetch (backfill/ack HTTP calls; tests). Defaults to global fetch. */
   fetchImpl?: typeof fetch;
+  /** Override the WebSocket implementation (tests). Defaults to `ws`'s WebSocket. */
+  webSocketImpl?: typeof WebSocket;
+  /** How long without an Action Cable ping before this connection is
+   *  presumed dead and torn down for a reconnect. Defaults to
+   *  PING_TIMEOUT_MS (30s) -- exposed mainly so tests don't have to wait
+   *  out the real default. */
+  pingTimeoutMs?: number;
 }
 
 export interface SocketClient {
-  /** Starts the poll loop in the background. A no-op if already running. */
+  /** Starts the connection loop in the background. A no-op if already running. */
   start(): void;
-  /** Stops the loop: aborts an in-flight request/backoff wait immediately
-   *  and resolves once the loop has actually exited (never mid-iteration). */
+  /** Stops the loop: terminates any open/connecting websocket and aborts
+   *  any in-flight backfill/ack request immediately, and resolves once
+   *  everything has actually settled (never mid-reconnect, never with a
+   *  background ack still in flight). */
   stop(): Promise<void>;
 }
 
-type RowOutcome = "advance" | "halt";
+type RowOutcome = "advance" | "transient";
 
-// Honours Retry-After on a 429 from the poll endpoint (N3's own throttle,
-// or the blanket req/ip one on any other path this client might hit) --
-// second security review, 2026-09-18. Carries the parsed wait (in ms, if
-// any) alongside the thrown error so the loop's backoff can use the
-// server's own authoritative figure instead of guessing with exponential
-// backoff, which could easily be far shorter than the throttle window.
+// Honours Retry-After on a 429 -- from Rack::Attack's blanket api-key/ip
+// ceiling on the /cable handshake, or from the backfill/ack HTTP calls'
+// own throttles (N3's agent_updates_longpoll, or the blanket one on any
+// other path). Carries the parsed wait (in ms, if any) alongside the
+// thrown/returned error so the reconnect backoff can use the server's own
+// authoritative figure instead of guessing with exponential backoff, which
+// could easily be far shorter than the throttle window.
 class PollHttpError extends Error {
   readonly retryAfterMs?: number;
   constructor(message: string, retryAfterMs?: number) {
@@ -400,10 +469,13 @@ const MAX_RETRY_AFTER_MS = 15 * 60 * 1000;
 
 /** Rack::Attack (and HTTP generally) sends Retry-After as either a plain
  *  integer number of seconds or an HTTP-date; either is honoured, clamped
- *  to MAX_RETRY_AFTER_MS. */
-function parseRetryAfterMs(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
+ *  to MAX_RETRY_AFTER_MS. Accepts the header value however the caller's
+ *  transport hands it back (a single string, or the first of an array --
+ *  Node's http.IncomingMessage can return either for a repeated header). */
+function parseRetryAfterMs(value: string | string[] | null | undefined): number | undefined {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
   if (/^\d+$/.test(trimmed)) {
     const seconds = Number(trimmed);
     return Number.isFinite(seconds) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, seconds * 1000)) : undefined;
@@ -412,44 +484,82 @@ function parseRetryAfterMs(value: string | null | undefined): number | undefined
   return Number.isNaN(asDate) ? undefined : Math.min(MAX_RETRY_AFTER_MS, Math.max(0, asDate - Date.now()));
 }
 
+function jitter(ms: number): number {
+  // Half fixed, half random -- avoids a thundering herd of identical
+  // reconnect timings without making the wait unpredictably short.
+  return Math.round(ms / 2 + Math.random() * (ms / 2));
+}
+
 /**
- * Drains one identity's K2 socket-mode outbox by polling
- * GET /api/v1/agent/updates (adaptively -- see ACTIVE_POLL_DELAY_MS/
- * IDLE_POLL_DELAY_MS), verifying each envelope with the exact same check
- * createWebhookServer applies to a webhook POST (createDispatcher's
- * verifyEnvelope, standard tolerance -- round 3, 2026-09-18: salt-api
- * signs each envelope fresh at serve time, so this no longer needs a
- * widened one), and dispatching it to the SAME onMessage/onCardInteraction/
- * etc. handlers. See this file's header comment for the one-line switch
- * from createWebhookServer, and for what the 2026-09-18 security reviews
- * changed.
+ * Drains one identity's K2 socket-mode outbox by staying connected to
+ * salt-api's `AgentUpdatesChannel` over Action Cable, verifying each
+ * envelope with the exact same check createWebhookServer applies to a
+ * webhook POST (createDispatcher's verifyEnvelope), and dispatching it to
+ * the SAME onMessage/onCardInteraction/etc. handlers. See this file's
+ * header comment for the full wire protocol, the one-line switch from
+ * createWebhookServer, and the reasoning behind cursor persistence, the
+ * ack call, backfill, and reconnect.
  */
 export function createSocketClient(options: SocketClientOptions): SocketClient {
   const logger = options.logger ?? consoleLogger;
   const dispatcher = createDispatcher(options);
   const host = options.host.replace(/\/$/, "");
+  const wsHost = host.replace(/^http/, "ws"); // http(s):// -> ws(s)://
   const fetchImpl = options.fetchImpl ?? fetch;
+  const WS = options.webSocketImpl ?? WebSocket;
   const stateDir = defaultStateDir(options.agentId);
-  // Round 3: resolved once, synchronously, right here -- only when at
-  // least one default (file-backed) store is actually needed (a caller
-  // passing BOTH cursorStore and dedupeStore explicitly has opted out of
-  // file persistence entirely, and this directory is never touched on
-  // their behalf). No longer throws on an unwritable directory -- see
+  // Resolved once, synchronously, right here -- only when at least one
+  // default (file-backed) store is actually needed (a caller passing BOTH
+  // cursorStore and dedupeStore explicitly has opted out of file
+  // persistence entirely, and this directory is never touched on their
+  // behalf). Never throws on an unwritable directory -- see
   // resolveDefaultStores.
   const needsStateDir = options.cursorStore === undefined || options.dedupeStore === undefined;
   const defaults = needsStateDir ? resolveDefaultStores(stateDir, options.agentId, logger) : undefined;
   const cursorStore = options.cursorStore ?? defaults!.cursorStore;
   const dedupeStore = options.dedupeStore ?? defaults!.dedupeStore;
-  const timeoutSeconds = options.timeoutSeconds ?? 2;
   const limit = options.limit ?? 100;
-  const minBackoffMs = options.minBackoffMs ?? 1000;
-  const maxBackoffMs = options.maxBackoffMs ?? 30_000;
+  const pingTimeoutMs = options.pingTimeoutMs ?? PING_TIMEOUT_MS;
+  const minBackoffMs = options.minBackoffMs ?? RECONNECT_MIN_DELAY_MS;
+  const maxBackoffMs = options.maxBackoffMs ?? RECONNECT_MAX_DELAY_MS;
   const agentId = options.agentId;
+  const apiKey = options.apiKey;
 
   let stopped = true;
   let loopPromise: Promise<void> | null = null;
-  let abortController: AbortController | null = null;
+  let currentSocket: WebSocket | null = null;
+  let currentAbort: AbortController | null = null;
   let wakeSleep: (() => void) | null = null;
+  // The most recent (possibly still in-flight) ack call, so stop() can
+  // wait for it -- ack itself is deliberately fire-and-forget relative to
+  // frame dispatch (see runAck below), so nothing else awaits this chain.
+  let ackTail: Promise<void> = Promise.resolve();
+
+  // See this file's header comment ("A ROW THAT FAILS VERIFICATION
+  // TRANSIENTLY..."): the lowest update id that has failed verification
+  // for a reason that might be transient and hasn't since been resolved.
+  // Every cursor persistence point clamps to stop just short of this, so
+  // the next reconnect's replay re-delivers it (and everything after --
+  // dedupe makes that overlap harmless) instead of losing it for good.
+  let pendingFailureId: number | null = null;
+  function noteTransientFailure(id: number): void {
+    if (pendingFailureId === null || id < pendingFailureId) pendingFailureId = id;
+  }
+  function noteResolved(id: number): void {
+    if (pendingFailureId !== null && id === pendingFailureId) pendingFailureId = null;
+  }
+  function clampForPersistence(candidate: number): number {
+    return pendingFailureId === null ? candidate : Math.min(candidate, pendingFailureId - 1);
+  }
+  async function persistCursor(candidate: number): Promise<void> {
+    const safe = clampForPersistence(candidate);
+    if (safe < 0) return; // nothing safe to persist yet (failure sits at/before id 0 -- can't happen in practice, guard anyway)
+    try {
+      await cursorStore.put(agentId, safe);
+    } catch (err) {
+      logger.error(`[socket ${agentId}] persisting cursor ${safe} failed: ${(err as Error).message}`);
+    }
+  }
 
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => {
@@ -465,32 +575,36 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
     });
   }
 
-  // Returns "halt" the moment a row fails verification for a reason that
-  // might be transient -- the caller must not advance the cursor past it.
-  // Every other outcome (dispatched, deduped-skip, or a DEFINITIVE
-  // rejection like a bad signature) is "advance": retrying a genuinely bad
-  // envelope forever would just wedge the client on it.
+  // Verifies + dedupes + dispatches ONE envelope, regardless of whether it
+  // arrived as a replay frame, a live frame, or a row fetched via backfill
+  // or the ack call -- all four paths funnel through here. Returns
+  // "transient" (and records pendingFailureId) for a verification failure
+  // that might resolve on retry; every other outcome ("advance") is safe
+  // to note as processed, whether that means dispatched, a deduped-skip,
+  // or a DEFINITIVE rejection (a genuinely bad signature) -- retrying a
+  // definitively bad envelope forever would just wedge this client on it.
   async function handleOne(update: RawAgentUpdate): Promise<RowOutcome> {
     const headers = update.headers || {};
     let result: Awaited<ReturnType<typeof dispatcher.verifyEnvelope>>;
     try {
-      // Round 3: no widened tolerance -- salt-api signs this envelope
-      // fresh, over the stored body, at the moment it's served, so its
-      // timestamp is always fresh too. The standard (createDispatcher
-      // default, ~300s) tolerance applies exactly like the webhook path.
       result = await dispatcher.verifyEnvelope(headers["X-Salt-Agent-Id"], headers["X-Salt-Signature"], update.body);
     } catch (err) {
-      logger.error(`[socket ${agentId}] verifying update ${update.id} threw: ${(err as Error).message}; will retry`);
-      return "halt";
+      logger.error(`[socket ${agentId}] verifying update ${update.id} threw: ${(err as Error).message}; will retry on the next replay`);
+      noteTransientFailure(update.id);
+      return "transient";
     }
     if (!result.ok) {
       if (result.transient) {
-        logger.error(`[socket ${agentId}] update ${update.id} failed verification transiently (${result.reason}); will retry`);
-        return "halt";
+        logger.error(`[socket ${agentId}] update ${update.id} failed verification transiently (${result.reason}); will retry on the next replay`);
+        noteTransientFailure(update.id);
+        return "transient";
       }
       logger.error(`[socket ${agentId}] rejected update ${update.id} (${update.event}): ${result.reason}`);
+      noteResolved(update.id);
       return "advance";
     }
+
+    noteResolved(update.id);
 
     const alreadySeen = await dedupeStore.has(agentId, update.delivery_id).catch((err) => {
       logger.error(`[socket ${agentId}] dedupe lookup for ${update.delivery_id} failed: ${(err as Error).message}`);
@@ -516,122 +630,369 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
     return "advance";
   }
 
-  async function pollOnce(cursor: number): Promise<{ cursor: number; hadActivity: boolean; halted: boolean }> {
-    // Round 3 (server-side ack, LANES.md): with no local cursor (cursor
-    // is exactly 0 -- never polled, or a fresh/lost cursorStore), poll
-    // WITHOUT `after` at all so salt-api resumes from this agent's own
-    // stored ack instead of replaying up to 7 days of backlog. Once the
-    // cursor has advanced past 0, `after` is sent as always -- the server
-    // treats a missing `after` and `after=0` identically (both resume
-    // from its stored ack), but omitting it once there IS a real local
-    // cursor would throw away this client's own, possibly-more-advanced,
-    // position.
-    const afterParam = cursor > 0 ? `&after=${cursor}` : "";
-    const url = `${host}/api/v1/agent/updates?timeout=${timeoutSeconds}&limit=${limit}${afterParam}`;
-    abortController = new AbortController();
-    let res: Response;
-    try {
-      res = await fetchImpl(url, { headers: { "api-key": options.apiKey }, signal: abortController.signal });
-    } finally {
-      abortController = null;
+  // --- Ack (coalesced, event-driven -- see this file's header comment) ---
+  let highestProcessed = 0;
+  let ackInFlight = false;
+  let ackPending = false;
+  function noteProcessed(id: number): void {
+    if (id > highestProcessed) highestProcessed = id;
+  }
+  function runAck(): void {
+    if (stopped) return;
+    if (highestProcessed === 0) return; // nothing processed yet -- nothing to ack
+    if (ackInFlight) {
+      ackPending = true;
+      return;
     }
-    if (!res.ok) {
-      const retryAfterMs = res.status === 429 ? parseRetryAfterMs(res.headers?.get?.("Retry-After") ?? null) : undefined;
-      throw new PollHttpError(`GET /api/v1/agent/updates -> ${res.status}`, retryAfterMs);
-    }
-    const parsed = (await res.json()) as RawAgentUpdatesResponse;
-    const updates = parsed.updates || [];
-
-    let advanced = cursor;
-    for (const update of updates) {
-      const outcome = await handleOne(update);
-      if (outcome === "halt") {
-        // Stop here -- never process (or advance past) anything after a
-        // row we couldn't yet verify, or ordering guarantees are moot.
-        return { cursor: advanced, hadActivity: advanced !== cursor, halted: true };
+    ackInFlight = true;
+    const after = highestProcessed;
+    ackTail = (async () => {
+      try {
+        currentAbort = new AbortController();
+        const url = `${host}/api/v1/agent/updates?timeout=0&limit=1&after=${after}`;
+        let res: Response;
+        try {
+          res = await fetchImpl(url, { headers: { "api-key": apiKey }, signal: currentAbort.signal });
+        } finally {
+          currentAbort = null;
+        }
+        if (!res.ok) {
+          logger.error(`[socket ${agentId}] ack request -> ${res.status}`);
+          return;
+        }
+        const parsed = (await res.json()) as RawAgentUpdatesResponse;
+        for (const row of parsed.updates || []) {
+          const outcome = await handleOne(row);
+          if (outcome === "advance") noteProcessed(row.id);
+        }
+        const finalCursor = typeof parsed.cursor === "number" ? parsed.cursor : after;
+        await persistCursor(finalCursor);
+      } catch (err) {
+        if (!stopped) logger.error(`[socket ${agentId}] ack request failed: ${(err as Error).message}`);
+      } finally {
+        ackInFlight = false;
+        if (ackPending) {
+          ackPending = false;
+          runAck();
+        }
       }
-      advanced = update.id;
-    }
-    // No halts: trust the server's own cursor (it equals the last row's id,
-    // or `after` unchanged when there was nothing to return).
-    const finalCursor = typeof parsed.cursor === "number" ? parsed.cursor : advanced;
-    return { cursor: finalCursor, hadActivity: updates.length > 0, halted: false };
+    })();
   }
 
-  async function loop(): Promise<void> {
-    let cursor = 0;
-    try {
-      cursor = await cursorStore.get(agentId);
-    } catch (err) {
-      logger.error(`[socket ${agentId}] loading cursor failed, starting from 0: ${(err as Error).message}`);
-    }
+  // --- Backfill (replay_done.more only -- see this file's header comment) ---
+  // Pages forward from `cursor` until a page comes back empty. Persists
+  // (clamped) after every page -- each page is a real poll-shaped response,
+  // safe to treat exactly like the old poll client's cursor advance.
+  // `isClosed` lets the CALLER's connection stop this loop promptly on an
+  // ordinary reconnect (not just the global `stopped` flag, which only
+  // stop() sets) -- see handleReplayDone's caller for why this runs
+  // detached from messageQueue in the first place.
+  async function backfillFrom(cursor: number, isClosed: () => boolean): Promise<void> {
+    let after = cursor;
     let backoff = minBackoffMs;
-    let idleDelayMs = ACTIVE_POLL_DELAY_MS;
-    logger.info(`[socket ${agentId}] polling ${host}/api/v1/agent/updates from cursor ${cursor}`);
-
-    while (!stopped) {
+    while (!stopped && !isClosed()) {
+      let res: Response;
       try {
-        const result = await pollOnce(cursor);
-        if (result.cursor !== cursor) {
-          cursor = result.cursor;
+        currentAbort = new AbortController();
+        const url = `${host}/api/v1/agent/updates?timeout=0&limit=${limit}&after=${after}`;
+        try {
+          res = await fetchImpl(url, { headers: { "api-key": apiKey }, signal: currentAbort.signal });
+        } finally {
+          currentAbort = null;
+        }
+      } catch (err) {
+        if (stopped || isClosed()) return;
+        logger.error(`[socket ${agentId}] backfill request failed: ${(err as Error).message}; retrying in ${backoff}ms`);
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, maxBackoffMs);
+        continue;
+      }
+      if (!res.ok) {
+        if (stopped || isClosed()) return;
+        logger.error(`[socket ${agentId}] backfill -> ${res.status}; retrying in ${backoff}ms`);
+        await sleep(backoff);
+        backoff = Math.min(backoff * 2, maxBackoffMs);
+        continue;
+      }
+      backoff = minBackoffMs;
+      const parsed = (await res.json()) as RawAgentUpdatesResponse;
+      const rows = parsed.updates || [];
+      for (const row of rows) {
+        const outcome = await handleOne(row);
+        if (outcome === "advance") {
+          noteProcessed(row.id);
+          after = row.id;
+        }
+      }
+      const finalCursor = typeof parsed.cursor === "number" ? parsed.cursor : after;
+      after = finalCursor;
+      await persistCursor(after);
+      if (rows.length === 0) return; // caught up
+    }
+  }
+
+  // --- One websocket connection's lifecycle -----------------------------
+  // Resolves once this connection has closed (however it closed), with an
+  // optional retryAfterMs to override the next reconnect wait, and whether
+  // it ever reached confirm_subscription (a clean connection resets the
+  // exponential backoff).
+  function runConnection(): Promise<{ retryAfterMs?: number; subscribed: boolean }> {
+    return (async () => {
+      let localCursor = 0;
+      try {
+        localCursor = await cursorStore.get(agentId);
+      } catch (err) {
+        logger.error(`[socket ${agentId}] loading cursor failed, starting from 0: ${(err as Error).message}`);
+      }
+
+      return new Promise<{ retryAfterMs?: number; subscribed: boolean }>((resolveConn) => {
+        let settled = false;
+        let subscribed = false;
+        let retryAfterMsOverride: number | undefined;
+        let state: "replaying" | "backfilling" | "live" = "replaying";
+        let liveBuffer: RawAgentUpdate[] = [];
+        let pingTimer: ReturnType<typeof setTimeout> | null = null;
+        let closed = false; // this CONNECTION closed (distinct from `stopped`, the whole client) -- stops backfillTail promptly on an ordinary reconnect
+        let backfillTail: Promise<void> = Promise.resolve();
+        // Frames must be handled strictly in arrival order, but handleOne
+        // is async -- Node's ws library can emit several buffered
+        // 'message' events synchronously before the first handler's await
+        // resolves, so without this chain two frames could be verified/
+        // dispatched out of order or concurrently. Each 'message' handler
+        // only ever appends to this chain, never awaits work directly.
+        let messageQueue: Promise<void> = Promise.resolve();
+
+        function clearPingTimer(): void {
+          if (pingTimer) {
+            clearTimeout(pingTimer);
+            pingTimer = null;
+          }
+        }
+        function armPingWatchdog(): void {
+          clearPingTimer();
+          pingTimer = setTimeout(() => {
+            logger.error(`[socket ${agentId}] no ping for ${pingTimeoutMs}ms; treating the connection as dead`);
+            try {
+              socket.terminate();
+            } catch {
+              // already gone
+            }
+          }, pingTimeoutMs);
+        }
+
+        function finish(): void {
+          if (settled) return;
+          settled = true;
+          closed = true;
+          clearPingTimer();
+          currentSocket = null;
+          // Wait for this connection's own backfillTail (if any) to notice
+          // `closed` and unwind before resolving -- otherwise loop() could
+          // start a NEW connection while this one's backfill is still
+          // mid-flight, and stop()'s "resolves once everything has settled"
+          // guarantee would be a lie.
+          backfillTail.finally(() => {
+            resolveConn({ retryAfterMs: retryAfterMsOverride, subscribed });
+          });
+        }
+
+        const socket = new WS(`${wsHost}/cable`, { headers: { "api-key": apiKey } });
+        currentSocket = socket;
+
+        async function handleReplayDone(frame: ReplayDoneFrame): Promise<void> {
+          const serverCursor = typeof frame.cursor === "number" ? frame.cursor : localCursor;
+          await persistCursor(serverCursor);
+          if (frame.more) {
+            state = "backfilling";
+            // Deliberately NOT awaited here. This handler is one link in
+            // messageQueue -- awaiting the whole backfill (which can take
+            // several HTTP round trips) inside it would block every
+            // SUBSEQUENT frame's handler from running at all until backfill
+            // finished, since messageQueue only runs one link at a time.
+            // That would make the `state === "backfilling"` buffering
+            // branch below unreachable: a live frame could never actually
+            // get buffered if its own handler never got to run in the
+            // first place. Running it detached lets messageQueue keep
+            // draining (buffering live frames as they arrive) while this
+            // resolves independently; backfillTail is what finish() waits
+            // on so stop()/reconnect still settle cleanly.
+            backfillTail = backfillFrom(serverCursor, () => closed)
+              .catch((err) => {
+                logger.error(`[socket ${agentId}] backfill failed: ${(err as Error).message}`);
+              })
+              .then(() => {
+                // The drain itself is routed through messageQueue too --
+                // not just backfillFrom above -- so it can never race a
+                // live frame that arrives (and gets appended to the
+                // queue) in the exact window backfill just finished. Without
+                // this, a frame queued between "snapshot the buffer" and
+                // "flip state to live" would land in a liveBuffer nobody
+                // ever drains again -- serializing it here means a frame
+                // still sees state === "backfilling" (and buffers itself,
+                // picked up by the NEXT drain -- though there is only ever
+                // one) or runs after state flips to "live" (and takes the
+                // ordinary live-dispatch path) -- never the gap in between.
+                const drained = messageQueue.then(async () => {
+                  const buffered = liveBuffer.slice().sort((a, b) => a.id - b.id);
+                  liveBuffer = [];
+                  for (const row of buffered) {
+                    const outcome = await handleOne(row);
+                    if (outcome === "advance") noteProcessed(row.id);
+                  }
+                  state = "live";
+                  runAck();
+                });
+                messageQueue = drained.catch((err) => {
+                  logger.error(`[socket ${agentId}] error draining the backfill live-frame buffer: ${(err as Error).message}`);
+                });
+                return messageQueue;
+              });
+            return;
+          }
+          state = "live";
+          runAck();
+        }
+
+        async function handleFrame(raw: WebSocket.RawData): Promise<void> {
+          let frame: Record<string, unknown>;
           try {
-            await cursorStore.put(agentId, cursor);
+            frame = JSON.parse(raw.toString());
           } catch (err) {
-            logger.error(`[socket ${agentId}] persisting cursor ${cursor} failed: ${(err as Error).message}`);
+            logger.error(`[socket ${agentId}] unparseable frame: ${(err as Error).message}`);
+            return;
+          }
+
+          const type = frame.type as string | undefined;
+          if (type === "ping") {
+            armPingWatchdog();
+            return;
+          }
+          if (type === "welcome") {
+            armPingWatchdog();
+            return;
+          }
+          if (type === "confirm_subscription") {
+            subscribed = true;
+            logger.info(`[socket ${agentId}] subscribed (cursor ${localCursor})`);
+            return;
+          }
+          if (type === "reject_subscription") {
+            logger.error(`[socket ${agentId}] subscription rejected; reconnecting`);
+            try {
+              socket.close();
+            } catch {
+              // already gone
+            }
+            return;
+          }
+          if (type === "disconnect") {
+            // Server-initiated close (e.g. a deploy) -- the 'close' event
+            // follows and drives reconnect the same as any other close.
+            logger.info(`[socket ${agentId}] server requested disconnect${frame.reason ? ` (${frame.reason})` : ""}`);
+            return;
+          }
+
+          const payload = frame.message as Record<string, unknown> | undefined;
+          if (!payload || typeof payload !== "object") return;
+
+          if (payload.type === "replay_done") {
+            await handleReplayDone(payload as unknown as ReplayDoneFrame);
+            return;
+          }
+
+          if (typeof payload.id !== "number") return;
+          const update = payload as unknown as RawAgentUpdate;
+          if (state === "backfilling") {
+            liveBuffer.push(update);
+            return;
+          }
+          const outcome = await handleOne(update);
+          if (outcome === "advance") {
+            noteProcessed(update.id);
+            if (state === "live") runAck();
           }
         }
 
-        if (result.halted) {
-          // A transient verification failure -- treat exactly like a
-          // failed round trip: back off and retry from the SAME (or
-          // partially advanced) cursor.
-          if (stopped) break;
-          logger.error(`[socket ${agentId}] retrying after a transient verification failure in ${backoff}ms`);
-          await sleep(backoff);
-          backoff = Math.min(backoff * 2, maxBackoffMs);
-          continue;
-        }
+        socket.on("open", () => {
+          const identifier =
+            localCursor > 0
+              ? JSON.stringify({ channel: "AgentUpdatesChannel", after: localCursor })
+              : JSON.stringify({ channel: "AgentUpdatesChannel" });
+          socket.send(JSON.stringify({ command: "subscribe", identifier }));
+        });
 
-        backoff = minBackoffMs; // a clean round trip always resets the failure backoff
-        idleDelayMs = result.hadActivity ? ACTIVE_POLL_DELAY_MS : Math.min(idleDelayMs + ACTIVE_POLL_DELAY_MS, IDLE_POLL_DELAY_MS);
-        if (stopped) break;
-        await sleep(idleDelayMs);
+        socket.on("message", (raw) => {
+          messageQueue = messageQueue.then(() => handleFrame(raw)).catch((err) => {
+            logger.error(`[socket ${agentId}] error handling frame: ${(err as Error).message}`);
+          });
+        });
+
+        socket.on("unexpected-response", (_req, res) => {
+          const status = res.statusCode;
+          if (status === 429) {
+            retryAfterMsOverride = parseRetryAfterMs(res.headers["retry-after"]);
+          }
+          logger.error(`[socket ${agentId}] handshake failed: HTTP ${status}`);
+          res.resume(); // drain so the underlying socket can close cleanly
+          messageQueue.finally(finish);
+        });
+
+        socket.on("close", () => {
+          messageQueue.finally(finish);
+        });
+
+        socket.on("error", (err) => {
+          logger.error(`[socket ${agentId}] websocket error: ${(err as Error).message}`);
+          // 'close' normally follows an 'error' in the ws library; finish()
+          // runs there. If it somehow doesn't, stop()'s terminate() (or a
+          // future reconnect attempt) still recovers the process.
+        });
+      });
+    })();
+  }
+
+  async function loop(): Promise<void> {
+    let backoff = minBackoffMs;
+    logger.info(`[socket ${agentId}] connecting to ${wsHost}/cable`);
+    while (!stopped) {
+      let outcome: { retryAfterMs?: number; subscribed: boolean };
+      try {
+        outcome = await runConnection();
       } catch (err) {
-        if (stopped) break; // an abort from stop() surfaces here as a fetch error -- not a real failure
-        // Retry-After (second security review, 2026-09-18) is the
-        // server's own authoritative wait, not a guess -- when a 429
-        // carried one, it overrides (rather than merely floors) the
-        // exponential backoff for THIS wait, since the throttle window
-        // it's protecting (e.g. 5 minutes) can easily exceed maxBackoffMs.
-        // The exponential counter still advances underneath so a
-        // subsequent failure with no Retry-After keeps escalating sanely.
-        const retryAfterMs = err instanceof PollHttpError ? err.retryAfterMs : undefined;
-        const waitMs = retryAfterMs ?? backoff;
-        logger.error(
-          `[socket ${agentId}] poll failed: ${(err as Error).message}; retrying in ${waitMs}ms` +
-            (retryAfterMs !== undefined ? " (Retry-After)" : "")
-        );
-        await sleep(waitMs);
-        backoff = Math.min(backoff * 2, maxBackoffMs);
+        logger.error(`[socket ${agentId}] connection failed: ${(err as Error).message}`);
+        outcome = { subscribed: false };
       }
+      if (stopped) break;
+      if (outcome.subscribed) backoff = minBackoffMs; // a clean connection resets the failure backoff
+      const waitMs = outcome.retryAfterMs ?? jitter(backoff);
+      logger.error(
+        `[socket ${agentId}] reconnecting in ${waitMs}ms` + (outcome.retryAfterMs !== undefined ? " (Retry-After)" : "")
+      );
+      await sleep(waitMs);
+      backoff = Math.min(backoff * 2, maxBackoffMs);
     }
   }
 
   return {
     start() {
       if (loopPromise) return; // already running
-      // Round 3: no fail-closed check here any more -- resolveDefaultStores
-      // already handled (and, if necessary, warned about and fell back
-      // from) an unwritable state directory at construction time, above.
       stopped = false;
       loopPromise = loop().catch((err) => logger.error(`[socket ${agentId}] loop exited unexpectedly: ${(err as Error).message}`));
     },
     async stop() {
       stopped = true;
-      abortController?.abort();
       wakeSleep?.();
+      currentAbort?.abort();
+      if (currentSocket) {
+        try {
+          currentSocket.terminate();
+        } catch {
+          // already gone
+        }
+      }
       await loopPromise;
       loopPromise = null;
+      await ackTail.catch(() => {});
     },
   };
 }
