@@ -28,6 +28,19 @@ import type { Session, SessionStore, SessionTurn } from "./sessions";
 
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
+/** See MessageContext.deliveredBecause / SessionTurn.deliveredBecause. */
+export type DeliveredBecause = "mention" | "reply" | "keyword" | "all";
+const DELIVERED_BECAUSE_VALUES = new Set<string>(["mention", "reply", "keyword", "all"]);
+
+/** Narrows salt-api's `message.delivered_because` (a plain string, only
+ *  ever present on an open-room delivery) to the known union -- anything
+ *  else (missing, or a value this SDK version doesn't recognise yet)
+ *  becomes undefined rather than an unchecked cast, so a future kind added
+ *  server-side degrades to "unknown reason" instead of lying about it. */
+function parseDeliveredBecause(raw: unknown): DeliveredBecause | undefined {
+  return typeof raw === "string" && DELIVERED_BECAUSE_VALUES.has(raw) ? (raw as DeliveredBecause) : undefined;
+}
+
 /** The exact marker a hand-off briefing must start with, so the incoming
  *  agent's polling loop (below) can detect it arrived. Consumers building
  *  the outgoing briefing prompt must instruct their model to emit this
@@ -79,6 +92,15 @@ export interface MessageContext {
    *  member path. True (the default) for an ordinary end-to-end encrypted
    *  chat. See client.ts's postPlainMessage/setChatSubscription. */
   encrypted: boolean;
+  /** Why THIS delivery reached this identity, on an open room only --
+   *  salt-api's `message.delivered_because` (present only alongside
+   *  `encrypted: false`; undefined for an ordinary encrypted chat, where
+   *  every member always gets every message and the question doesn't
+   *  apply). `"mention"`/`"reply"` are the two ways an `"addressed"`
+   *  subscription (client.ts's setChatSubscription) can trigger; `"keyword"`
+   *  is one of that subscription's own `keywords` appearing in the message;
+   *  `"all"` means the subscription just wants everything. */
+  deliveredBecause?: DeliveredBecause;
   /** Delegation hop depth this message arrived at; pass through to any further delegate call. */
   delegationDepth: number;
   chatMeta?: RawChatMeta;
@@ -623,6 +645,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         event_type?: string;
         message?: string;
         encrypted?: boolean;
+        delivered_because?: unknown;
         user?: { id?: SaltId; username?: string; display_name?: string };
         created_at?: string;
       };
@@ -647,6 +670,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         content,
         at: m.created_at ? Date.parse(m.created_at) : Date.now(),
         from: isSelf ? undefined : m.user?.username || m.user?.display_name || String(m.user?.id ?? "someone"),
+        // Only meaningful for the OTHER party's turn -- this identity's own
+        // messages have no "reason it was delivered to me" to report.
+        deliveredBecause: isSelf ? undefined : parseDeliveredBecause(m.delivered_because),
       });
     }
     return turns.length > sessions.MAX_TRANSCRIPT_TURNS ? turns.slice(-sessions.MAX_TRANSCRIPT_TURNS) : turns;
@@ -1095,6 +1121,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       sender: senderRaw,
       text: strippedCaption,
       encrypted: !isPlaintext,
+      deliveredBecause: parseDeliveredBecause(message.delivered_because),
       delegationDepth: depth,
       chatMeta,
       roomId,

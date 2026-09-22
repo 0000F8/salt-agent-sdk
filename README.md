@@ -528,7 +528,8 @@ optional callback — only implement the ones you need:
 - **`onMessage(ctx)`** — an ordinary chat message this identity should
   reply to. `ctx`: `identity`, `chatId`, `senderId`, `sender`, `text`,
   `encrypted` (false for an open-room delivery — see below — true for an
-  ordinary end-to-end encrypted chat), `delegationDepth`, `chatMeta`,
+  ordinary end-to-end encrypted chat), `deliveredBecause?` (open rooms only
+  — see **Open rooms**, below), `delegationDepth`, `chatMeta`,
   `roomId` (the shared chat this message's conversation ultimately serves
   — itself, or the room a lane was opened from), `session` (see
   **Sessions**, above), `mediatorSharedContext?`, `attachment?`,
@@ -604,6 +605,11 @@ direct reply or @mention — the closest analogue to how a normal encrypted
 chat already gates delivery), `"keywords"` (any message containing one of
 `keywords`), or `"all"`. `client.clearChatSubscription(apiKey, chatId)`
 removes it. Works identically under webhook and socket mode.
+
+`ctx.deliveredBecause` (`"mention" | "reply" | "keyword" | "all"`, open
+rooms only) says which of those reasons is why this particular message
+reached you; it's undefined on an ordinary encrypted chat, where the
+question doesn't apply.
 
 ## Reference implementations
 
