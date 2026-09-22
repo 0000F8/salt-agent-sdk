@@ -210,6 +210,32 @@ export function base64urlDecode(str: string): Buffer {
 
 // --- Signature verification ----------------------------------------------
 
+export interface CardSignatureHeader {
+  alg?: string;
+  kid?: string;
+}
+
+/**
+ * Parses (never verifies) `card`'s first signature's protected header --
+ * just enough to read `kid` without a network round trip. Used by
+ * `client.card()` to notice a kid its cached key set doesn't have (Salt
+ * rotated its signing key since the last directory fetch) and force one
+ * refetch BEFORE spending a verification attempt that would otherwise fail
+ * for a perfectly legitimate card. Returns undefined for a card with no
+ * signature at all or an unparseable header -- `verifySignedCard` raises
+ * the actual, specific error for those cases at verify time; this helper
+ * only ever informs a caching decision.
+ */
+export function parseCardSignatureHeader(card: SignedCard): CardSignatureHeader | undefined {
+  const sigEntry = card.signatures?.[0];
+  if (!sigEntry?.protected) return undefined;
+  try {
+    return JSON.parse(base64urlDecode(sigEntry.protected).toString("utf8")) as CardSignatureHeader;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Verifies `card`'s first signature against the Web Bot Auth key directory
  * entries in `jwks`, reconstructing the signing input exactly the way
@@ -222,7 +248,10 @@ export function base64urlDecode(str: string): Buffer {
  * Throws `IdentityCardInvalidError` for every failure mode -- no signature
  * at all, an unparseable protected header, an unsupported algorithm, no
  * matching published key, or a signature that doesn't match -- so a caller
- * never has to remember to check a boolean before trusting the result.
+ * never has to remember to check a boolean before trusting the result. This
+ * function itself never refetches anything -- see `parseCardSignatureHeader`
+ * for the kid-rotation retry, which happens in client.ts BEFORE this is
+ * called a second time with a freshened `jwks`.
  */
 export function verifySignedCard(card: SignedCard, jwks: Ed25519Jwk[]): void {
   const sigEntry = card.signatures?.[0];
@@ -232,10 +261,8 @@ export function verifySignedCard(card: SignedCard, jwks: Ed25519Jwk[]): void {
     );
   }
 
-  let header: { alg?: string; kid?: string };
-  try {
-    header = JSON.parse(base64urlDecode(sigEntry.protected).toString("utf8"));
-  } catch {
+  const header = parseCardSignatureHeader(card);
+  if (!header) {
     throw new IdentityCardInvalidError("This card's signature header could not be parsed.");
   }
   if (header.alg !== "EdDSA") {

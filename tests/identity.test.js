@@ -22,10 +22,9 @@ const sdk = require("../dist/index.js");
 // matching Jcs.rb by inspection: object keys sorted alphabetically, no
 // whitespace, `null`/`true` as bare literals, strings JSON-escaped.
 
-function makeSignedCardFixture() {
+function makeSignedCardFixture({ kid = "test-key-1" } = {}) {
   const kp = crypto.generateKeyPairSync("ed25519");
   const jwk = kp.publicKey.export({ format: "jwk" }); // { crv, x, kty }
-  const kid = "test-key-1";
 
   const card = {
     name: "Test Agent",
@@ -188,6 +187,82 @@ test("client.card() fetches the signing-key directory once and caches it across 
   assert.strictEqual(directoryCalls, 1, "the directory should be fetched exactly once and reused");
 });
 
+test("client.card() recovers from a rotated Salt signing key: a cached key set that doesn't cover a card's kid is refetched once, then verifies", async () => {
+  const oldFixture = makeSignedCardFixture({ kid: "key-old" });
+  const newFixture = makeSignedCardFixture({ kid: "key-new" });
+
+  let directoryCalls = 0;
+  let rotated = false;
+  const fetchImpl = async (url) => {
+    if (/\.well-known\//.test(url)) {
+      directoryCalls++;
+      return { ok: true, status: 200, json: async () => (rotated ? newFixture.directory : oldFixture.directory) };
+    }
+    if (/agent-card\.json$/.test(url)) {
+      return { ok: true, status: 200, json: async () => (rotated ? newFixture.signedCard : oldFixture.signedCard) };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: "not found" }) };
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  const first = await client.card("weatherbot");
+  assert.strictEqual(first.verified, true);
+  assert.strictEqual(directoryCalls, 1, "priming the cache costs exactly one directory fetch");
+
+  // Salt rotates its signing key and re-signs the card with it, all before
+  // this cache would otherwise have expired.
+  rotated = true;
+  const second = await client.card("weatherbot");
+  assert.strictEqual(second.verified, true, "a legitimate card signed with the newly-rotated key must still verify");
+  assert.strictEqual(directoryCalls, 2, "the kid miss should trigger exactly one refetch, not a permanent failure");
+});
+
+test("client.card() throws IdentityCardInvalidError, after exactly one retry, when a kid is missing even from the freshly-refetched directory", async () => {
+  const { signedCard } = makeSignedCardFixture({ kid: "key-that-is-never-published" });
+  let directoryCalls = 0;
+  const fetchImpl = async (url) => {
+    if (/\.well-known\//.test(url)) {
+      directoryCalls++;
+      return { ok: true, status: 200, json: async () => ({ keys: [] }) }; // never has the right key, before or after refetch
+    }
+    if (/agent-card\.json$/.test(url)) {
+      return { ok: true, status: 200, json: async () => signedCard };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: "not found" }) };
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  await assert.rejects(client.card("weatherbot"), sdk.IdentityCardInvalidError);
+  assert.strictEqual(directoryCalls, 2, "one initial fetch plus exactly one retry -- never a silent permanent failure, never an unbounded retry loop");
+});
+
+test("client.card() refetches the signing-key directory once its Cache-Control max-age has elapsed, even with no kid mismatch", async () => {
+  const { signedCard, directory } = makeSignedCardFixture();
+  let directoryCalls = 0;
+  const fetchImpl = async (url) => {
+    if (/\.well-known\//.test(url)) {
+      directoryCalls++;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (name.toLowerCase() === "cache-control" ? "public, max-age=0" : null) },
+        json: async () => directory,
+      };
+    }
+    if (/agent-card\.json$/.test(url)) {
+      return { ok: true, status: 200, json: async () => signedCard };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: "not found" }) };
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  await client.card("weatherbot");
+  assert.strictEqual(directoryCalls, 1);
+  await new Promise((resolve) => setTimeout(resolve, 5)); // let max-age=0 actually elapse
+  await client.card("weatherbot");
+  assert.strictEqual(directoryCalls, 2, "max-age=0 means the cached directory is stale on the very next call");
+});
+
 // --- client.identity() / client.setIdentity() -----------------------------
 
 test("client.identity() GETs /api/v1/identity and setIdentity() PATCHes /api/v1/identity/sections", async () => {
@@ -277,7 +352,7 @@ test("identity_set throws when no known section is provided", async () => {
   );
 });
 
-test("identity_get tells apart proof sections from claim sections in its result", async () => {
+test("identity_get tells apart proof sections from claim sections, reading checked_by from proof.by without ever assuming a checker", async () => {
   const client = fakeIdentityClient({
     cardResult: {
       verified: true,
@@ -285,7 +360,11 @@ test("identity_get tells apart proof sections from claim sections in its result"
         name: "Weatherbot",
         sections: [
           { key: "bio", value: "Forecasts", proof: null },
+          // Today's shape: a proof with no `by` at all -- the SDK must
+          // never invent "Salt" (or anyone else) here.
           { key: "trust_score", value: "4.9", proof: true },
+          // Tomorrow's shape: a proof that DOES name its checker.
+          { key: "verified_did", value: "did:example:dana", proof: { by: "Grains" } },
         ],
       },
     },
@@ -299,10 +378,14 @@ test("identity_get tells apart proof sections from claim sections in its result"
   assert.strictEqual(result.verified, true);
   const bio = result.sections.find((s) => s.key === "bio");
   const trust = result.sections.find((s) => s.key === "trust_score");
+  const verifiedDid = result.sections.find((s) => s.key === "verified_did");
   assert.strictEqual(bio.is_proof, false);
   assert.strictEqual(bio.checked_by, null);
   assert.strictEqual(trust.is_proof, true);
-  assert.strictEqual(trust.checked_by, "Salt");
+  assert.strictEqual(trust.checked_by, null, "an opaque proof (no `by`) must never be attributed to a guessed checker");
+  assert.strictEqual(verifiedDid.is_proof, true);
+  assert.strictEqual(verifiedDid.checked_by, "Grains");
+  assert.doesNotMatch(result.note, /\bSalt itself\b/, "the note must not hardcode Salt as the checker of every proof");
 });
 
 test("identity_get returns found:false instead of throwing when the card is missing or untrustworthy", async () => {
