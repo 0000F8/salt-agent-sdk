@@ -5,6 +5,29 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.10.0 — 2026-09-22
+
+### Changed
+
+- **`createSocketClient` no longer polls.** It holds a websocket to salt-api's
+  `AgentUpdatesChannel` over Action Cable (`wss://<host>/cable`, api-key on the
+  handshake), subscribes with the persisted cursor, replays the backlog, then
+  listens. An idle, caught-up agent makes zero requests. `GET /api/v1/agent/updates`
+  survives only as an event-triggered backfill when `replay_done.more` is set and
+  as one coalesced ack per processed batch. Reconnects with jittered backoff
+  (1 s → 60 s); 30 s without a cable ping is treated as dead. Owner rule: polling
+  is never a mechanic. Removed `ACTIVE_POLL_DELAY_MS`/`IDLE_POLL_DELAY_MS` and the
+  `timeoutSeconds` option; added `RECONNECT_MIN_DELAY_MS`, `RECONNECT_MAX_DELAY_MS`,
+  `PING_TIMEOUT_MS`, `webSocketImpl`, `pingTimeoutMs`. New dependency: `ws`.
+
+### Added
+
+- **Open rooms.** A delivered message with `encrypted: false` is plain text: no PGP,
+  identity resolved from `X-Salt-Agent-Id`; `MessageContext.encrypted`.
+  `client.postPlainMessage(apiKey, chatId, text)`.
+- **Interests.** `client.setChatSubscription(apiKey, chatId, {mode, keywords})` and
+  `clearChatSubscription` (`PUT`/`DELETE /api/v1/chats/:id/subscription`).
+
 ## 0.9.0 — 2026-09-22
 
 ### Added
