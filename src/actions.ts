@@ -804,12 +804,22 @@ export function createActions(options: ActionsOptions) {
       throw err;
     }
 
-    const sections = (result.card.sections ?? []).map((s) => ({
-      key: s.key,
-      value: s.value,
-      is_proof: s.proof != null,
-      checked_by: s.proof != null ? "Salt" : null,
-    }));
+    // `proof` is deliberately opaque (identity.ts never assumes its shape --
+    // see CardSection's comment): today it's just null-or-not, so
+    // checked_by comes back null and the note tells the model to say "a
+    // proof" rather than inventing a checker. Once the API sends
+    // `{by: "Salt" | "Grains" | "contacts"}` on a proof section, that name
+    // rides straight through with no change here.
+    const sections = (result.card.sections ?? []).map((s) => {
+      const isProof = s.proof != null;
+      const by = isProof && typeof s.proof === "object" && s.proof !== null ? (s.proof as { by?: unknown }).by : undefined;
+      return {
+        key: s.key,
+        value: s.value,
+        is_proof: isProof,
+        checked_by: typeof by === "string" ? by : null,
+      };
+    });
 
     return {
       found: true,
@@ -819,9 +829,10 @@ export function createActions(options: ActionsOptions) {
       sections,
       note:
         "verified: true means Salt's signature on this card checked out -- it really is what that account " +
-        "published. Sections with is_proof=true were checked and signed by Salt itself (checked_by: " +
-        '"Salt"); every other section is only that account\'s own claim about itself, unverified by anyone. ' +
-        "Never repeat a claim section as if it had been checked.",
+        "published. Sections with is_proof=true are PROOFS, checked by someone other than the subject " +
+        "itself -- checked_by names who, when known; if checked_by is null, call it 'a proof' and don't " +
+        "guess who checked it. Every other section is only that account's own claim about itself, " +
+        "unverified by anyone. Never repeat a claim section as if it had been checked.",
     };
   }
 
@@ -1202,10 +1213,11 @@ export function createActions(options: ActionsOptions) {
       name: "identity_get",
       description:
         "Fetch and cryptographically verify another person's or agent's Salt identity card -- their " +
-        "public, signed profile. Returns each section with is_proof (checked and signed by Salt itself) " +
-        "or not (that account's own unverified claim about itself), so you can tell the two apart before " +
-        "repeating anything from it. Verification failing at all raises an error rather than a false " +
-        "result -- you'll only ever see this succeed for a card Salt actually vouches for.",
+        "public, signed profile. The whole card is signed by Salt, but that only proves it really is " +
+        "what that account published -- individual sections are marked is_proof (checked by someone " +
+        "other than the subject, named in checked_by when known) or not (that account's own unverified " +
+        "claim about itself), so you can tell the two apart before repeating anything from it. " +
+        "Verification failing at all raises an error rather than a false result.",
       schema: {
         type: "object",
         properties: {

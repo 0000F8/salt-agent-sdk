@@ -5,7 +5,14 @@
 // Salt agent: the primary identity, plus any it spawns via createAgent).
 
 import { sameId, type SaltId } from "./ids.js";
-import { verifySignedCard, type Ed25519Jwk, type IdentityClaims, type IdentitySections, type SignedCard } from "./identity.js";
+import {
+  parseCardSignatureHeader,
+  verifySignedCard,
+  type Ed25519Jwk,
+  type IdentityClaims,
+  type IdentitySections,
+  type SignedCard,
+} from "./identity.js";
 
 export interface SaltUser {
   id: SaltId;
@@ -283,24 +290,46 @@ export function createSaltClient(options: SaltClientOptions) {
 
   // Salt's Web Bot Auth signing key(s), published unauthenticated at the
   // domain root (see salt-api's WebBotAuthController) -- the SAME key
-  // AgentCardSigner signs cards with. Fetched once per client instance and
-  // cached; a failed fetch clears the cache so a transient network blip
-  // doesn't permanently poison every later card() call.
-  let signingKeysPromise: Promise<Ed25519Jwk[]> | null = null;
-  async function getSigningKeys(): Promise<Ed25519Jwk[]> {
-    if (!signingKeysPromise) {
-      signingKeysPromise = (async () => {
+  // AgentCardSigner signs cards with. Cached per client instance, honouring
+  // the directory's own Cache-Control: max-age (the controller sends 300s;
+  // DEFAULT_DIRECTORY_MAX_AGE_MS stands in when the header is absent or
+  // unparseable) so a long-lived process doesn't re-fetch on every card()
+  // call, but also doesn't hold a stale key set indefinitely. Beyond age-based
+  // expiry, card() below also forces a refetch the moment a card names a
+  // kid this cache doesn't have -- see its comment for why that matters
+  // more than the age check alone (a rotation can land well inside the
+  // 5-minute window). A failed fetch never poisons the cache: the in-flight
+  // promise is cleared in `finally` so the next call (forced or not) tries again.
+  const DEFAULT_DIRECTORY_MAX_AGE_MS = 300_000;
+  let signingKeysCache: { keys: Ed25519Jwk[]; fetchedAt: number; maxAgeMs: number } | null = null;
+  let signingKeysInFlight: Promise<Ed25519Jwk[]> | null = null;
+
+  function directoryMaxAgeMs(res: { headers?: { get?: (name: string) => string | null | undefined } }): number {
+    const raw = res.headers?.get?.("Cache-Control") ?? res.headers?.get?.("cache-control");
+    const match = raw ? /max-age=(\d+)/i.exec(raw) : null;
+    const seconds = match ? Number(match[1]) : NaN;
+    return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : DEFAULT_DIRECTORY_MAX_AGE_MS;
+  }
+
+  async function getSigningKeys(opts?: { forceRefresh?: boolean }): Promise<Ed25519Jwk[]> {
+    if (opts?.forceRefresh) signingKeysCache = null;
+    const stale = !signingKeysCache || Date.now() - signingKeysCache.fetchedAt > signingKeysCache.maxAgeMs;
+    if (!stale) return signingKeysCache!.keys;
+
+    if (!signingKeysInFlight) {
+      signingKeysInFlight = (async () => {
         const url = `${host}/.well-known/http-message-signatures-directory`;
         const res = await doFetch(url);
         if (!res.ok) throw new SaltApiError("GET", url, res.status, await res.text().catch(() => undefined));
         const body = (await res.json()) as { keys?: Ed25519Jwk[] };
-        return body.keys ?? [];
-      })().catch((err) => {
-        signingKeysPromise = null;
-        throw err;
+        const keys = body.keys ?? [];
+        signingKeysCache = { keys, fetchedAt: Date.now(), maxAgeMs: directoryMaxAgeMs(res) };
+        return keys;
+      })().finally(() => {
+        signingKeysInFlight = null;
       });
     }
-    return signingKeysPromise;
+    return signingKeysInFlight;
   }
 
   return {
@@ -542,7 +571,18 @@ export function createSaltClient(options: SaltClientOptions) {
           throw new SaltApiError("GET", attempt.url, res.status, await res.json().catch(() => undefined));
         }
         const card = (await res.json()) as SignedCard;
-        const jwks = await getSigningKeys();
+        let jwks = await getSigningKeys();
+        // A card signed with a kid this cache doesn't have could mean Salt
+        // rotated its key since we last fetched the directory (well inside
+        // the max-age window, since rotation doesn't wait for a cache to
+        // expire) rather than a bad card -- refetch once before deciding.
+        // Never retried for any OTHER verification failure (bad signature,
+        // unparseable header, unsupported alg): those can't be fixed by a
+        // fresher key set, so they fail immediately.
+        const header = parseCardSignatureHeader(card);
+        if (header?.kid && !jwks.some((k) => k.kid === header.kid)) {
+          jwks = await getSigningKeys({ forceRefresh: true });
+        }
         verifySignedCard(card, jwks); // throws IdentityCardInvalidError on any failure
         return { card, verified: true };
       }
