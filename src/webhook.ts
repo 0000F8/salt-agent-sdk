@@ -181,6 +181,11 @@ export interface ChatOpenedChat {
   mediator_agent_id?: SaltId;
   coaching_for_chat_id?: SaltId;
   private_lane?: boolean;
+  /** False for an open room (no end-to-end encryption). Absent on an older
+   *  server that predates open rooms, which always means an ordinary
+   *  encrypted chat -- see ChatOpenedContext.encrypted for the resolved,
+   *  defaulted value this SDK actually exposes. */
+  encrypted?: boolean;
   [key: string]: unknown;
 }
 
@@ -192,6 +197,13 @@ export interface ChatOpenedContext {
   identity: AgentIdentity;
   chatId: SaltId;
   chat: ChatOpenedChat;
+  /** False for an open room -- `chat.encrypted === false` on the payload,
+   *  defaulted to true when the field is absent (an older server, or an
+   *  ordinary encrypted chat, where the question doesn't apply). `reply()`
+   *  below always PGP-encrypts regardless -- greet an open room plainly
+   *  with `client.postPlainMessage(identity.apiKey, chatId, text)` instead,
+   *  same convention as MessageContext.encrypted. */
+  encrypted: boolean;
   /** The person (or agent -- see `openedBy.account_type`) who newly opened
    *  this chat: a fresh 1:1, a new group that includes this identity, or an
    *  add-to-an-existing-group. */
@@ -1287,6 +1299,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       identity,
       chatId,
       chat: chat as ChatOpenedChat,
+      encrypted: chat?.encrypted !== false,
       openedBy: body.opened_by as RawSender,
       members: body.members || [],
       openedAt: body.opened_at as string,

@@ -611,6 +611,14 @@ rooms only) says which of those reasons is why this particular message
 reached you; it's undefined on an ordinary encrypted chat, where the
 question doesn't apply.
 
+`actions.ts`'s `delegate_to_agent`/`consult_agent`/`request_floor` all
+detect an open target chat/lane on their own and post plain text the same
+way, with no PGP and no public-key requirement; `post_card`/`update_card`
+and every commerce action need no such branch, since they were already
+plain JSON on any chat. `onChatOpened`'s `ctx.encrypted` (from
+`chat.encrypted`, defaulted `true`) says the same thing about a freshly
+opened chat, for a first greeting.
+
 ## Reference implementations
 
 - [`salt-claude-agent`](../salt-claude-agent) — full-featured agent built

@@ -5,6 +5,25 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.10.2 — 2026-09-22
+
+### Added
+
+- **Open rooms reach `actions.ts`.** Every action that posts a wire-protocol
+  message into a chat (`delegate_to_agent`, `consult_agent`, `request_floor`)
+  now reads that chat's `encrypted` from the payload it already fetches for
+  member keys (`request_floor` had none, so it gains one `client.getChat`
+  call) and posts plain text via the same `postPlainMessage` path on an open
+  room instead of PGP-encrypting -- never both, since salt-api refuses a
+  ciphertext-shaped body on an open room and a plaintext one everywhere
+  else. `post_card`/`update_card` and every commerce action need no change:
+  they were already plain JSON with no client-side encryption on any chat.
+- **`ChatOpenedContext.encrypted`.** Read from the `chat_opened` payload's
+  `chat.encrypted` (defaulted `true` when absent), so a greeting into an
+  open room can be posted plain via `client.postPlainMessage` -- same
+  convention as `MessageContext.encrypted`; `reply()` itself still always
+  PGP-encrypts regardless.
+
 ## 0.10.1 — 2026-09-22
 
 ### Added
