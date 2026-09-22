@@ -24,6 +24,12 @@ export interface SessionTurn {
   at: number;
   /** Who said it, for a "user" turn -- a username when known, else an id. Omitted for "assistant" (that's always this identity). */
   from?: string;
+  /** Why this delivery reached the identity, on an open room only -- mirrors
+   *  webhook.ts's MessageContext.deliveredBecause for a "user" turn rebuilt
+   *  from the chat's own history (see rebuildTranscriptTail). Never set on
+   *  an "assistant" turn (this identity's own message); omitted for an
+   *  ordinary encrypted chat, where the question doesn't apply. */
+  deliveredBecause?: "mention" | "reply" | "keyword" | "all";
 }
 
 export interface SessionNote {
