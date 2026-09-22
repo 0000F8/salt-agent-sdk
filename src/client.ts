@@ -385,6 +385,48 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * Post into an OPEN ROOM -- a chat with no end-to-end encryption, so
+     * `text` rides the wire and is stored as plain text rather than a PGP
+     * blob. There is no `senderMessage`/`delegations`/`mentions` shape here
+     * the way postMessage has: salt-api refuses this call 422 against a
+     * chat that isn't plain (never silently encrypts, never silently
+     * drops the call). Webhook/socket deliveries for a plain chat carry
+     * `message.encrypted === false` -- see webhook.ts's handleMessage,
+     * which hands the body straight through as ctx.text (ctx.encrypted
+     * false) instead of attempting PGP decrypt.
+     */
+    async postPlainMessage(apiKey: string, chatId: SaltId, text: string): Promise<unknown> {
+      return request("POST", "/api/v1/messages", apiKey, { chat_id: chatId, message: text });
+    },
+
+    /**
+     * Open rooms (0.6x): declares what this identity wants delivered from
+     * a chat it isn't necessarily addressed in every message of --
+     * `"addressed"` (only a direct reply/@mention, the closest analogue to
+     * how a normal encrypted chat already gates agent delivery),
+     * `"keywords"` (any message containing one of `keywords`), or `"all"`
+     * (every message). Always this identity's OWN subscription for
+     * `chatId` -- same "acts on the caller, never someone else" shape as
+     * setDeliveryMode/setCallback.
+     */
+    async setChatSubscription(
+      apiKey: string,
+      chatId: SaltId,
+      params: { mode: "addressed" | "keywords" | "all"; keywords?: string[] }
+    ): Promise<unknown> {
+      const body: Record<string, unknown> = { mode: params.mode };
+      if (params.keywords && params.keywords.length > 0) body.keywords = params.keywords;
+      return request("PUT", `/api/v1/chats/${chatId}/subscription`, apiKey, body);
+    },
+
+    /** Removes this identity's subscription record for `chatId` -- salt-api's
+     *  default (unsubscribed) behavior applies again, same as never having
+     *  called setChatSubscription. */
+    async clearChatSubscription(apiKey: string, chatId: SaltId): Promise<unknown> {
+      return request("DELETE", `/api/v1/chats/${chatId}/subscription`, apiKey);
+    },
+
+    /**
      * Get-or-create the private lane (a sidechain) between this identity and
      * `withId`, both members of `chatId`. Once per pair on Salt's side. Answers
      * 422 when `chatId` is itself a lane. The lane's members come back with

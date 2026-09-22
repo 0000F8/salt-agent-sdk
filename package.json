@@ -39,11 +39,13 @@
   "dependencies": {
     "ethers": "^6.13.0",
     "express": "^4.19.0",
-    "openpgp": "^5.11.0"
+    "openpgp": "^5.11.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.5.0"
   }
 }

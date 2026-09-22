@@ -72,6 +72,13 @@ export interface MessageContext {
   sender: RawSender;
   /** Delegation- and consult-marker-stripped plaintext (see delegations.parseIncoming / delegations.stripConsultMarker). */
   text: string;
+  /** False for an open-room message (salt-api's `message.encrypted === false`
+   *  on the delivery) -- `text` came straight off the wire with no PGP
+   *  decrypt attempted, so a reply into this chat should go through
+   *  `client.postPlainMessage`, never `reply()`'s normal encrypt-for-every-
+   *  member path. True (the default) for an ordinary end-to-end encrypted
+   *  chat. See client.ts's postPlainMessage/setChatSubscription. */
+  encrypted: boolean;
   /** Delegation hop depth this message arrived at; pass through to any further delegate call. */
   delegationDepth: number;
   chatMeta?: RawChatMeta;
@@ -284,9 +291,9 @@ export interface WebhookServerOptions {
  * process" -- signature verification and the decrypt/route/dedup/reply
  * logic for every webhook event kind. `createWebhookServer` below wraps
  * this in an Express POST route (the only transport before K2); socket.ts's
- * `createSocketClient` wraps the SAME dispatcher around a long-poll loop
- * instead, so a consumer switches delivery mode with no change to
- * onMessage/onCardInteraction/etc. -- see socket.ts's own doc comment.
+ * `createSocketClient` wraps the SAME dispatcher around a websocket push
+ * connection instead, so a consumer switches delivery mode with no change
+ * to onMessage/onCardInteraction/etc. -- see socket.ts's own doc comment.
  */
 export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   const { client, identities, pgpPassphrase, mediatorAgentId } = options;
@@ -577,14 +584,21 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
     const lines: string[] = [];
     for (const raw of messages) {
-      const m = raw as { event_type?: string; message?: string; user?: { display_name?: string } };
-      if (m.event_type || typeof m.message !== "string" || !PGP_MESSAGE_RE.test(m.message)) continue;
-      try {
-        const text = await pgp.decrypt(m.message, identity.privateKey, pgpPassphrase);
-        lines.push(`${m.user?.display_name || "someone"}: ${text}`);
-      } catch {
-        // Predates this identity joining the chat -- skip silently.
+      const m = raw as { event_type?: string; message?: string; encrypted?: boolean; user?: { display_name?: string } };
+      if (m.event_type || typeof m.message !== "string") continue;
+      let text: string;
+      if (m.encrypted === false) {
+        // Open room (salt-api 0.6x): already plaintext, nothing to decrypt.
+        text = m.message;
+      } else {
+        if (!PGP_MESSAGE_RE.test(m.message)) continue;
+        try {
+          text = await pgp.decrypt(m.message, identity.privateKey, pgpPassphrase);
+        } catch {
+          continue; // predates this identity joining the chat -- skip silently.
+        }
       }
+      lines.push(`${m.user?.display_name || "someone"}: ${text}`);
     }
     return lines.length ? lines.join("\n") : "(no messages yet)";
   }
@@ -608,15 +622,22 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       const m = raw as {
         event_type?: string;
         message?: string;
+        encrypted?: boolean;
         user?: { id?: SaltId; username?: string; display_name?: string };
         created_at?: string;
       };
-      if (m.event_type || typeof m.message !== "string" || !PGP_MESSAGE_RE.test(m.message)) continue;
+      if (m.event_type || typeof m.message !== "string") continue;
       let plaintext: string;
-      try {
-        plaintext = await pgp.decrypt(m.message, identity.privateKey, pgpPassphrase);
-      } catch {
-        continue; // predates this identity joining the chat -- skip silently.
+      if (m.encrypted === false) {
+        // Open room (salt-api 0.6x): already plaintext, nothing to decrypt.
+        plaintext = m.message;
+      } else {
+        if (!PGP_MESSAGE_RE.test(m.message)) continue;
+        try {
+          plaintext = await pgp.decrypt(m.message, identity.privateKey, pgpPassphrase);
+        } catch {
+          continue; // predates this identity joining the chat -- skip silently.
+        }
       }
       const { text: afterDepth } = delegations.parseIncoming(plaintext);
       const content = delegations.stripConsultMarker(afterDepth);
@@ -881,15 +902,40 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (alreadyProcessed(message.message_id as SaltId)) return;
     if (message.event_type) return; // system events aren't prompts
 
-    const ciphertext = message.message;
-    if (typeof ciphertext !== "string" || !PGP_MESSAGE_RE.test(ciphertext)) return;
+    const rawMessage = message.message;
+    if (typeof rawMessage !== "string") return;
 
-    const resolved = await resolveIdentity(ciphertext, headerAgentId);
-    if (!resolved) {
-      logger.error(`[chat ${chatId}] no known identity could decrypt this message; ignoring.`);
-      return;
+    // Open rooms (salt-api 0.6x): a plain chat delivers `encrypted: false`
+    // and `message` is the text itself, not a PGP blob -- there is nothing
+    // to trial-decrypt, and no way to recover which hosted identity this
+    // delivery was addressed to except the header salt-api signs every
+    // callback with. Without it (a header-less transport, or a header
+    // naming an identity this process doesn't host) there is no safe
+    // fallback the way trial-decryption gives the ciphertext path below --
+    // guessing would risk this identity replying as if it heard a message
+    // that was actually addressed to a sibling identity sharing this
+    // process.
+    const isPlaintext = message.encrypted === false;
+    let identity: AgentIdentity;
+    let caption: string;
+    if (isPlaintext) {
+      const preferred = headerAgentId ? identities.get(headerAgentId) : undefined;
+      if (!preferred) {
+        logger.error(`[chat ${chatId}] no known identity for this plaintext message (X-Salt-Agent-Id ${headerAgentId ?? "missing"}); ignoring.`);
+        return;
+      }
+      identity = preferred;
+      caption = rawMessage;
+    } else {
+      if (!PGP_MESSAGE_RE.test(rawMessage)) return;
+      const resolved = await resolveIdentity(rawMessage, headerAgentId);
+      if (!resolved) {
+        logger.error(`[chat ${chatId}] no known identity could decrypt this message; ignoring.`);
+        return;
+      }
+      identity = resolved.identity;
+      caption = resolved.plaintext;
     }
-    let { identity, plaintext: caption } = resolved;
 
     // Wire protocol, never a prompt: a hand-off briefing is consumed by
     // handleHandoffReceived's poll (above HANDOFF_BRIEFING_MARKER's
@@ -1048,6 +1094,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       senderId,
       sender: senderRaw,
       text: strippedCaption,
+      encrypted: !isPlaintext,
       delegationDepth: depth,
       chatMeta,
       roomId,
@@ -1372,7 +1419,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
 }
 
 /** What createDispatcher returns -- the two things any transport (an
- *  Express POST route, socket.ts's long-poll loop) needs: verify an
+ *  Express POST route, socket.ts's websocket push client) needs: verify an
  *  envelope's signature, then hand its body to the right handler. */
 export interface Dispatcher {
   verifyEnvelope(
