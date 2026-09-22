@@ -19,6 +19,7 @@ import * as delegations from "./delegations";
 import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type WorkStatus } from "./work";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
+import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, type AgentClaimSectionKey, type CardSection } from "./identity.js";
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -760,6 +761,70 @@ export function createActions(options: ActionsOptions) {
     };
   }
 
+  // --- identity_set / identity_get --------------------------------------
+
+  async function identitySet(caller: AgentIdentity, input: Record<string, unknown>) {
+    const claims: Partial<Record<AgentClaimSectionKey, string>> = {};
+    for (const key of AGENT_CLAIM_SECTION_KEYS) {
+      const raw = input[key];
+      if (raw === undefined || raw === null) continue;
+      claims[key] = String(raw);
+    }
+    if (Object.keys(claims).length === 0) {
+      throw new Error(`Provide at least one section to set: ${AGENT_CLAIM_SECTION_KEYS.join(", ")}.`);
+    }
+
+    const result = await client.setIdentity(caller.apiKey, claims);
+    return {
+      updated: true,
+      sections: Object.keys(claims),
+      card_url: result.card_url,
+      note:
+        "These are CLAIMS you made about yourself -- signed as coming from you, not verified as true by " +
+        "anyone. A PROOF section (like your PGP fingerprint, Salt DID, or trust score) is different: Salt " +
+        "itself checks and signs those. Never present a claim as if it were checked, and never claim a " +
+        "proof section's value yourself -- this action can't set one anyway.",
+    };
+  }
+
+  async function identityGet(caller: AgentIdentity, input: { handle?: string; kind?: "agent" | "user" }) {
+    const handle = String(input.handle || "").trim();
+    if (!handle) throw new Error("handle is required.");
+
+    let result: { card: { sections?: CardSection[]; [key: string]: unknown }; verified: true };
+    try {
+      result = await client.card(handle, input.kind ? { kind: input.kind } : undefined);
+    } catch (err) {
+      if (err instanceof IdentityCardInvalidError) {
+        return { found: false, reason: `Found a card for ${handle}, but could not trust it: ${err.message}` };
+      }
+      if (err instanceof SaltApiError && err.status === 404) {
+        return { found: false, reason: `No card is served for ${handle} -- the handle may not exist, or that account's card isn't discoverable.` };
+      }
+      throw err;
+    }
+
+    const sections = (result.card.sections ?? []).map((s) => ({
+      key: s.key,
+      value: s.value,
+      is_proof: s.proof != null,
+      checked_by: s.proof != null ? "Salt" : null,
+    }));
+
+    return {
+      found: true,
+      verified: true,
+      name: result.card.name,
+      description: result.card.description,
+      sections,
+      note:
+        "verified: true means Salt's signature on this card checked out -- it really is what that account " +
+        "published. Sections with is_proof=true were checked and signed by Salt itself (checked_by: " +
+        '"Salt"); every other section is only that account\'s own claim about itself, unverified by anyone. ' +
+        "Never repeat a claim section as if it had been checked.",
+    };
+  }
+
   const definitions: ActionDefinition[] = [
     {
       name: "create_salt_agent",
@@ -1107,6 +1172,49 @@ export function createActions(options: ActionsOptions) {
         required: ["candidates"],
       },
       execute: offerHandoffChoices,
+    },
+    {
+      name: "identity_set",
+      description:
+        "State one or more CLAIM sections about YOURSELF on your Salt identity card -- your public, " +
+        "signed profile (display_name, bio, link, avatar, category, message_price, funding_disclosure). " +
+        "This is a CLAIM, not a proof: it's signed as coming from you, never verified as true by anyone. " +
+        "Don't set message_price to advertise a price you don't actually enforce, and don't claim a " +
+        "PROOF section (like your PGP fingerprint or trust score) here -- those are computed and signed " +
+        "by Salt itself and can't be set through this action. You cannot set who else can see a section " +
+        "(scope) -- that's controlled by your owner, not you.",
+      schema: {
+        type: "object",
+        properties: {
+          display_name: { type: "string", description: "Shown on your card and message bubbles." },
+          bio: { type: "string", description: "One-line description of who/what you are." },
+          link: { type: "string", description: "A URL you want associated with you (e.g. your homepage)." },
+          avatar: { type: "string", description: "A URL to an image to use as your avatar." },
+          category: { type: "string", description: "Directory category, e.g. Assistant, Trading, Fun, Utilities." },
+          message_price: { type: "string", description: 'Decimal string price to message you 1:1, e.g. "0.01". Omit for free.' },
+          funding_disclosure: { type: "string", description: 'How you\'re funded, e.g. "self-funded" -- a real, honest answer, not left blank.' },
+        },
+        required: [],
+      },
+      execute: identitySet,
+    },
+    {
+      name: "identity_get",
+      description:
+        "Fetch and cryptographically verify another person's or agent's Salt identity card -- their " +
+        "public, signed profile. Returns each section with is_proof (checked and signed by Salt itself) " +
+        "or not (that account's own unverified claim about itself), so you can tell the two apart before " +
+        "repeating anything from it. Verification failing at all raises an error rather than a false " +
+        "result -- you'll only ever see this succeed for a card Salt actually vouches for.",
+      schema: {
+        type: "object",
+        properties: {
+          handle: { type: "string", description: "Username (without @) of the person or agent whose card to fetch." },
+          kind: { type: "string", enum: ["agent", "user"], description: "Optional: fetch only the agent card or only the person card. Omit to try both." },
+        },
+        required: ["handle"],
+      },
+      execute: identityGet,
     },
   ];
 

@@ -1,6 +1,7 @@
 export * from "./ids";
 export * from "./client";
 export * from "./crypto";
+export * from "./identity";
 export * from "./identities";
 export * from "./reconcile";
 export * from "./delegations";

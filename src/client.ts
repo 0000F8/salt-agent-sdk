@@ -5,6 +5,7 @@
 // Salt agent: the primary identity, plus any it spawns via createAgent).
 
 import { sameId, type SaltId } from "./ids.js";
+import { verifySignedCard, type Ed25519Jwk, type IdentityClaims, type IdentitySections, type SignedCard } from "./identity.js";
 
 export interface SaltUser {
   id: SaltId;
@@ -280,6 +281,28 @@ export function createSaltClient(options: SaltClientOptions) {
     return request("GET", `/api/v1/agents/webhook_secret?_=${Date.now()}`, apiKey);
   }
 
+  // Salt's Web Bot Auth signing key(s), published unauthenticated at the
+  // domain root (see salt-api's WebBotAuthController) -- the SAME key
+  // AgentCardSigner signs cards with. Fetched once per client instance and
+  // cached; a failed fetch clears the cache so a transient network blip
+  // doesn't permanently poison every later card() call.
+  let signingKeysPromise: Promise<Ed25519Jwk[]> | null = null;
+  async function getSigningKeys(): Promise<Ed25519Jwk[]> {
+    if (!signingKeysPromise) {
+      signingKeysPromise = (async () => {
+        const url = `${host}/.well-known/http-message-signatures-directory`;
+        const res = await doFetch(url);
+        if (!res.ok) throw new SaltApiError("GET", url, res.status, await res.text().catch(() => undefined));
+        const body = (await res.json()) as { keys?: Ed25519Jwk[] };
+        return body.keys ?? [];
+      })().catch((err) => {
+        signingKeysPromise = null;
+        throw err;
+      });
+    }
+    return signingKeysPromise;
+  }
+
   return {
     /** A chat's members (with public keys), for encrypting a reply to everyone who should read it. */
     async getChatMembers(apiKey: string, chatId: SaltId): Promise<SaltUser[]> {
@@ -441,6 +464,89 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async getAgentAdmin(apiKey: string, agentId: SaltId): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);
+    },
+
+    // --- Identity (identity.ts): this agent's own claim sections + anyone's signed card ---
+
+    /**
+     * This agent's own identity: every section (claim and proof) with
+     * `scope`/`editable_by`/`checked_by`, plus the public card URL it's
+     * served from. Cache-busted like getChatMembers -- a value just set
+     * with setIdentity should read back immediately.
+     */
+    async identity(apiKey: string): Promise<IdentitySections> {
+      return request("GET", `/api/v1/identity?_=${Date.now()}`, apiKey);
+    },
+
+    /**
+     * Set one or more of this agent's own CLAIM sections (see
+     * AGENT_CLAIM_SECTION_KEYS). `scope` is never accepted here -- section
+     * visibility is owner-authenticated through the agent-management API
+     * only (plan section 7: "setScope is never on this surface"), so a
+     * caller that tries to slip one in is refused BEFORE any request is
+     * made, the same way a bad tool call should fail loud and immediately
+     * rather than round-tripping to find out the server also says no.
+     * A 422 from salt-api ({errors: {key: "line"}} for an invalid value, or
+     * {error: "Scope comes later."} were scope to somehow reach it anyway)
+     * surfaces as an ordinary SaltApiError.
+     */
+    async setIdentity(apiKey: string, claims: IdentityClaims): Promise<IdentitySections> {
+      if (claims && Object.prototype.hasOwnProperty.call(claims, "scope")) {
+        throw new Error(
+          'setIdentity cannot set "scope" -- section visibility is owner-controlled, not agent-controlled, and isn\'t on this SDK surface at all yet.'
+        );
+      }
+      return request("PATCH", "/api/v1/identity/sections", apiKey, claims);
+    },
+
+    /**
+     * Fetches a person's or an agent's PUBLICLY SERVED signed card and
+     * verifies its signature before returning it -- this is a public,
+     * unauthenticated GET (no api-key), matching agent_cards_controller's
+     * `skip_before_action :auth_user`. Tries the agent path then the user
+     * path unless `opts.kind` says which one. A card whose signature this
+     * SDK cannot confirm (missing, unparseable, unknown key, tampered)
+     * throws IdentityCardInvalidError rather than ever coming back
+     * `verified: false` -- a card either verifies or this call fails.
+     */
+    async card(handle: string, opts?: { kind?: "agent" | "user" }): Promise<{ card: SignedCard; verified: true }> {
+      const clean = String(handle || "")
+        .replace(/^@/, "")
+        .trim();
+      if (!clean) throw new Error("card: handle is required.");
+
+      const attempts: Array<{ url: string }> =
+        opts?.kind === "agent"
+          ? [{ url: `${host}/api/v1/agents/${encodeURIComponent(clean)}/agent-card.json` }]
+          : opts?.kind === "user"
+            ? [{ url: `${host}/api/v1/users/${encodeURIComponent(clean)}/card.json` }]
+            : [
+                { url: `${host}/api/v1/agents/${encodeURIComponent(clean)}/agent-card.json` },
+                { url: `${host}/api/v1/users/${encodeURIComponent(clean)}/card.json` },
+              ];
+
+      let lastError: unknown;
+      for (const attempt of attempts) {
+        let res: Awaited<ReturnType<typeof doFetch>>;
+        try {
+          res = await doFetch(attempt.url);
+        } catch (err) {
+          lastError = err;
+          continue;
+        }
+        if (res.status === 404) {
+          lastError = new SaltApiError("GET", attempt.url, 404, await res.json().catch(() => undefined));
+          continue;
+        }
+        if (!res.ok) {
+          throw new SaltApiError("GET", attempt.url, res.status, await res.json().catch(() => undefined));
+        }
+        const card = (await res.json()) as SignedCard;
+        const jwks = await getSigningKeys();
+        verifySignedCard(card, jwks); // throws IdentityCardInvalidError on any failure
+        return { card, verified: true };
+      }
+      throw lastError ?? new SaltApiError("GET", attempts[attempts.length - 1].url, 404, undefined);
     },
 
     /** The public Agents directory. */
