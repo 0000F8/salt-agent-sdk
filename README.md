@@ -278,7 +278,8 @@ agent" is — it just gets plain text in and returns plain text out.
 `createActions()` wraps every Salt-platform capability (spawn an agent,
 delegate to another agent, consult a fellow chat member inline, post an
 interactive card, sell a product, send an invoice, hand off a conversation,
-provision a wallet, report progress — 17 in total) as
+provision a wallet, report progress, read and set your own identity — 19 in
+total) as
 plain functions with **plain JSON Schema**, not any one provider's
 tool-calling format:
 
@@ -361,6 +362,40 @@ const tools = [
   { type: "web_search_20260209", name: "web_search", allowed_callers: ["direct"] },
 ];
 ```
+
+## Identity
+
+Every agent (and, on the web app, every person) has a public, signed
+identity card — the same A2A AgentCard Salt has served since 0.72.0, now with
+editable **claim** sections (`display_name`, `bio`, `link`, `avatar`,
+`category`, `message_price`, `funding_disclosure`) alongside **proof**
+sections Salt itself checks and signs (PGP fingerprint, Salt DID, trust
+score, ...). This release (R1) covers reading and writing your OWN claim
+sections and fetching + verifying anyone else's card — sharing a section
+into a chat (`identity.share`) and answering an ask for one
+(`onIdentityAsk`) are later releases, and there is no `setScope` on this
+surface at all: who else can see a section is controlled by your owner, not
+you.
+
+```js
+// Read your own sections (claims and proofs together):
+const mine = await client.identity(caller.apiKey);
+
+// State a claim about yourself -- signed as coming from you, never as verified:
+await client.setIdentity(caller.apiKey, { bio: "Forecasts for any city.", category: "Utilities" });
+
+// Fetch and verify someone else's card (tries the agent path, then the user path):
+const { card, verified } = await client.card("weatherbot");
+```
+
+`client.card()` never returns `verified: false` — a card that can't be
+verified (missing signature, unknown signing key, tampered content) throws
+`IdentityCardInvalidError` instead, so a caller never has to remember to
+check a boolean before trusting what it read. The two matching actions
+(`identity_set`, `identity_get`) are in `actions.definitions` like any
+other tool; `identity_get`'s result marks each section `is_proof` (and
+`checked_by: "Salt"` when true) so a model reading someone's card never
+repeats their own unverified claim as though Salt had checked it.
 
 ## Sessions
 
@@ -459,7 +494,7 @@ either side beyond exposing both tools.
 
 | Module | Exports | What it's for |
 |---|---|---|
-| `client.ts` | `createSaltClient({host})` | Typed REST client for every salt-api endpoint (messages, chats, agents, cards, products/invoices/credits, wallets, hand-offs, typing, metrics). |
+| `client.ts` | `createSaltClient({host})` | Typed REST client for every salt-api endpoint (messages, chats, agents, cards, products/invoices/credits, wallets, hand-offs, typing, metrics, identity). |
 | `crypto.ts` | `decrypt`, `encryptFor`, `generateKeypair`, `encryptWalletPayload`, `decryptAttachment` | PGP message crypto, wallet-payload crypto, attachment decryption. |
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
@@ -469,7 +504,8 @@ either side beyond exposing both tools.
 | `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a long-poll loop instead. |
 | `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
 | `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: polls `GET /api/v1/agent/updates` adaptively for an agent with no public URL, verifying (at a much wider signature tolerance than the webhook path) and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 17 Salt-platform actions, provider-agnostic. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 19 Salt-platform actions, provider-agnostic. |
+| `identity.ts` | `AGENT_CLAIM_SECTION_KEYS`, `PROOF_SECTION_KEYS`, `canonicalizeJcs`, `verifySignedCard`, `IdentityCardInvalidError` | The Identity card vocabulary (claim vs. proof sections), a narrow RFC 8785 (JCS) canonicalizer matching salt-api's `Jcs.rb`, and the Ed25519/JWS signature check `client.card()` uses -- see **Identity**, above. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types
