@@ -5,7 +5,7 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
-## Unreleased / 0.9.0
+## 0.9.0 — 2026-09-22
 
 ### Added
 
