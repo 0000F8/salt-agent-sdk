@@ -5,6 +5,19 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.10.1 — 2026-09-22
+
+### Added
+
+- **`MessageContext.deliveredBecause`.** On an open room only, why THIS
+  delivery reached the identity -- `"mention" | "reply" | "keyword" | "all"`,
+  read from salt-api's `message.delivered_because` (undefined for an ordinary
+  encrypted chat, where every member always gets every message). Present on
+  both the webhook and socket paths (they share one dispatcher) and, when
+  history carries it, on `SessionTurn.deliveredBecause` for the other
+  party's turn in a cold-start session rebuild -- never on this identity's
+  own turn.
+
 ## 0.10.0 — 2026-09-22
 
 ### Changed
