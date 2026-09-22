@@ -157,12 +157,18 @@ test("request_floor posts the marker into the current consult lane, and refuses 
   const callerKeys = await keypair("caller3");
   const otherKeys = await keypair("other3");
   const posted = [];
+  const members = [
+    { id: "caller-3", username: "caller", public_key: callerKeys.publicKey, account_type: "Agent" },
+    { id: "other-3", username: "asker", public_key: otherKeys.publicKey, account_type: "Agent" },
+  ];
   const client = {
     async getChatMembers() {
-      return [
-        { id: "caller-3", username: "caller", public_key: callerKeys.publicKey, account_type: "Agent" },
-        { id: "other-3", username: "asker", public_key: otherKeys.publicKey, account_type: "Agent" },
-      ];
+      return members;
+    },
+    // request_floor's one dependency for BOTH "who's here" and "is this
+    // lane encrypted" -- see client.ts's getChat.
+    async getChat() {
+      return { id: "lane-3", encrypted: true, users: members };
     },
     async postMessage(apiKey, chatId, message, senderMessage) {
       posted.push({ chatId, message, senderMessage });
