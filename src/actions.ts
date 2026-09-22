@@ -151,6 +151,33 @@ export function createActions(options: ActionsOptions) {
     return active[0].id;
   }
 
+  // Open rooms: every action below that posts a wire-protocol message
+  // (delegate_to_agent, consult_agent, request_floor -- never a card or
+  // other resource, which is already plain JSON with no client-side
+  // encryption at all, on ANY chat) goes through this one branch point.
+  // `chatEncrypted` false posts `plaintext` as-is via the same
+  // postPlainMessage path client.ts's own open-room support uses;
+  // `chatEncrypted` true (the default -- an older server or an ordinary
+  // chat) is BYTE-IDENTICAL to what this SDK always did: PGP-encrypted for
+  // `recipientKeys` plus the caller's own key. Never send ciphertext to an
+  // open room or plaintext to an encrypted one -- salt-api refuses both
+  // directions, and mixing them up here would just turn that refusal into
+  // a confusing action-execution error instead of a deliberate choice.
+  // `recipientKeys` is only read (and need not be non-empty) when
+  // `chatEncrypted` is true.
+  async function postWireMessage(
+    caller: AgentIdentity,
+    chatId: SaltId,
+    chatEncrypted: boolean,
+    plaintext: string,
+    recipientKeys: string[]
+  ): Promise<unknown> {
+    if (!chatEncrypted) return client.postPlainMessage(caller.apiKey, chatId, plaintext);
+    const recipientMessage = await pgp.encryptFor(plaintext, recipientKeys);
+    const senderMessage = await pgp.encryptFor(plaintext, [caller.publicKey]);
+    return client.postMessage(caller.apiKey, chatId, recipientMessage, senderMessage);
+  }
+
   // --- create_salt_agent ---------------------------------------------
 
   async function createSaltAgent(
@@ -279,23 +306,30 @@ export function createActions(options: ActionsOptions) {
       throw new Error(`${targetId} isn't an agent -- delegate_to_agent only targets other agents.`);
     }
 
-    const chat = (await client.createOrGetChat(caller.apiKey, targetId)) as { id: SaltId; users?: Array<Record<string, any>> };
-    const targetMember = (chat.users || []).find((u) => sameId(u.id, targetId));
-    if (!targetMember || !targetMember.public_key) {
-      throw new Error(`Agent ${targetId} has no usable public key; can't message it securely.`);
+    const chat = (await client.createOrGetChat(caller.apiKey, targetId)) as {
+      id: SaltId;
+      encrypted?: boolean;
+      users?: Array<Record<string, any>>;
+    };
+    // Open room (rare for a delegation chat today, but general): no keys
+    // needed at all, so the "usable public key" guard below doesn't apply.
+    const chatEncrypted = chat.encrypted !== false;
+    if (chatEncrypted) {
+      const targetMember = (chat.users || []).find((u) => sameId(u.id, targetId));
+      if (!targetMember || !targetMember.public_key) {
+        throw new Error(`Agent ${targetId} has no usable public key; can't message it securely.`);
+      }
     }
 
     // Encrypt for every non-self member with a key, not just the target --
     // delegation chats carry a silent human observer (the caller's root
     // owner, added server-side) whose key must be a recipient for the
     // conversation to be auditable. Falls out naturally from the member list.
-    const recipientKeys = (chat.users || [])
-      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
-      .map((u) => u.public_key as string);
+    const recipientKeys = chatEncrypted
+      ? (chat.users || []).filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string)
+      : [];
 
     const marked = delegations.wrap(ctx.depth + 1, task);
-    const recipientMessage = await pgp.encryptFor(marked, recipientKeys);
-    const senderMessage = await pgp.encryptFor(marked, [caller.publicKey]);
 
     // The person this turn is for sees the delegation as it happens, in their
     // Tasks panel: who was asked, what, and how it ended. Awaited so the
@@ -316,7 +350,7 @@ export function createActions(options: ActionsOptions) {
     // rather than an ambiguous race over which reply belongs to which caller.
     const waitForReply = delegations.register(chat.id, targetId, delegations.DELEGATION_TIMEOUT_MS);
     try {
-      await client.postMessage(caller.apiKey, chat.id, recipientMessage, senderMessage);
+      await postWireMessage(caller, chat.id, chatEncrypted, marked, recipientKeys);
     } catch (err) {
       delegations.cancel(chat.id);
       throw err;
@@ -384,20 +418,26 @@ export function createActions(options: ActionsOptions) {
     }
     if (sameId(target.id, caller.saltAppId)) throw new Error("You can't consult yourself.");
     if (target.account_type !== "Agent") throw new Error(`@${handle} isn't an agent -- consult_agent only targets other agents.`);
-    if (!target.public_key) throw new Error(`@${handle} has no usable public key; can't message them securely.`);
+    // No public-key check here: whether one is actually NEEDED depends on
+    // whether the LANE (opened below) turns out to be encrypted, which
+    // this parent chat's member list can't answer -- the lane's own
+    // member list is the authoritative, encryption-aware check just below.
 
     const lane = (await client.openConsultLane(caller.apiKey, ctx.mainChatId, target.id)) as {
-      session: { id: SaltId; users?: Array<Record<string, any>> };
+      session: { id: SaltId; encrypted?: boolean; users?: Array<Record<string, any>> };
     };
-    const recipientKeys = (lane.session.users || [])
-      .filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key)
-      .map((u) => u.public_key as string);
-    if (recipientKeys.length === 0) throw new Error(`@${handle} has no usable public key in the lane; can't message them securely.`);
+    // Open room (general capability -- a consult lane is normally its own
+    // private aside regardless of the parent chat, but the branch costs
+    // nothing to support): no keys needed at all when the lane itself isn't
+    // encrypted.
+    const laneEncrypted = lane.session.encrypted !== false;
+    const recipientKeys = laneEncrypted
+      ? (lane.session.users || []).filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string)
+      : [];
+    if (laneEncrypted && recipientKeys.length === 0) throw new Error(`@${handle} has no usable public key in the lane; can't message them securely.`);
 
     const body = briefing ? `${briefing}\n\n${question}` : question;
     const marked = delegations.wrapConsult(ctx.mainChatId, body);
-    const recipientMessage = await pgp.encryptFor(marked, recipientKeys);
-    const senderMessage = await pgp.encryptFor(marked, [caller.publicKey]);
 
     // So webhook.ts's own floor-request handler knows, later, that WE are
     // the one who should hand off if @handle asks for the floor in this lane.
@@ -409,7 +449,7 @@ export function createActions(options: ActionsOptions) {
 
     const waitForReply = delegations.register(lane.session.id, target.id, delegations.DELEGATION_TIMEOUT_MS);
     try {
-      await client.postMessage(caller.apiKey, lane.session.id, recipientMessage, senderMessage);
+      await postWireMessage(caller, lane.session.id, laneEncrypted, marked, recipientKeys);
     } catch (err) {
       delegations.cancel(lane.session.id);
       throw err;
@@ -455,13 +495,16 @@ export function createActions(options: ActionsOptions) {
     const reason = (input.reason || "").trim();
     const marker = reason ? `${delegations.FLOOR_REQUEST_MARKER}\n${reason}` : delegations.FLOOR_REQUEST_MARKER;
 
-    const members = (await client.getChatMembers(caller.apiKey, ctx.mainChatId)) as Array<Record<string, any>>;
-    const recipientKeys = members.filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string);
-    if (recipientKeys.length === 0) throw new Error("No one in this lane to ask for the floor.");
+    // Unlike delegate_to_agent/consult_agent, request_floor had no other
+    // reason to fetch the chat itself (only its members) -- getChat is the
+    // one call that answers both "who's here" and "is this lane encrypted".
+    const chat = await client.getChat(caller.apiKey, ctx.mainChatId);
+    const recipientKeys = chat.encrypted
+      ? chat.users.filter((u) => !sameId(u.id, caller.saltAppId) && u.public_key).map((u) => u.public_key as string)
+      : [];
+    if (chat.encrypted && recipientKeys.length === 0) throw new Error("No one in this lane to ask for the floor.");
 
-    const message = await pgp.encryptFor(marker, recipientKeys);
-    const senderMessage = await pgp.encryptFor(marker, [caller.publicKey]);
-    await client.postMessage(caller.apiKey, ctx.mainChatId, message, senderMessage);
+    await postWireMessage(caller, ctx.mainChatId, chat.encrypted, marker, recipientKeys);
 
     return {
       requested: true,

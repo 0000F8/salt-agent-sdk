@@ -26,7 +26,10 @@ export interface SaltUser {
 
 export interface SaltChat {
   id: SaltId;
-  session?: { users?: SaltUser[] };
+  /** `encrypted` is undefined on a server that predates open rooms, which
+   *  always means an ordinary end-to-end encrypted chat -- see getChat's
+   *  doc comment for the resolved, defaulted value callers actually use. */
+  session?: { users?: SaltUser[]; encrypted?: boolean };
   messages?: unknown[];
   [key: string]: unknown;
 }
@@ -343,6 +346,20 @@ export function createSaltClient(options: SaltClientOptions) {
     async getChatMessages(apiKey: string, chatId: SaltId): Promise<unknown[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
       return chat?.messages ?? [];
+    },
+
+    /**
+     * One `GET /api/v1/chats/:id` call for a caller that needs BOTH the
+     * member list and whether the chat is end-to-end encrypted -- e.g.
+     * actions.ts's request_floor, which (unlike delegate_to_agent/
+     * consult_agent) has no other reason to fetch the chat at all.
+     * `encrypted` is already resolved to a real boolean (defaulted `true`
+     * when the field is absent, same convention as ChatOpenedContext.encrypted
+     * and MessageContext.encrypted) -- never undefined.
+     */
+    async getChat(apiKey: string, chatId: SaltId): Promise<{ id: SaltId; encrypted: boolean; users: SaltUser[] }> {
+      const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
+      return { id: chatId, encrypted: chat?.session?.encrypted !== false, users: chat?.session?.users ?? [] };
     },
 
     /** Download an attachment's ciphertext bytes. Decrypt separately (see crypto.ts). */
