@@ -21,29 +21,24 @@
 //   [[SALT-IDENTITY-REVOKE id=01J9…]]
 //
 // `id` on SLICE/DECLINE/REVOKE is that message's OWN id (a fresh
-// crypto.randomUUID() -- for SLICE this is also one of the ledger rows
-// disclose() just wrote, see the design note on `share` below). `ask`
-// (SLICE and DECLINE only) is the id of the SALT-IDENTITY-ASK this message
-// answers -- present only when answering one, so an asker's client can
-// resolve which question got answered. The signature on a SLICE is an
-// OpenPGP ARMORED DETACHED signature (crypto.ts's signDetached), by the
-// sender's own key, over `canonicalizeJcs(sections)` -- the sections array
-// alone, not the whole payload object (identity.ts's canonicalizeJcs is
-// the exact same RFC 8785 canonicalizer salt-api's card signing uses,
-// reused here with an OpenPGP signature standing in for Salt's Ed25519 Web
-// Bot Auth key -- a slice is signed as coming from the agent, never
-// checked by Salt).
+// crypto.randomUUID()). `ask` (SLICE and DECLINE only) is the id of the
+// SALT-IDENTITY-ASK this message answers -- present only when answering
+// one, so an asker's client can resolve which question got answered. The
+// signature on a SLICE is an OpenPGP ARMORED DETACHED signature
+// (crypto.ts's signDetached), by the sender's own key, over
+// `canonicalizeJcs(sections)` -- the sections array alone, not the whole
+// payload object (identity.ts's canonicalizeJcs is the exact same RFC
+// 8785 canonicalizer salt-api's card signing uses, reused here with an
+// OpenPGP signature standing in for Salt's Ed25519 Web Bot Auth key -- a
+// slice is signed as coming from the agent, never checked by Salt).
 //
-// Design note on `share`'s ledger vs. wire id (flagged for the web/API
-// lanes -- see the SDK's own report): the plan's ledger is per-RECIPIENT
-// (one row per member of a named share), but ONE ciphertext message goes
-// to the whole chat, so it can carry only ONE `id=`. This module uses the
-// FIRST recipient's disclosure id as the wire id; every row (including any
-// beyond the first) still gets the same `message_id` PATCHed onto it, and
-// `share`'s return value lists every {id, recipientId} pair regardless.
-// The dominant real path -- answering a SALT-IDENTITY-ASK -- is always a
-// 1:1 (client.identity.ask refuses anywhere else), so there is exactly one
-// recipient and no ambiguity there.
+// One id names the WHOLE share, not one recipient's row: `share`'s ledger
+// is per-RECIPIENT (salt-api keys a row on subject + recipient + id), but
+// a single `id`, generated ONCE per share() call, is posted for every
+// recipient's row -- so the one wire message's `id=`, the message_id
+// PATCHed onto every row, and `revoke(id)` (which revokes every row under
+// that id in one call) all refer to the same share, regardless of how
+// many recipients it went to.
 
 import { randomUUID } from "node:crypto";
 import type { IdentityDisclosure, SaltClient } from "./client";
@@ -217,17 +212,23 @@ export interface ShareOptions {
 }
 
 export interface ShareResult {
+  /** Names the whole share -- what rides on the wire SLICE's `id=`, what every ledger row was posted under, and what `revoke(id)` takes to pull it all back at once. */
+  id: string;
   messageId: SaltId;
-  /** One entry per non-observer chat member other than the caller -- the ledger row identityShare wrote for them, in the same order client.getChatMembers returned. */
-  disclosures: Array<{ id: string; recipientId: SaltId }>;
+  /** Every non-observer chat member other than the caller this was disclosed to, in the same order client.getChatMembers returned -- one ledger row was written per entry, all under `id`. */
+  recipients: SaltId[];
 }
 
 export interface IdentitySharer {
   /**
-   * Shares `keys` from this agent's own identity into `chatId`: one ledger
-   * row per non-observer member other than the caller (aborting on the
-   * first refusal with nothing sent), then ONE signed, encrypted SLICE
-   * message to the whole chat, then a message_id PATCH onto every row.
+   * Shares `keys` from this agent's own identity into `chatId`: ONE fresh
+   * id for the whole share, one ledger row posted under it per
+   * non-observer member other than the caller (salt-api keys a row on
+   * subject + recipient + id, so this is the same id every time; aborts
+   * on the first refusal with nothing sent), then ONE signed, encrypted
+   * SLICE message carrying that id to the whole chat, then a single
+   * message_id PATCH (every row shares the id, so one PATCH reaches all
+   * of them).
    */
   share(caller: AgentIdentity, chatId: SaltId, keys: string[], opts?: ShareOptions): Promise<ShareResult>;
   /** Sends an ASK for `keys` into a 1:1 chat and returns its id. Refuses (before sending anything) outside a 1:1. */
@@ -236,8 +237,8 @@ export interface IdentitySharer {
   decline(caller: AgentIdentity, chatId: SaltId, askId?: string): Promise<{ id: string }>;
   /** This agent's own disclosure ledger, newest first. */
   disclosures(caller: AgentIdentity, opts?: { before?: string; limit?: number }): Promise<IdentityDisclosure[]>;
-  /** Revokes one disclosure row server-side, then sends a REVOKE marker into the chat it was disclosed in. */
-  revoke(caller: AgentIdentity, disclosureId: string): Promise<IdentityDisclosure>;
+  /** Revokes every ledger row under `id` (the id `share()` returned) in one call, then sends a REVOKE marker into the chat it was disclosed in. */
+  revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure>;
 }
 
 async function recipientMembers(client: SaltClient, caller: AgentIdentity, chatId: SaltId) {
@@ -282,13 +283,14 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
       return { key, value: section.value, proof };
     });
 
-    // One ledger row per recipient, BEFORE any ciphertext -- abort on the
-    // first refusal (plan section 8's "0 bytes of section value reach the
-    // server" holds either way: this call sends section KEYS and a scope,
-    // never a value).
-    const disclosures: Array<{ id: string; recipientId: SaltId }> = [];
+    // One id for the WHOLE share -- posted as every recipient's ledger row
+    // (salt-api keys a row on subject + recipient + id, so the same id
+    // across recipients is exactly what creates one row each, not a
+    // collision), BEFORE any ciphertext, aborting on the first refusal
+    // (plan section 8's "0 bytes of section value reach the server" holds
+    // either way: this sends section KEYS and a scope, never a value).
+    const id = randomUUID();
     for (const member of recipients) {
-      const id = randomUUID();
       await client.postIdentityDisclosure(caller.apiKey, {
         id,
         section_keys: wanted,
@@ -296,30 +298,24 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
         chat_id: chatId,
         recipient_id: member.id,
       });
-      disclosures.push({ id, recipientId: member.id });
     }
 
     const signature = await pgp.signDetached(canonicalizeJcs(sections), caller.privateKey, pgpPassphrase);
-    // See the module doc comment: the wire message can carry only one id --
-    // the first recipient's ledger row stands in for the message as a
-    // whole. The 1:1 answer-to-an-ask path (the dominant real caller of
-    // this function) always has exactly one recipient.
-    const plaintext = formatIdentitySlice(disclosures[0].id, sections, signature, opts.ask);
+    const plaintext = formatIdentitySlice(id, sections, signature, opts.ask);
     const { message, senderMessage } = await encryptToMembers(caller, recipients, plaintext);
     const posted = (await client.postMessage(caller.apiKey, chatId, message, senderMessage)) as { message_id?: SaltId; id?: SaltId } | null;
     const messageId = (posted?.message_id ?? posted?.id) as SaltId;
 
-    for (const d of disclosures) {
-      try {
-        await client.setIdentityDisclosureMessage(caller.apiKey, d.id, messageId);
-      } catch {
-        // Best-effort: the slice is already sent and readable either way;
-        // a failed PATCH only means this row's audit trail is missing the
-        // message_id it would otherwise carry.
-      }
+    try {
+      // One id, one PATCH -- it reaches every row under it.
+      await client.setIdentityDisclosureMessage(caller.apiKey, id, messageId);
+    } catch {
+      // Best-effort: the slice is already sent and readable either way; a
+      // failed PATCH only means the ledger is missing the message_id it
+      // would otherwise carry.
     }
 
-    return { messageId, disclosures };
+    return { id, messageId, recipients: recipients.map((m) => m.id) };
   }
 
   async function ask(caller: AgentIdentity, chatId: SaltId, keys: string[], text?: string): Promise<string> {
@@ -354,9 +350,10 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
     return result.disclosures ?? [];
   }
 
-  async function revoke(caller: AgentIdentity, disclosureId: string): Promise<IdentityDisclosure> {
-    const row = await client.revokeIdentityDisclosure(caller.apiKey, disclosureId);
-    const plaintext = formatIdentityRevoke(disclosureId);
+  async function revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure> {
+    // Revokes every ledger row under `id` (every recipient) in one call.
+    const row = await client.revokeIdentityDisclosure(caller.apiKey, id);
+    const plaintext = formatIdentityRevoke(id);
     try {
       const recipients = await recipientMembers(client, caller, row.chat_id);
       if (recipients.length > 0) {
