@@ -5,30 +5,6 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
-## 0.12.0 — 2026-09-22
-
-### Changed
-
-- **One share, one id.** salt-api now keys a disclosure row on subject +
-  recipient + id, so `identityShare.ts`'s `share()` generates ONE id per
-  `share()` call and posts that SAME id as every non-observer recipient's
-  ledger row, rather than a distinct id per recipient. That one id is what
-  the wire SLICE's `id=` carries, what a single `setIdentityDisclosureMessage`
-  PATCH reaches every row of, and what a single `revoke(id)` call revokes
-  every row of -- closing the multi-recipient ambiguity 0.11.0 flagged (the
-  wire message could only carry one id, but the ledger was per recipient).
-  `ShareResult` is now `{id, messageId, recipients}` (was
-  `{messageId, disclosures: [{id, recipientId}]}`); `revoke`'s parameter is
-  that same share id, not a per-recipient row id.
-
-### Added
-
-- **`identity_share {keys, chat_id?}` / `identity_ask {keys, text?}` /
-  `identity_revoke {id}`** in `actions.definitions`, alongside `identity_set`/
-  `identity_get`. `identity_share` defaults to the chat the model is
-  currently replying in; `identity_ask` is 1:1-only, same as the sharer's
-  own `ask()`. 22 actions in total now.
-
 ## 0.11.0 — 2026-09-22
 
 ### Added
@@ -39,8 +15,15 @@ separately from this file.
   member for one of theirs (`ask`), lists/revokes this agent's own
   disclosure ledger (`disclosures`/`revoke`) -- the ledger rides
   `POST/PATCH /api/v1/identity/disclosures`, metadata only, never a
-  section value. `ctx.shareIdentity(keys, opts?)` is the same `share` on
-  every context that already carries `reply()`/`ask()`/`approve()`.
+  section value. salt-api keys a disclosure row on subject + recipient +
+  id, so `share()` generates ONE id per call and posts that SAME id as
+  every non-observer recipient's ledger row: that one id is what the wire
+  SLICE's `id=` carries, what a single `setIdentityDisclosureMessage` PATCH
+  reaches every row of, and what a single `revoke(id)` call revokes every
+  row of, regardless of how many recipients the share went to.
+  `ShareResult` is `{id, messageId, recipients}`. `ctx.shareIdentity(keys,
+  opts?)` is the same `share` on every context that already carries
+  `reply()`/`ask()`/`approve()`.
 - **`onIdentityAsk` / `onIdentityShared`** on `createWebhookServer` /
   `createSocketClient`: an incoming `[[SALT-IDENTITY-ASK]]` is answered
   (a SLICE or a DECLINE, both carrying `ask=<id>`) by `onIdentityAsk`'s
@@ -50,6 +33,11 @@ separately from this file.
   `onMessage`); a SLICE is verified against the sender's own public key
   and, once verified, recorded on that chat's session before
   `onIdentityShared` fires.
+- **`identity_share {keys, chat_id?}` / `identity_ask {keys, text?}` /
+  `identity_revoke {id}`** in `actions.definitions`, alongside
+  `identity_set`/`identity_get`. `identity_share` defaults to the chat the
+  model is currently replying in; `identity_ask` is 1:1-only, same as the
+  sharer's own `ask()`. 22 actions in total now.
 - **`Session.identity`**: `session.identity[senderId]` holds the verified
   (and unverified) SALT-IDENTITY-SLICEs a chat's session has received,
   capped per sender and pruned on a matching REVOKE
