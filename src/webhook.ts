@@ -20,6 +20,9 @@ import type { AskOptions, AskResult } from "./ask.js";
 import type { SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
+import * as identityShare from "./identityShare.js";
+import type { IdentityAskHandler, IdentitySharedHandler } from "./identityShare.js";
+import { canonicalizeJcs } from "./identity.js";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 import { reconcileIdentityIds } from "./reconcile";
@@ -135,6 +138,8 @@ export interface MessageContext {
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** Sugar for `ask` with Yes/No buttons. See ask.ts's approve(). */
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
+  /** Shares `keys` from this identity's own card into `chatId` -- one signed SLICE to every non-observer member (see identityShare.ts's share()). */
+  shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
 export interface CardInteractionContext {
@@ -168,6 +173,8 @@ export interface InvoicePaidContext {
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
+  /** See MessageContext.shareIdentity. */
+  shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
 export interface ChatOpenedChat {
@@ -220,6 +227,8 @@ export interface ChatOpenedContext {
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
+  /** See MessageContext.shareIdentity. */
+  shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
 export interface HandoffConfirmedContext {
@@ -243,6 +252,8 @@ export interface HandoffConfirmedContext {
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
+  /** See MessageContext.shareIdentity. */
+  shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
 export interface HandoffReceivedContext {
@@ -263,6 +274,8 @@ export interface HandoffReceivedContext {
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
+  /** See MessageContext.shareIdentity. */
+  shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
 export interface Logger {
@@ -316,6 +329,27 @@ export interface WebhookServerOptions {
   onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
+  /**
+   * An incoming `[[SALT-IDENTITY-ASK]]` -- someone asking this identity to
+   * share one or more of its own card sections. Return the subset of
+   * `info.keys` to share (this replies with a signed SLICE) or `null`/
+   * `false` to decline (this replies with a DECLINE); either way the ask
+   * is intercepted and never reaches `onMessage`. Leave this unset and an
+   * incoming ask is NOT intercepted at all -- it reaches `onMessage` as
+   * ordinary text with just the marker line stripped, unanswered. See
+   * identityShare.ts.
+   */
+  onIdentityAsk?: IdentityAskHandler;
+  /**
+   * An incoming `[[SALT-IDENTITY-SLICE]]`, `[[SALT-IDENTITY-DECLINE]]` or
+   * `[[SALT-IDENTITY-REVOKE]]` from someone else -- always intercepted
+   * (never reaches `onMessage`) regardless of whether this is set. A SLICE
+   * is verified against the sender's own public key and, when verified,
+   * recorded on that chat's session (`session.identity[senderId]`, see
+   * sessions.ts) before this fires; a REVOKE removes any slice recorded
+   * under the same id first. See identityShare.ts's IdentitySharedEvent.
+   */
+  onIdentityShared?: IdentitySharedHandler;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -335,6 +369,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   const verifySignatures = options.verifySignatures !== false;
   const signatureTolerance = options.signatureToleranceSeconds ?? 300;
   const sessionStore = options.sessionStore ?? sessions.MemorySessionStore();
+  const identitySharer = identityShare.createIdentitySharer(client, pgpPassphrase);
   const mapKey = (id: SaltId): string => String(id).toLowerCase();
 
   // A lookup miss on a signed request is the signature of a stale store: the
@@ -908,6 +943,15 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       asks.approve(client, identity, chatId, summary, { answererId: defaultAnswererId, ...opts });
   }
 
+  // ctx.shareIdentity (identityShare.ts) -- bound to one (identity, chatId)
+  // the same way makeAsk/makeApprove above are.
+  function makeShareIdentity(
+    identity: AgentIdentity,
+    chatId: SaltId
+  ): (keys: string[], opts?: identityShare.ShareOptions) => Promise<identityShare.ShareResult> {
+    return (keys: string[], opts?: identityShare.ShareOptions) => identitySharer.share(identity, chatId, keys, opts);
+  }
+
   // True when `chatId` has at least one human (account_type !== "Agent")
   // member who is NOT a silent observer. A consult lane's human -- the
   // delegation chain's auditor added per actions.ts's delegation-
@@ -930,6 +974,117 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       }
     }
     return members.some((m) => m.account_type !== "Agent" && !(m as { observer?: boolean }).observer);
+  }
+
+  // Runs `options.onIdentityAsk` for an incoming SALT-IDENTITY-ASK and
+  // answers it -- a SLICE (carrying `ask=parsed.id`) for the keys the
+  // handler chose to share, a DECLINE (same) for null/false/an empty
+  // array. Never lets a handler or send failure escape to the caller: an
+  // ask that can't be answered must not crash the webhook pass that
+  // received it, the same convention every other handler-invoking helper
+  // in this file follows.
+  async function handleIdentityAsk(
+    identity: AgentIdentity,
+    chatId: SaltId,
+    senderId: SaltId,
+    parsed: Extract<identityShare.ParsedIdentityMarker, { kind: "ask" }>
+  ): Promise<void> {
+    let decision: string[] | null | false | undefined;
+    try {
+      decision = await options.onIdentityAsk!({ id: parsed.id, keys: parsed.keys, text: parsed.text, chatId, from: senderId });
+    } catch (err) {
+      logger.error(`[chat ${chatId}] onIdentityAsk failed: ${(err as Error).message}`);
+      return;
+    }
+    try {
+      if (Array.isArray(decision) && decision.length > 0) {
+        await identitySharer.share(identity, chatId, decision, { ask: parsed.id });
+      } else {
+        await identitySharer.decline(identity, chatId, parsed.id);
+      }
+    } catch (err) {
+      logger.error(`[chat ${chatId}] answering identity ask ${parsed.id} failed: ${(err as Error).message}`);
+    }
+  }
+
+  // Handles an incoming SLICE, DECLINE or REVOKE from someone else. A
+  // SLICE is verified against the sender's own public key (fetched fresh
+  // from the chat's member list -- the same call makeReply already makes
+  // to encrypt a reply) and, when verified, recorded on this (identity,
+  // chat) session before `onIdentityShared` fires; a REVOKE removes any
+  // slice recorded under the same id first. Never lets a verification,
+  // session, or handler failure escape -- same convention as
+  // handleIdentityAsk above.
+  async function handleIdentitySharedMarker(
+    identity: AgentIdentity,
+    chatId: SaltId,
+    senderId: SaltId,
+    parsed: Exclude<identityShare.ParsedIdentityMarker, { kind: "ask" }>
+  ): Promise<void> {
+    if (parsed.kind === "slice") {
+      let verified = false;
+      try {
+        const members = await client.getChatMembers(identity.apiKey, chatId);
+        const sender = members.find((m) => sameId(m.id, senderId));
+        if (sender?.public_key) {
+          verified = await pgp.verifyDetached(canonicalizeJcs(parsed.payload.sections), parsed.payload.signature, sender.public_key);
+        }
+      } catch (err) {
+        logger.error(`[chat ${chatId}] verifying identity slice ${parsed.id} failed: ${(err as Error).message}`);
+      }
+      try {
+        const session = await loadOrRebuildSession(identity, chatId);
+        sessions.recordReceivedIdentitySlice(session, senderId, {
+          id: parsed.id,
+          sections: parsed.payload.sections,
+          verified,
+          receivedAt: Date.now(),
+        });
+        session.updatedAt = Date.now();
+        await sessionStore.put(identity.saltAppId, chatId, session);
+      } catch (err) {
+        logger.error(`[session] recording identity slice ${parsed.id} for ${chatId} failed: ${(err as Error).message}`);
+      }
+      if (options.onIdentityShared) {
+        try {
+          await options.onIdentityShared({
+            kind: "slice",
+            id: parsed.id,
+            askId: parsed.askId,
+            from: senderId,
+            chatId,
+            sections: parsed.payload.sections,
+            verified,
+          });
+        } catch (err) {
+          logger.error(`[chat ${chatId}] onIdentityShared (slice) failed: ${(err as Error).message}`);
+        }
+      }
+      return;
+    }
+
+    if (parsed.kind === "revoke") {
+      try {
+        const session = await loadOrRebuildSession(identity, chatId);
+        sessions.forgetReceivedIdentitySlice(session, senderId, parsed.id);
+        session.updatedAt = Date.now();
+        await sessionStore.put(identity.saltAppId, chatId, session);
+      } catch (err) {
+        logger.error(`[session] forgetting revoked identity slice ${parsed.id} for ${chatId} failed: ${(err as Error).message}`);
+      }
+    }
+
+    if (options.onIdentityShared) {
+      try {
+        await options.onIdentityShared(
+          parsed.kind === "decline"
+            ? { kind: "decline", id: parsed.id, askId: parsed.askId, from: senderId, chatId }
+            : { kind: "revoke", id: parsed.id, from: senderId, chatId }
+        );
+      } catch (err) {
+        logger.error(`[chat ${chatId}] onIdentityShared (${parsed.kind}) failed: ${(err as Error).message}`);
+      }
+    }
   }
 
   async function handleMessage(body: { message: Record<string, unknown>; chat?: RawChatMeta }, headerAgentId?: SaltId): Promise<void> {
@@ -1041,6 +1196,33 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       return;
     }
 
+    // Identity (R3/R4, identityShare.ts): a SALT-IDENTITY-ASK/SLICE/
+    // DECLINE/REVOKE is wire protocol, never a prompt -- with one
+    // deliberate exception. An ASK with no onIdentityAsk handler registered
+    // is NOT intercepted at all: it falls through as an ordinary message,
+    // marker stripped, so a consumer that hasn't wired up the handler yet
+    // sees whatever text (if any) rode alongside it rather than losing the
+    // message outright. SLICE/DECLINE/REVOKE are always intercepted,
+    // whether or not onIdentityShared is set -- there is no "ordinary
+    // text" reading of a signed slice or a revoke.
+    if (caption.startsWith(identityShare.IDENTITY_MARKER_PREFIX)) {
+      const parsed = identityShare.parseIdentityMarker(caption);
+      if (parsed?.kind === "ask") {
+        if (options.onIdentityAsk) {
+          await handleIdentityAsk(identity, chatId, senderId, parsed);
+          return;
+        }
+        caption = parsed.text || "";
+      } else if (parsed) {
+        await handleIdentitySharedMarker(identity, chatId, senderId, parsed);
+        return;
+      } else {
+        // Starts with the prefix but didn't parse into anything usable --
+        // a garbled or foreign marker either way, never a prompt.
+        return;
+      }
+    }
+
     // Mediated Chat: this identity is the configured Mediator, and this
     // message is in the SHARED chat it silently observes -- present for
     // context, but it only actually speaks in each human's own private
@@ -1146,6 +1328,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // asking a person).
       ask: makeAsk(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
       approve: makeApprove(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
+      shareIdentity: makeShareIdentity(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
@@ -1243,6 +1426,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // buyer has no need to be asked a question through its own purchase).
       ask: makeAsk(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
       approve: makeApprove(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
+      shareIdentity: makeShareIdentity(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
@@ -1308,6 +1492,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // M2: default answerer is whoever opened the chat (never an agent).
       ask: makeAsk(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
       approve: makeApprove(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
+      shareIdentity: makeShareIdentity(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
@@ -1365,6 +1550,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // answererId explicitly, or they throw synchronously.
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
+      shareIdentity: makeShareIdentity(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
@@ -1437,6 +1623,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // M2: no natural default here either -- see HandoffConfirmedContext's comment above.
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
+      shareIdentity: makeShareIdentity(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
