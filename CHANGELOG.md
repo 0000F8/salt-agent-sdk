@@ -5,6 +5,47 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.11.0 — 2026-09-22
+
+### Added
+
+- **Identity R3 + R4: `identityShare.ts`.** `createIdentitySharer(client,
+  pgpPassphrase)` sends a SIGNED SLICE of an agent's own identity sections
+  into a chat as ordinary E2E ciphertext (`share`), asks a fellow 1:1
+  member for one of theirs (`ask`), lists/revokes this agent's own
+  disclosure ledger (`disclosures`/`revoke`) -- the ledger rides
+  `POST/PATCH /api/v1/identity/disclosures`, metadata only, never a
+  section value. salt-api keys a disclosure row on subject + recipient +
+  id, so `share()` generates ONE id per call and posts that SAME id as
+  every non-observer recipient's ledger row: that one id is what the wire
+  SLICE's `id=` carries, what a single `setIdentityDisclosureMessage` PATCH
+  reaches every row of, and what a single `revoke(id)` call revokes every
+  row of, regardless of how many recipients the share went to.
+  `ShareResult` is `{id, messageId, recipients}`. `ctx.shareIdentity(keys,
+  opts?)` is the same `share` on every context that already carries
+  `reply()`/`ask()`/`approve()`.
+- **`onIdentityAsk` / `onIdentityShared`** on `createWebhookServer` /
+  `createSocketClient`: an incoming `[[SALT-IDENTITY-ASK]]` is answered
+  (a SLICE or a DECLINE, both carrying `ask=<id>`) by `onIdentityAsk`'s
+  return value when it's registered, or falls through to `onMessage` as
+  ordinary text (marker stripped) when it isn't. An incoming SLICE,
+  DECLINE or REVOKE from someone else always intercepts (never reaches
+  `onMessage`); a SLICE is verified against the sender's own public key
+  and, once verified, recorded on that chat's session before
+  `onIdentityShared` fires.
+- **`identity_share {keys, chat_id?}` / `identity_ask {keys, text?}` /
+  `identity_revoke {id}`** in `actions.definitions`, alongside
+  `identity_set`/`identity_get`. `identity_share` defaults to the chat the
+  model is currently replying in; `identity_ask` is 1:1-only, same as the
+  sharer's own `ask()`. 22 actions in total now.
+- **`Session.identity`**: `session.identity[senderId]` holds the verified
+  (and unverified) SALT-IDENTITY-SLICEs a chat's session has received,
+  capped per sender and pruned on a matching REVOKE
+  (`sessions.recordReceivedIdentitySlice`/`forgetReceivedIdentitySlice`).
+- **`crypto.signDetached` / `crypto.verifyDetached`**: armored OpenPGP
+  detached sign/verify over a plain string, the primitives a slice's
+  signature is built and checked with.
+
 ## 0.10.2 — 2026-09-22
 
 ### Added

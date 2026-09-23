@@ -17,6 +17,7 @@ import * as pgp from "./crypto";
 import { encryptWalletPayload } from "./crypto";
 import * as delegations from "./delegations";
 import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type WorkStatus } from "./work";
+import { createIdentitySharer } from "./identityShare.js";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, type AgentClaimSectionKey, type CardSection } from "./identity.js";
@@ -109,6 +110,8 @@ export function createActions(options: ActionsOptions) {
   // quiet no-op, so a delegation made by a background job or a delegated hop
   // behaves exactly as it did before reports existed.
   const workReporter = createWorkReporter(client);
+  // R3/R4 (identityShare.ts): identity_share/identity_ask/identity_revoke below.
+  const identitySharer = createIdentitySharer(client, pgpPassphrase);
   const reportTarget = (ctx: ActionContext) =>
     ctx.mainChatId != null && ctx.requesterId != null && ctx.depth === 0
       ? { chatId: ctx.mainChatId, requesterId: ctx.requesterId }
@@ -879,6 +882,58 @@ export function createActions(options: ActionsOptions) {
     };
   }
 
+  // --- identity_share / identity_ask / identity_revoke (R3/R4) -----------
+
+  async function identityShareAction(caller: AgentIdentity, input: { chat_id?: SaltId; keys?: unknown }, ctx: ActionContext) {
+    const chatId = input.chat_id || ctx.mainChatId;
+    if (chatId == null) {
+      throw new Error("identity_share needs a chat_id, or must be called while replying in a chat.");
+    }
+    const keys = Array.isArray(input.keys) ? input.keys.map(String) : [];
+    if (keys.length === 0) throw new Error("Provide at least one section key to share, e.g. [\"bio\", \"link\"].");
+
+    const result = await identitySharer.share(caller, chatId, keys);
+    return {
+      shared: true,
+      id: result.id,
+      message_id: result.messageId,
+      recipients: result.recipients,
+      note:
+        "Sent as one signed message, readable only by the chat's members -- Salt's server only ever learned " +
+        "which section keys you shared and with whom, never the values themselves.",
+    };
+  }
+
+  async function identityAskAction(caller: AgentIdentity, input: { keys?: unknown; text?: unknown }, ctx: ActionContext) {
+    if (ctx.mainChatId == null) {
+      throw new Error("identity_ask is only available while replying in a chat.");
+    }
+    const keys = Array.isArray(input.keys) ? input.keys.map(String) : [];
+    if (keys.length === 0) throw new Error("Provide at least one section key to ask for, e.g. [\"legal_name\"].");
+    const text = typeof input.text === "string" && input.text.trim() ? input.text.trim() : undefined;
+
+    const id = await identitySharer.ask(caller, ctx.mainChatId, keys, text);
+    return {
+      asked: true,
+      id,
+      note:
+        "Only works in a 1:1 -- there is no group equivalent yet. Their answer (a share or a decline) arrives " +
+        "as its own event, not as a return value from this call.",
+    };
+  }
+
+  async function identityRevokeAction(caller: AgentIdentity, input: { id?: unknown }) {
+    const id = typeof input.id === "string" ? input.id.trim() : "";
+    if (!id) throw new Error("id is required -- the id identity_share returned.");
+    const row = await identitySharer.revoke(caller, id);
+    return {
+      revoked: true,
+      id,
+      chat_id: row.chat_id,
+      note: "Stops it being served again and sends a notice into the chat -- cannot reach a copy already read on someone's device.",
+    };
+  }
+
   const definitions: ActionDefinition[] = [
     {
       name: "create_salt_agent",
@@ -1270,6 +1325,57 @@ export function createActions(options: ActionsOptions) {
         required: ["handle"],
       },
       execute: identityGet,
+    },
+    {
+      name: "identity_share",
+      description:
+        "Send one or more of YOUR OWN identity card sections into a chat as a signed, end-to-end encrypted " +
+        "message -- Salt's server only ever learns which section keys you shared and with whom, never the " +
+        "values. Defaults to the chat you're currently replying in; pass chat_id to share into a different " +
+        "one. Every non-observer member of that chat receives it. Use identity_revoke with the returned id " +
+        "to take a share back.",
+      schema: {
+        type: "object",
+        properties: {
+          keys: {
+            type: "array",
+            items: { type: "string" },
+            description: 'Section keys to share, e.g. ["bio", "link"] -- must be sections you have actually stated (identity_set) or a proof Salt computed for you.',
+          },
+          chat_id: { type: "string", description: "Optional -- defaults to the current chat." },
+        },
+        required: ["keys"],
+      },
+      execute: identityShareAction,
+    },
+    {
+      name: "identity_ask",
+      description:
+        "Ask the other person in the current 1:1 chat to share one or more sections of THEIR OWN identity " +
+        "card with you. Only works in a 1:1 -- there is no group equivalent yet. They may share what you " +
+        "asked for, share something else, decline, or ignore it; their answer arrives as its own event, not " +
+        "as a result of this call.",
+      schema: {
+        type: "object",
+        properties: {
+          keys: { type: "array", items: { type: "string" }, description: 'Section keys you are asking for, e.g. ["legal_name"].' },
+          text: { type: "string", description: "Optional one-line reason, shown alongside the ask." },
+        },
+        required: ["keys"],
+      },
+      execute: identityAskAction,
+    },
+    {
+      name: "identity_revoke",
+      description:
+        "Revoke a section disclosure you previously sent with identity_share -- stops it being served again " +
+        "and sends a notice into the chat it was shared in. Cannot reach a copy already read on someone's device.",
+      schema: {
+        type: "object",
+        properties: { id: { type: "string", description: "The id identity_share returned." } },
+        required: ["id"],
+      },
+      execute: identityRevokeAction,
     },
   ];
 

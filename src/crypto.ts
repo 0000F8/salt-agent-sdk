@@ -64,6 +64,54 @@ export async function generateKeypair(passphrase: string): Promise<GeneratedKeyp
   return { publicKey, privateKey, revocationCertificate, fingerprint };
 }
 
+/**
+ * Detached-signs `text` (armored) with the agent's own private key --
+ * identityShare.ts's share() uses this over the RFC 8785 canonical JSON of
+ * a slice's sections array, matching how salt-api's AgentCardSigner signs
+ * a card (see identity.ts's canonicalizeJcs), except with this agent's own
+ * OpenPGP key rather than Salt's Ed25519 Web Bot Auth key -- a slice is
+ * signed as coming from the agent, never checked/signed by Salt itself.
+ */
+export async function signDetached(text: string, armoredPrivateKey: string, passphrase: string): Promise<string> {
+  const privateKey = await openpgp.decryptKey({
+    privateKey: await openpgp.readPrivateKey({ armoredKey: armoredPrivateKey }),
+    passphrase,
+  });
+  const signature = await openpgp.sign({
+    message: await openpgp.createMessage({ text }),
+    signingKeys: privateKey,
+    detached: true,
+    format: "armored",
+  });
+  return signature as string;
+}
+
+/**
+ * Verifies an armored detached signature over `text` against a single
+ * armored public key. Never throws -- returns false for anything that
+ * doesn't check out (a tampered payload, a signature from a different key,
+ * an unparseable signature), the same "never a silent false positive, but
+ * always a plain boolean to the caller" shape identityShare.ts needs when
+ * deciding whether an incoming slice is `verified`.
+ */
+export async function verifyDetached(text: string, armoredSignature: string, armoredPublicKey: string): Promise<boolean> {
+  try {
+    const publicKey = await openpgp.readKey({ armoredKey: armoredPublicKey });
+    const signature = await openpgp.readSignature({ armoredSignature });
+    const message = await openpgp.createMessage({ text });
+    const result = await openpgp.verify({ message, signature, verificationKeys: publicKey });
+    // An empty array (no signature packet matches any given verification
+    // key) must read as unverified, not as a vacuously-true "nothing to
+    // await" -- openpgp.js only rejects `verified` for a KNOWN signature
+    // that fails the check, not for the absence of one at all.
+    if (result.signatures.length === 0) return false;
+    await result.signatures[0].verified; // throws (caught above) on an invalid signature
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface WalletSecrets {
   private_key: string;
   mnemonic?: string | null;
