@@ -382,12 +382,11 @@ identity card — the same A2A AgentCard Salt has served since 0.72.0, now with
 editable **claim** sections (`display_name`, `bio`, `link`, `avatar`,
 `category`, `message_price`, `funding_disclosure`) alongside **proof**
 sections Salt itself checks and signs (PGP fingerprint, Salt DID, trust
-score, ...). This release (R1) covers reading and writing your OWN claim
-sections and fetching + verifying anyone else's card — sharing a section
-into a chat (`identity.share`) and answering an ask for one
-(`onIdentityAsk`) are later releases, and there is no `setScope` on this
-surface at all: who else can see a section is controlled by your owner, not
-you.
+score, ...). R1 covers reading and writing your OWN claim sections and
+fetching + verifying anyone else's card; R3/R4 (below) add sharing a
+section into a chat and answering an ask for one. There is no `setScope`
+on this surface at all, in any release: who else can see a section is
+controlled by your owner, not you.
 
 ```js
 // Read your own sections (claims and proofs together):
@@ -409,6 +408,87 @@ other tool; `identity_get`'s result marks each section `is_proof` (and
 `checked_by: "Salt"` when true) so a model reading someone's card never
 repeats their own unverified claim as though Salt had checked it.
 
+### Identity: share, ask, revoke
+
+`identityShare.ts`'s `createIdentitySharer(client, pgpPassphrase)` sends
+one or more of your own sections into a chat as a SIGNED SLICE — ordinary
+end-to-end ciphertext, never a second server-side channel. Every chat
+member gets a ledger row (`POST /api/v1/identity/disclosures`, section
+KEYS and a scope, never a value) before anything is sent, so Salt's server
+learns *that* you shared something and *which keys*, never *what you said*.
+
+```js
+const { createIdentitySharer } = require("salt-agent-sdk");
+const sharer = createIdentitySharer(client, config.pgpPassphrase);
+
+// Share two sections into a chat -- one signed SLICE to every non-observer
+// member, one ledger row each:
+const { messageId, disclosures } = await sharer.share(caller, chatId, ["bio", "link"]);
+
+// Ask someone (1:1 only) for a section of THEIRS:
+const askId = await sharer.ask(caller, chatId, ["legal_name"], "Mind sharing your legal name?");
+
+// This agent's own disclosure history, and pulling one back:
+const mine = await sharer.disclosures(caller);
+await sharer.revoke(caller, disclosures[0].id); // sends a REVOKE marker too
+```
+
+The same `share` is available inline from any handler with a `reply()` as
+`ctx.shareIdentity(keys, opts?)` — no client/caller plumbing needed, same
+convention as `ctx.ask`/`ctx.approve`.
+
+Answering an incoming ask (and reading someone else's slice) is entirely
+event-driven — set `onIdentityAsk`/`onIdentityShared` on
+`createWebhookServer`/`createSocketClient`:
+
+```js
+createWebhookServer({
+  // ...
+  async onIdentityAsk({ id, keys, text, chatId, from }) {
+    // Return the subset of `keys` to share (replies with a SLICE), or
+    // null/false to decline (replies with a DECLINE) -- either way this
+    // is intercepted and never reaches onMessage. Leave onIdentityAsk
+    // unset entirely and an incoming ask is NOT intercepted at all: it
+    // reaches onMessage as ordinary text, marker stripped, unanswered.
+    return keys.includes("bio") ? ["bio"] : null;
+  },
+  async onIdentityShared(event) {
+    // event.kind is "slice" | "decline" | "revoke" -- always intercepted,
+    // never reaches onMessage either way. A verified slice is already
+    // recorded on that chat's session (ctx.session.identity[senderId])
+    // by the time this fires.
+    if (event.kind === "slice" && event.verified) {
+      console.log(`${event.from} shared`, event.sections.map((s) => s.key));
+    }
+  },
+});
+```
+
+Wire grammar (one marker line, then for SLICE a `{sections, signature}`
+JSON line — `signature` is an OpenPGP ARMORED DETACHED signature by the
+sender's own key over `canonicalizeJcs(sections)`, the sections array
+alone):
+
+```
+[[SALT-IDENTITY-ASK id=<id> keys=<k1,k2>]]
+optional text line
+
+[[SALT-IDENTITY-SLICE id=<id> [ask=<askId>]]]
+{"sections":[{"key":"bio","value":"...","proof":null}],"signature":"..."}
+
+[[SALT-IDENTITY-DECLINE id=<id> [ask=<askId>]]]
+
+[[SALT-IDENTITY-REVOKE id=<id>]]
+```
+
+`ask=<askId>` rides on SLICE and DECLINE ONLY when that message answers a
+SALT-IDENTITY-ASK (so the asker's client can resolve which question got
+answered) — a `share()`/`revoke()` call made on its own carries no `ask=`
+at all. `id` on SLICE is a disclosure ledger row's own id (see
+`identityShare.ts`'s module doc comment for the one-`id`-per-multi-recipient
+design note); `id` on DECLINE/REVOKE is that message's own fresh id, unrelated
+to any ledger row.
+
 ## Sessions
 
 Every `onMessage` call gets `ctx.session`: this identity's memory of
@@ -426,6 +506,12 @@ async onMessage(ctx) {
 
   // A plain mutable object -- write whatever you want to remember later.
   ctx.session.note.goal = "book Dan's flight to Lisbon";
+
+  // Any [[SALT-IDENTITY-SLICE]]s this chat has received, keyed by sender id
+  // (see **Identity: share, ask, revoke**, above) -- nothing to do here,
+  // webhook.ts records and forgets these for you as SLICE/REVOKE markers
+  // arrive.
+  const danSlices = ctx.session.identity["dan-user-id"] || [];
 }
 ```
 
@@ -518,6 +604,7 @@ either side beyond exposing both tools.
 | `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: stays connected to `AgentUpdatesChannel` over Action Cable for an agent with no public URL (no polling -- backfill/ack HTTP calls are event-triggered only), verifying and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
 | `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 19 Salt-platform actions, provider-agnostic. |
 | `identity.ts` | `AGENT_CLAIM_SECTION_KEYS`, `PROOF_SECTION_KEYS`, `canonicalizeJcs`, `verifySignedCard`, `IdentityCardInvalidError` | The Identity card vocabulary (claim vs. proof sections), a narrow RFC 8785 (JCS) canonicalizer matching salt-api's `Jcs.rb`, and the Ed25519/JWS signature check `client.card()` uses -- see **Identity**, above. |
+| `identityShare.ts` | `createIdentitySharer(client, pgpPassphrase)`, `parseIdentityMarker`, `formatIdentityAsk`/`formatIdentitySlice`/`formatIdentityDecline`/`formatIdentityRevoke`, `IDENTITY_MARKER_PREFIX` | R3/R4: sending a signed SLICE of your own identity sections into a chat, asking someone for one of theirs, and revoking a disclosure -- the `[[SALT-IDENTITY-*]]` wire protocol and the `onIdentityAsk`/`onIdentityShared` webhook.ts events it's wired into. See **Identity: share, ask, revoke**, above. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types
@@ -571,7 +658,14 @@ whatever you `reply()` with is appended as an assistant turn and persisted
 after your handler returns — by the next `onMessage` call for that chat,
 it's already in `session.transcriptTail`. Every one of those same contexts
 also carries `ask(question, opts)` and `approve(summary, opts)` — see
-**`ctx.ask` / `ctx.approve`**, above.
+**`ctx.ask` / `ctx.approve`**, above — and `shareIdentity(keys, opts?)` —
+see **Identity: share, ask, revoke**, above.
+
+Two more callbacks, `onIdentityAsk`/`onIdentityShared`, aren't a *seventh*
+kind of event — they intercept an ordinary message whose plaintext is a
+`[[SALT-IDENTITY-*]]` wire marker, the same way `HANDOFF_BRIEFING_MARKER`
+already does, before it would otherwise reach `onMessage`. See **Identity:
+share, ask, revoke**, above, for their shapes.
 
 All Salt-protocol decisions about *whether* a given event reaches your
 callback at all — dedup, GACM active-agent gating, the Mediator's
