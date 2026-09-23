@@ -641,7 +641,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * (identityShare.ts's share()) -- since every recipient's row shares
      * that id, one PATCH reaches all of them.
      */
-    async setIdentityDisclosureMessage(apiKey: string, id: string, messageId: SaltId): Promise<IdentityDisclosure> {
+    async setIdentityDisclosureMessage(apiKey: string, id: string, messageId: SaltId): Promise<{ disclosures: IdentityDisclosure[] }> {
       return request("PATCH", `/api/v1/identity/disclosures/${id}`, apiKey, { message_id: messageId });
     },
 
@@ -661,7 +661,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * marker off of. Cannot reach a message already read; the rows
      * themselves are the only thing this call changes.
      */
-    async revokeIdentityDisclosure(apiKey: string, id: string): Promise<IdentityDisclosure> {
+    async revokeIdentityDisclosure(apiKey: string, id: string): Promise<{ disclosures: IdentityDisclosure[] }> {
       return request("POST", `/api/v1/identity/disclosures/${id}/revoke`, apiKey);
     },
 

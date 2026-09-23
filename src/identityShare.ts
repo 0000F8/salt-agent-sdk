@@ -238,7 +238,7 @@ export interface IdentitySharer {
   /** This agent's own disclosure ledger, newest first. */
   disclosures(caller: AgentIdentity, opts?: { before?: string; limit?: number }): Promise<IdentityDisclosure[]>;
   /** Revokes every ledger row under `id` (the id `share()` returned) in one call, then sends a REVOKE marker into the chat it was disclosed in. */
-  revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure>;
+  revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure[]>;
 }
 
 async function recipientMembers(client: SaltClient, caller: AgentIdentity, chatId: SaltId) {
@@ -350,21 +350,26 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
     return result.disclosures ?? [];
   }
 
-  async function revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure> {
-    // Revokes every ledger row under `id` (every recipient) in one call.
-    const row = await client.revokeIdentityDisclosure(caller.apiKey, id);
+  async function revoke(caller: AgentIdentity, id: string): Promise<IdentityDisclosure[]> {
+    // Revokes every ledger row under `id` (every recipient) in one call; the
+    // API answers `{disclosures: [...]}`, one row per recipient, all in the
+    // same chat, so one REVOKE marker into that chat covers the share.
+    const { disclosures: rows } = await client.revokeIdentityDisclosure(caller.apiKey, id);
+    const chatId = rows[0]?.chat_id;
     const plaintext = formatIdentityRevoke(id);
     try {
-      const recipients = await recipientMembers(client, caller, row.chat_id);
-      if (recipients.length > 0) {
-        const { message, senderMessage } = await encryptToMembers(caller, recipients, plaintext);
-        await client.postMessage(caller.apiKey, row.chat_id, message, senderMessage);
+      if (chatId) {
+        const recipients = await recipientMembers(client, caller, chatId);
+        if (recipients.length > 0) {
+          const { message, senderMessage } = await encryptToMembers(caller, recipients, plaintext);
+          await client.postMessage(caller.apiKey, chatId, message, senderMessage);
+        }
       }
     } catch {
-      // Best-effort: the row is revoked server-side (nothing new will be
-      // served for it) even if telling this chat about it right now failed.
+      // Best-effort: the rows are revoked server-side (nothing new will be
+      // served for them) even if telling this chat about it right now failed.
     }
-    return row;
+    return rows;
   }
 
   return { share, ask, decline, disclosures, revoke };
