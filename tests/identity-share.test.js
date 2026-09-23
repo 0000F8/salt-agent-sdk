@@ -196,7 +196,7 @@ test("share() aborts on the first 422 with nothing sent", async () => {
   assert.deepStrictEqual(calls, ["human-1", "human-2"], "never reaches postMessage/PATCH once a row is refused");
 });
 
-test("share() refuses locally for a nobody-scoped section without ever posting a ledger row", async () => {
+test("share() refuses locally for a section the agent has never stated, without posting a ledger row", async () => {
   const agentKeys = await sdk.generateKeypair("nobody-pass");
   let postedDisclosure = false;
   const client = {
@@ -207,7 +207,9 @@ test("share() refuses locally for a nobody-scoped section without ever posting a
       ];
     },
     async identity() {
-      return { sections: [{ key: "bio", value: "hi", scope: "nobody", kind: "claim" }], card_url: "x" };
+      // A nobody-scoped section is shareable since 0.87.0 (the share is the
+      // grant); a key with no value at all is what the local refusal is for.
+      return { sections: [{ key: "bio", value: null, scope: "nobody", kind: "claim" }], card_url: "x" };
     },
     async postIdentityDisclosure() {
       postedDisclosure = true;
@@ -217,7 +219,7 @@ test("share() refuses locally for a nobody-scoped section without ever posting a
   const sharer = sdk.createIdentitySharer(client, "nobody-pass");
   await assert.rejects(
     sharer.share({ saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey }, "chat-1", ["bio"]),
-    /not a section this agent shares/
+    /not a section this agent has/
   );
   assert.strictEqual(postedDisclosure, false);
 });
