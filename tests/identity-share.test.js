@@ -88,10 +88,12 @@ test("parseIdentityMarker returns null for a malformed marker rather than guessi
 
 // --- createIdentitySharer against a fake client (no HTTP) -----------------
 
-test("share() posts one ledger row per non-observer non-self member, then signs, sends once, and PATCHes message_id on every row", async () => {
+test("share() posts ONE id as every non-observer non-self member's ledger row, signs, sends once, and PATCHes message_id once for all of them", async () => {
   const agentKeys = await sdk.generateKeypair("share-pass");
   const danKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
+  const juneKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
   const dan = { id: "human-1", public_key: danKeys.publicKey };
+  const june = { id: "human-2", public_key: juneKeys.publicKey };
 
   const calls = [];
   let postedMessage;
@@ -100,6 +102,7 @@ test("share() posts one ledger row per non-observer non-self member, then signs,
       return [
         { id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey },
         dan,
+        june,
         { id: "observer-1", account_type: "User", public_key: "irrelevant", observer: true },
       ];
     },
@@ -115,8 +118,8 @@ test("share() posts one ledger row per non-observer non-self member, then signs,
       calls.push(["postMessage"]);
       return { message_id: "msg-1" };
     },
-    async setIdentityDisclosureMessage(apiKey, disclosureId, messageId) {
-      calls.push(["patch", disclosureId, messageId]);
+    async setIdentityDisclosureMessage(apiKey, id, messageId) {
+      calls.push(["patch", id, messageId]);
       return {};
     },
   };
@@ -125,20 +128,27 @@ test("share() posts one ledger row per non-observer non-self member, then signs,
   const result = await sharer.share({ saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey }, "chat-1", ["bio"]);
 
   assert.strictEqual(result.messageId, "msg-1");
-  assert.strictEqual(result.disclosures.length, 1, "the observer must be excluded");
-  assert.strictEqual(result.disclosures[0].recipientId, "human-1");
+  assert.deepStrictEqual(result.recipients, ["human-1", "human-2"], "the observer must be excluded");
+  assert.match(result.id, /^[0-9a-f-]{36}$/);
+
+  const postCalls = calls.filter((c) => c[0] === "post");
+  assert.strictEqual(postCalls.length, 2, "one ledger row per recipient");
+  assert.strictEqual(postCalls[0][1].id, result.id, "the SAME id for the first recipient's row");
+  assert.strictEqual(postCalls[1][1].id, result.id, "and the SAME id for the second recipient's row");
+  assert.strictEqual(postCalls[0][1].recipient_id, "human-1");
+  assert.strictEqual(postCalls[1][1].recipient_id, "human-2");
 
   const order = calls.map((c) => c[0]);
-  assert.deepStrictEqual(order, ["post", "postMessage", "patch"], "ledger row before the message, PATCH after");
-  assert.strictEqual(calls[2][1], result.disclosures[0].id);
-  assert.strictEqual(calls[2][2], "msg-1");
+  assert.deepStrictEqual(order, ["post", "post", "postMessage", "patch"], "both ledger rows before the message, ONE patch after");
+  assert.strictEqual(calls[3][1], result.id, "the patch is keyed on the share id, not a per-recipient row id");
+  assert.strictEqual(calls[3][2], "msg-1");
 
-  // Readable by the recipient, and the slice signature verifies against the AGENT's own public key.
+  // Readable by a recipient, and the slice signature verifies against the AGENT's own public key.
   const message = await openpgp.readMessage({ armoredMessage: postedMessage });
   const { data: plaintext } = await openpgp.decrypt({ message, decryptionKeys: [await openpgp.readPrivateKey({ armoredKey: danKeys.privateKey })] });
   const parsed = sdk.parseIdentityMarker(plaintext);
   assert.strictEqual(parsed.kind, "slice");
-  assert.strictEqual(parsed.id, result.disclosures[0].id);
+  assert.strictEqual(parsed.id, result.id);
   assert.deepStrictEqual(parsed.payload.sections, [{ key: "bio", value: "Forecasts for any city.", proof: null }]);
   const ok = await sdk.verifyDetached(sdk.canonicalizeJcs(parsed.payload.sections), parsed.payload.signature, agentKeys.publicKey);
   assert.strictEqual(ok, true, "the slice's signature must verify against the agent's own public key");
@@ -842,4 +852,196 @@ test("ctx.shareIdentity(keys) from onMessage calls through to the same share() t
   const parsed = sdk.parseIdentityMarker(plaintext);
   assert.strictEqual(parsed.kind, "slice");
   assert.deepStrictEqual(parsed.payload.sections.map((s) => s.key), ["bio"]);
+});
+
+// --- actions.ts: identity_share / identity_ask / identity_revoke ----------
+
+test("identity_share action defaults to the current chat, shares via identitySharer, and returns id/message_id/recipients", async () => {
+  const agentKeys = await sdk.generateKeypair("action-share-pass");
+  const danKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey };
+
+  const calls = [];
+  const client = {
+    async getChatMembers() {
+      return [{ id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey }, { id: "human-1", account_type: "User", public_key: danKeys.publicKey }];
+    },
+    async identity() {
+      return { sections: [{ key: "bio", value: "Forecasts for any city.", scope: "everyone", kind: "claim" }], card_url: "x" };
+    },
+    async postIdentityDisclosure(apiKey, params) {
+      calls.push("post");
+      return { id: params.id, section_keys: params.section_keys, scope: params.scope, chat_id: params.chat_id, recipient_id: params.recipient_id, created_at: new Date().toISOString() };
+    },
+    async postMessage() {
+      calls.push("send");
+      return { message_id: "m-share-action" };
+    },
+    async setIdentityDisclosureMessage() {
+      calls.push("patch");
+      return {};
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "action-share-pass", publicWebhookUrl: "" });
+
+  const result = await actions.execute("identity_share", { keys: ["bio"] }, caller, { depth: 0, mainChatId: "chat-current" });
+
+  assert.strictEqual(result.shared, true);
+  assert.strictEqual(result.message_id, "m-share-action");
+  assert.deepStrictEqual(result.recipients, ["human-1"]);
+  assert.match(result.id, /^[0-9a-f-]{36}$/);
+  assert.deepStrictEqual(calls, ["post", "send", "patch"]);
+});
+
+test("identity_share action refuses with no chat_id and no current chat, before calling the client", async () => {
+  const client = {
+    async getChatMembers() {
+      throw new Error("must not be called");
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: "pub", privateKey: "priv" };
+
+  await assert.rejects(
+    actions.execute("identity_share", { keys: ["bio"] }, caller, { depth: 0, mainChatId: null }),
+    /needs a chat_id/
+  );
+});
+
+test("identity_share action explicit chat_id overrides ctx.mainChatId", async () => {
+  const agentKeys = await sdk.generateKeypair("action-share-override-pass");
+  const danKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey };
+
+  let sharedIntoChat;
+  const client = {
+    async getChatMembers(apiKey, chatId) {
+      sharedIntoChat = chatId;
+      return [{ id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey }, { id: "human-1", account_type: "User", public_key: danKeys.publicKey }];
+    },
+    async identity() {
+      return { sections: [{ key: "bio", value: "hi", scope: "everyone", kind: "claim" }], card_url: "x" };
+    },
+    async postIdentityDisclosure(apiKey, params) {
+      return { id: params.id };
+    },
+    async postMessage() {
+      return { message_id: "m-2" };
+    },
+    async setIdentityDisclosureMessage() {
+      return {};
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "action-share-override-pass", publicWebhookUrl: "" });
+  await actions.execute("identity_share", { keys: ["bio"], chat_id: "explicit-chat" }, caller, { depth: 0, mainChatId: "current-chat" });
+  assert.strictEqual(sharedIntoChat, "explicit-chat");
+});
+
+test("identity_share action requires at least one key", async () => {
+  const actions = sdk.createActions({ client: { trackEvent() {} }, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: "pub", privateKey: "priv" };
+  await assert.rejects(
+    actions.execute("identity_share", { keys: [] }, caller, { depth: 0, mainChatId: "chat-1" }),
+    /at least one section key/
+  );
+});
+
+test("identity_ask action asks in ctx.mainChatId and returns an id", async () => {
+  const agentKeys = await sdk.generateKeypair("action-ask-pass");
+  const danKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey };
+
+  let posted;
+  const client = {
+    async getChat() {
+      return { id: "chat-1", encrypted: true, users: [{ id: "agent-1", public_key: agentKeys.publicKey }, { id: "human-1", public_key: danKeys.publicKey }] };
+    },
+    async postMessage(apiKey, chatId, message) {
+      posted = message;
+      return { message_id: "m-ask" };
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "action-ask-pass", publicWebhookUrl: "" });
+
+  const result = await actions.execute("identity_ask", { keys: ["legal_name"], text: "Mind sharing?" }, caller, { depth: 0, mainChatId: "chat-1" });
+  assert.strictEqual(result.asked, true);
+  assert.match(result.id, /^[0-9a-f-]{36}$/);
+
+  const message = await openpgp.readMessage({ armoredMessage: posted });
+  const { data: plaintext } = await openpgp.decrypt({ message, decryptionKeys: [await openpgp.readPrivateKey({ armoredKey: danKeys.privateKey })] });
+  const parsed = sdk.parseIdentityMarker(plaintext);
+  assert.strictEqual(parsed.kind, "ask");
+  assert.strictEqual(parsed.id, result.id);
+  assert.deepStrictEqual(parsed.keys, ["legal_name"]);
+});
+
+test("identity_ask action refuses outside a chat", async () => {
+  const actions = sdk.createActions({ client: { trackEvent() {} }, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: "pub", privateKey: "priv" };
+  await assert.rejects(
+    actions.execute("identity_ask", { keys: ["bio"] }, caller, { depth: 0, mainChatId: null }),
+    /only available while replying in a chat/
+  );
+});
+
+test("identity_ask action propagates the sharer's 1:1-only refusal for a group chat", async () => {
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: "pub", privateKey: "priv" };
+  const client = {
+    async getChat() {
+      return { id: "group-1", encrypted: true, users: [{ id: "agent-1" }, { id: "human-1" }, { id: "human-2" }] };
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  await assert.rejects(
+    actions.execute("identity_ask", { keys: ["bio"] }, caller, { depth: 0, mainChatId: "group-1" }),
+    /1:1 chat/
+  );
+});
+
+test("identity_revoke action revokes via identitySharer and returns the chat_id", async () => {
+  const agentKeys = await sdk.generateKeypair("action-revoke-pass");
+  const danKeys = await openpgp.generateKey({ type: "ecc", curve: "curve25519", userIDs: [{}], format: "armored" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey };
+
+  const client = {
+    async revokeIdentityDisclosure(apiKey, id) {
+      return { id, chat_id: "chat-revoked", recipient_id: "human-1", section_keys: ["bio"], scope: "named", created_at: "x", revoked_at: new Date().toISOString() };
+    },
+    async getChatMembers() {
+      return [{ id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey }, { id: "human-1", account_type: "User", public_key: danKeys.publicKey }];
+    },
+    async postMessage() {
+      return { message_id: "m-revoke-action" };
+    },
+    trackEvent() {},
+  };
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "action-revoke-pass", publicWebhookUrl: "" });
+
+  const result = await actions.execute("identity_revoke", { id: "share-abc" }, caller, { depth: 0, mainChatId: null });
+  assert.strictEqual(result.revoked, true);
+  assert.strictEqual(result.id, "share-abc");
+  assert.strictEqual(result.chat_id, "chat-revoked");
+});
+
+test("identity_revoke action requires an id", async () => {
+  const actions = sdk.createActions({ client: { trackEvent() {} }, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "key-1", publicKey: "pub", privateKey: "priv" };
+  await assert.rejects(actions.execute("identity_revoke", {}, caller, { depth: 0, mainChatId: null }), /id is required/);
+});
+
+test("identity_share / identity_ask / identity_revoke are registered actions with plain JSON Schema", () => {
+  const actions = sdk.createActions({ client: {}, identities: {}, pgpPassphrase: "x", publicWebhookUrl: "" });
+  const names = actions.definitions.map((d) => d.name);
+  assert.ok(names.includes("identity_share"));
+  assert.ok(names.includes("identity_ask"));
+  assert.ok(names.includes("identity_revoke"));
+  const tools = sdk.toAnthropicTools(actions.definitions);
+  assert.ok(tools.find((t) => t.name === "identity_share").input_schema.properties.keys);
+  assert.ok(tools.find((t) => t.name === "identity_ask").input_schema.properties.keys);
+  assert.ok(tools.find((t) => t.name === "identity_revoke").input_schema.properties.id);
 });
