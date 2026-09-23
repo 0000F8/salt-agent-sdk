@@ -14,6 +14,40 @@ import {
   type SignedCard,
 } from "./identity.js";
 
+// --- Identity disclosures (R3, identityShare.ts) --------------------------
+//
+// The ledger row an E2E slice's `POST .../disclosures` writes: who, which
+// section KEYS (never a value -- plan section 4, "A disclosure record
+// never stores a value"), which chat, when, revoked or not. A row is keyed
+// on (subject, recipient, id) -- identityShare.ts's share() generates ONE
+// id per share() call and posts it for EVERY recipient, one row each, so
+// the id names the whole share rather than a single recipient's row; the
+// same id is what the wire SLICE carries, what a single
+// setIdentityDisclosureMessage PATCH reaches every row of, and what a
+// single revokeIdentityDisclosure call revokes every row of. `message_id`
+// is null until that PATCH lands (the row is written BEFORE the message,
+// so a 422 here means nothing was ever sent).
+
+export interface IdentityDisclosure {
+  id: string;
+  section_keys: string[];
+  scope: string;
+  chat_id: SaltId;
+  recipient_id: SaltId;
+  message_id?: SaltId | null;
+  created_at: string;
+  revoked_at?: string | null;
+}
+
+export interface PostIdentityDisclosureParams {
+  /** Client-generated (crypto.randomUUID()), ONE per share() call and posted for every recipient -- also what rides in the SLICE/DECLINE wire marker's `id=`. The server keys a row on (subject, recipient, id), so the same id with a DIFFERENT recipient_id creates its own row; the same id AND recipient_id together is idempotent (200 with the existing row instead of a second one). */
+  id: string;
+  section_keys: string[];
+  scope: string;
+  chat_id: SaltId;
+  recipient_id: SaltId;
+}
+
 export interface SaltUser {
   id: SaltId;
   username: string;
@@ -585,6 +619,50 @@ export function createSaltClient(options: SaltClientOptions) {
         );
       }
       return request("PATCH", "/api/v1/identity/sections", apiKey, claims);
+    },
+
+    /**
+     * Writes one disclosure ledger row -- metadata only, never a section
+     * VALUE (plan section 4). identityShare.ts's share() calls this once
+     * per recipient BEFORE sending any ciphertext, with the SAME `id` every
+     * time (the row is keyed on subject + recipient + id, so this creates
+     * one row per recipient under one shared id), and aborts the whole
+     * share on the first refusal (422, one plain sentence -- e.g. a key
+     * that isn't actually shared with that recipient) with nothing sent.
+     */
+    async postIdentityDisclosure(apiKey: string, params: PostIdentityDisclosureParams): Promise<IdentityDisclosure> {
+      return request("POST", "/api/v1/identity/disclosures", apiKey, params);
+    },
+
+    /**
+     * Records which chat message actually carried a share's slice, once
+     * it's been posted. Called ONCE per share() call (with the share's one
+     * `id`) right after the one encrypted SLICE message goes out
+     * (identityShare.ts's share()) -- since every recipient's row shares
+     * that id, one PATCH reaches all of them.
+     */
+    async setIdentityDisclosureMessage(apiKey: string, id: string, messageId: SaltId): Promise<IdentityDisclosure> {
+      return request("PATCH", `/api/v1/identity/disclosures/${id}`, apiKey, { message_id: messageId });
+    },
+
+    /** This agent's own disclosure ledger, newest first. */
+    async listIdentityDisclosures(apiKey: string, opts?: { before?: string; limit?: number }): Promise<{ disclosures: IdentityDisclosure[] }> {
+      const params = new URLSearchParams();
+      if (opts?.before) params.set("before", opts.before);
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      params.set("_", String(Date.now()));
+      return request("GET", `/api/v1/identity/disclosures?${params.toString()}`, apiKey);
+    },
+
+    /**
+     * Revokes EVERY ledger row under `id` (every recipient of that share)
+     * in one call -- stops them being served again and is the signal
+     * identityShare.ts's revoke() sends a `[[SALT-IDENTITY-REVOKE]]` wire
+     * marker off of. Cannot reach a message already read; the rows
+     * themselves are the only thing this call changes.
+     */
+    async revokeIdentityDisclosure(apiKey: string, id: string): Promise<IdentityDisclosure> {
+      return request("POST", `/api/v1/identity/disclosures/${id}/revoke`, apiKey);
     },
 
     /**

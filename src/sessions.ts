@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import type { SaltId } from "./ids.js";
+import type { CardSection } from "./identity.js";
 
 export interface SessionTurn {
   role: "user" | "assistant";
@@ -43,6 +44,22 @@ export interface SessionNote {
   lastReportId?: string;
 }
 
+/**
+ * One SALT-IDENTITY-SLICE this session received from a chat member (see
+ * identityShare.ts) -- kept so a later turn can use what someone shared
+ * without re-asking. `verified` mirrors identityShare's own signature
+ * check (never re-verified here). Nothing removes an entry except a
+ * matching SALT-IDENTITY-REVOKE naming the same `id` (see
+ * forgetReceivedIdentitySlice) or MAX_IDENTITY_SLICES_PER_SENDER eviction.
+ */
+export interface ReceivedIdentitySlice {
+  id: string;
+  sections: CardSection[];
+  verified: boolean;
+  /** epoch ms this slice was received. */
+  receivedAt: number;
+}
+
 export interface Session {
   /** The room this session ultimately serves -- itself for an ordinary chat, or the shared chat a lane (sidechain/coaching/consult) was opened from. */
   roomId: SaltId;
@@ -53,6 +70,8 @@ export interface Session {
   /** Recent turns, oldest first, capped at MAX_TRANSCRIPT_TURNS. */
   transcriptTail: SessionTurn[];
   note: SessionNote;
+  /** Verified (and unverified) SALT-IDENTITY-SLICEs received in this chat, keyed by the lowercased sender id -- oldest first, capped at MAX_IDENTITY_SLICES_PER_SENDER per sender. Empty object when nothing has been shared here yet. */
+  identity: Record<string, ReceivedIdentitySlice[]>;
   /** epoch ms of the last write. */
   updatedAt: number;
 }
@@ -67,12 +86,42 @@ export interface SessionStore {
 export const MAX_TRANSCRIPT_TURNS = 40;
 /** A note's serialized size budget, in characters. */
 export const MAX_NOTE_CHARS = 1200;
+/** Received identity slices kept per sender -- old ones drop off the front, oldest first, same convention as MAX_TRANSCRIPT_TURNS. */
+export const MAX_IDENTITY_SLICES_PER_SENDER = 20;
 
 const mapKey = (id: SaltId): string => String(id).toLowerCase();
 
 /** A fresh, empty session for `chatId` (in room `roomId`). */
 export function emptySession(chatId: SaltId, roomId: SaltId, role: Session["role"] = "active"): Session {
-  return { roomId, chatId, role, transcriptTail: [], note: { consulted: [] }, updatedAt: Date.now() };
+  return { roomId, chatId, role, transcriptTail: [], note: { consulted: [] }, identity: {}, updatedAt: Date.now() };
+}
+
+/**
+ * Records a SALT-IDENTITY-SLICE this session just received from
+ * `fromId`, in place. Called by webhook.ts right after
+ * identityShare.parseIdentityMarker/crypto.verifyDetached resolve one.
+ */
+export function recordReceivedIdentitySlice(session: Session, fromId: SaltId, slice: ReceivedIdentitySlice): void {
+  if (!session.identity) session.identity = {};
+  const key = mapKey(fromId);
+  const list = session.identity[key] || (session.identity[key] = []);
+  list.push(slice);
+  if (list.length > MAX_IDENTITY_SLICES_PER_SENDER) list.splice(0, list.length - MAX_IDENTITY_SLICES_PER_SENDER);
+}
+
+/**
+ * Drops every slice from `fromId` whose `id` matches `sliceId`, in place --
+ * called on an incoming SALT-IDENTITY-REVOKE naming that id. A no-op when
+ * nothing recorded under that (sender, id) pair exists (the revoke arrived
+ * before this process ever saw the slice, or from a different process
+ * hosting the same identity).
+ */
+export function forgetReceivedIdentitySlice(session: Session, fromId: SaltId, sliceId: string): void {
+  if (!session.identity) return;
+  const key = mapKey(fromId);
+  const list = session.identity[key];
+  if (!list) return;
+  session.identity[key] = list.filter((s) => s.id !== sliceId);
 }
 
 /** Appends one turn in place, dropping the oldest turns past MAX_TRANSCRIPT_TURNS. */
