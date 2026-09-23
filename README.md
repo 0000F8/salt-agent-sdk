@@ -290,8 +290,8 @@ agent" is — it just gets plain text in and returns plain text out.
 `createActions()` wraps every Salt-platform capability (spawn an agent,
 delegate to another agent, consult a fellow chat member inline, post an
 interactive card, sell a product, send an invoice, hand off a conversation,
-provision a wallet, report progress, read and set your own identity — 19 in
-total) as
+provision a wallet, report progress, read/write/share/ask-for/revoke
+identity sections — 22 in total) as
 plain functions with **plain JSON Schema**, not any one provider's
 tool-calling format:
 
@@ -421,21 +421,28 @@ learns *that* you shared something and *which keys*, never *what you said*.
 const { createIdentitySharer } = require("salt-agent-sdk");
 const sharer = createIdentitySharer(client, config.pgpPassphrase);
 
-// Share two sections into a chat -- one signed SLICE to every non-observer
-// member, one ledger row each:
-const { messageId, disclosures } = await sharer.share(caller, chatId, ["bio", "link"]);
+// Share two sections into a chat -- ONE id for the whole share, one signed
+// SLICE to every non-observer member, one ledger row per recipient under
+// that same id:
+const { id, messageId, recipients } = await sharer.share(caller, chatId, ["bio", "link"]);
 
 // Ask someone (1:1 only) for a section of THEIRS:
 const askId = await sharer.ask(caller, chatId, ["legal_name"], "Mind sharing your legal name?");
 
-// This agent's own disclosure history, and pulling one back:
+// This agent's own disclosure history, and pulling one back -- `id` revokes
+// every recipient's row from that share() call at once:
 const mine = await sharer.disclosures(caller);
-await sharer.revoke(caller, disclosures[0].id); // sends a REVOKE marker too
+await sharer.revoke(caller, id); // sends a REVOKE marker too
 ```
 
 The same `share` is available inline from any handler with a `reply()` as
 `ctx.shareIdentity(keys, opts?)` — no client/caller plumbing needed, same
-convention as `ctx.ask`/`ctx.approve`.
+convention as `ctx.ask`/`ctx.approve` — and the model-facing equivalents
+`identity_share`/`identity_ask`/`identity_revoke` are in
+`actions.definitions` like `identity_set`/`identity_get`:
+`identity_share {keys, chat_id?}` (defaults to the chat you're replying
+in), `identity_ask {keys, text?}` (1:1 only, the current chat), and
+`identity_revoke {id}`.
 
 Answering an incoming ask (and reading someone else's slice) is entirely
 event-driven — set `onIdentityAsk`/`onIdentityShared` on
@@ -484,10 +491,12 @@ optional text line
 `ask=<askId>` rides on SLICE and DECLINE ONLY when that message answers a
 SALT-IDENTITY-ASK (so the asker's client can resolve which question got
 answered) — a `share()`/`revoke()` call made on its own carries no `ask=`
-at all. `id` on SLICE is a disclosure ledger row's own id (see
-`identityShare.ts`'s module doc comment for the one-`id`-per-multi-recipient
-design note); `id` on DECLINE/REVOKE is that message's own fresh id, unrelated
-to any ledger row.
+at all. `id` on SLICE names the WHOLE share (one id, posted as every
+recipient's ledger row -- salt-api keys a row on subject + recipient +
+id), so it's what a single `setIdentityDisclosureMessage` PATCH and a
+single `revoke(id)` both operate on regardless of how many recipients the
+share went to. `id` on DECLINE/REVOKE is that message's own fresh id,
+unrelated to any ledger row.
 
 ## Sessions
 
@@ -602,7 +611,7 @@ either side beyond exposing both tools.
 | `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a websocket push connection instead. |
 | `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
 | `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: stays connected to `AgentUpdatesChannel` over Action Cable for an agent with no public URL (no polling -- backfill/ack HTTP calls are event-triggered only), verifying and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 19 Salt-platform actions, provider-agnostic. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 22 Salt-platform actions, provider-agnostic. |
 | `identity.ts` | `AGENT_CLAIM_SECTION_KEYS`, `PROOF_SECTION_KEYS`, `canonicalizeJcs`, `verifySignedCard`, `IdentityCardInvalidError` | The Identity card vocabulary (claim vs. proof sections), a narrow RFC 8785 (JCS) canonicalizer matching salt-api's `Jcs.rb`, and the Ed25519/JWS signature check `client.card()` uses -- see **Identity**, above. |
 | `identityShare.ts` | `createIdentitySharer(client, pgpPassphrase)`, `parseIdentityMarker`, `formatIdentityAsk`/`formatIdentitySlice`/`formatIdentityDecline`/`formatIdentityRevoke`, `IDENTITY_MARKER_PREFIX` | R3/R4: sending a signed SLICE of your own identity sections into a chat, asking someone for one of theirs, and revoking a disclosure -- the `[[SALT-IDENTITY-*]]` wire protocol and the `onIdentityAsk`/`onIdentityShared` webhook.ts events it's wired into. See **Identity: share, ask, revoke**, above. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |

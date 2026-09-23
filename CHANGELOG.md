@@ -5,6 +5,30 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.12.0 — 2026-09-22
+
+### Changed
+
+- **One share, one id.** salt-api now keys a disclosure row on subject +
+  recipient + id, so `identityShare.ts`'s `share()` generates ONE id per
+  `share()` call and posts that SAME id as every non-observer recipient's
+  ledger row, rather than a distinct id per recipient. That one id is what
+  the wire SLICE's `id=` carries, what a single `setIdentityDisclosureMessage`
+  PATCH reaches every row of, and what a single `revoke(id)` call revokes
+  every row of -- closing the multi-recipient ambiguity 0.11.0 flagged (the
+  wire message could only carry one id, but the ledger was per recipient).
+  `ShareResult` is now `{id, messageId, recipients}` (was
+  `{messageId, disclosures: [{id, recipientId}]}`); `revoke`'s parameter is
+  that same share id, not a per-recipient row id.
+
+### Added
+
+- **`identity_share {keys, chat_id?}` / `identity_ask {keys, text?}` /
+  `identity_revoke {id}`** in `actions.definitions`, alongside `identity_set`/
+  `identity_get`. `identity_share` defaults to the chat the model is
+  currently replying in; `identity_ask` is 1:1-only, same as the sharer's
+  own `ask()`. 22 actions in total now.
+
 ## 0.11.0 — 2026-09-22
 
 ### Added
