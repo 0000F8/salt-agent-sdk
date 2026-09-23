@@ -276,7 +276,7 @@ test("revoke() calls revokeIdentityDisclosure then sends a REVOKE marker into th
   const client = {
     async revokeIdentityDisclosure(apiKey, id) {
       calls.push("revoked");
-      return { id, chat_id: "chat-9", recipient_id: "human-1", section_keys: ["bio"], scope: "named", created_at: "x", revoked_at: new Date().toISOString() };
+      return { disclosures: [{ id, chat_id: "chat-9", recipient_id: "human-1", section_keys: ["bio"], scope: "named", created_at: "x", revoked_at: new Date().toISOString() }] };
     },
     async getChatMembers() {
       return [{ id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey }, { id: "human-1", account_type: "User", public_key: danKeys.publicKey }];
@@ -288,9 +288,10 @@ test("revoke() calls revokeIdentityDisclosure then sends a REVOKE marker into th
     },
   };
   const sharer = sdk.createIdentitySharer(client, "revoke-pass");
-  const row = await sharer.revoke({ saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey }, "disc-1");
+  const rows = await sharer.revoke({ saltAppId: "agent-1", apiKey: "key-1", publicKey: agentKeys.publicKey, privateKey: agentKeys.privateKey }, "disc-1");
 
-  assert.strictEqual(row.chat_id, "chat-9");
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].chat_id, "chat-9");
   assert.deepStrictEqual(calls, ["revoked", "sent"]);
   assert.strictEqual(posted.chatId, "chat-9");
 
@@ -1010,7 +1011,7 @@ test("identity_revoke action revokes via identitySharer and returns the chat_id"
 
   const client = {
     async revokeIdentityDisclosure(apiKey, id) {
-      return { id, chat_id: "chat-revoked", recipient_id: "human-1", section_keys: ["bio"], scope: "named", created_at: "x", revoked_at: new Date().toISOString() };
+      return { disclosures: [{ id, chat_id: "chat-revoked", recipient_id: "human-1", section_keys: ["bio"], scope: "named", created_at: "x", revoked_at: new Date().toISOString() }] };
     },
     async getChatMembers() {
       return [{ id: "agent-1", account_type: "Agent", public_key: agentKeys.publicKey }, { id: "human-1", account_type: "User", public_key: danKeys.publicKey }];

@@ -925,11 +925,12 @@ export function createActions(options: ActionsOptions) {
   async function identityRevokeAction(caller: AgentIdentity, input: { id?: unknown }) {
     const id = typeof input.id === "string" ? input.id.trim() : "";
     if (!id) throw new Error("id is required -- the id identity_share returned.");
-    const row = await identitySharer.revoke(caller, id);
+    const rows = await identitySharer.revoke(caller, id);
     return {
       revoked: true,
       id,
-      chat_id: row.chat_id,
+      chat_id: rows[0]?.chat_id ?? null,
+      recipients: rows.length,
       note: "Stops it being served again and sends a notice into the chat -- cannot reach a copy already read on someone's device.",
     };
   }
