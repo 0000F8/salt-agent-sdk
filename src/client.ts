@@ -43,7 +43,8 @@ export interface PostIdentityDisclosureParams {
   /** Client-generated (crypto.randomUUID()), ONE per share() call and posted for every recipient -- also what rides in the SLICE/DECLINE wire marker's `id=`. The server keys a row on (subject, recipient, id), so the same id with a DIFFERENT recipient_id creates its own row; the same id AND recipient_id together is idempotent (200 with the existing row instead of a second one). */
   id: string;
   section_keys: string[];
-  scope: string;
+  /** Optional since 0.86.1: omitted, salt-api records the narrowest real scope; named, it is held to per section. */
+  scope?: string;
   chat_id: SaltId;
   recipient_id: SaltId;
 }

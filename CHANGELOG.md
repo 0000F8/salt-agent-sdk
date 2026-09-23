@@ -5,6 +5,11 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.11.1
+
+- `identity.share()` is the grant: a section the agent scoped to nobody is shareable, and the share is what admits that recipient (salt-api 0.87.0). The local refusal remains only for a key the agent has never stated.
+- The ledger POST carries no claimed scope; salt-api records the narrowest real scope after the grant. `PostIdentityDisclosureParams.scope` is optional.
+
 ## 0.11.0 — 2026-09-22
 
 ### Added

@@ -266,18 +266,16 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
     const recipients = await recipientMembers(client, caller, chatId);
     if (recipients.length === 0) throw new Error("No one to share with in this chat -- nothing was sent.");
 
-    // This agent's own sections -- refuse locally, before any ledger row is
-    // written, for a key this agent hasn't stated at all or has scoped to
-    // nobody. (Per-recipient enforcement for a NAMED or verified-contacts
-    // scope still happens server-side, at the postIdentityDisclosure call
-    // below -- this is only the "does this section exist and are you
-    // willing to share it under any circumstance" check.)
+    // This agent's own sections. A key the agent has never stated is
+    // refused locally, before any ledger row is written. A section scoped
+    // to nobody is NOT refused: since 0.87.0 the share IS the grant -- the
+    // ledger row salt-api writes for this recipient is what admits them.
     const mine = await client.identity(caller.apiKey);
     const byKey = new Map(mine.sections.map((s) => [s.key, s]));
     const sections: CardSection[] = wanted.map((key) => {
       const section = byKey.get(key);
-      if (!section || section.value == null || section.scope === "nobody") {
-        throw new Error(`identity.share: "${key}" is not a section this agent shares -- nothing was sent.`);
+      if (!section || section.value == null) {
+        throw new Error(`identity.share: "${key}" is not a section this agent has -- nothing was sent.`);
       }
       const proof = section.kind === "proof" ? (section.checked_by ? { by: section.checked_by } : true) : null;
       return { key, value: section.value, proof };
@@ -288,13 +286,14 @@ export function createIdentitySharer(client: SaltClient, pgpPassphrase: string):
     // across recipients is exactly what creates one row each, not a
     // collision), BEFORE any ciphertext, aborting on the first refusal
     // (plan section 8's "0 bytes of section value reach the server" holds
-    // either way: this sends section KEYS and a scope, never a value).
+    // either way: this sends section KEYS, never a value). No claimed
+    // scope: a share may mix public and private sections, and salt-api
+    // records the narrowest real scope after the grant (0.86.1, 0.87.0).
     const id = randomUUID();
     for (const member of recipients) {
       await client.postIdentityDisclosure(caller.apiKey, {
         id,
         section_keys: wanted,
-        scope: "named",
         chat_id: chatId,
         recipient_id: member.id,
       });
