@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import type { SaltClient } from "./client";
+import type { Mandate, MandateExercise, SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import * as identityShare from "./identityShare.js";
@@ -278,6 +278,59 @@ export interface HandoffReceivedContext {
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
+// --- Mandate rail events (R2) ----------------------------------------------
+//
+// Six agent-rail events salt-api's MandateEventJob delivers, same as
+// card_interaction/invoice_paid -- a per-recipient, plaintext webhook POST
+// (X-Salt-Agent-Id names which of this process's identities it's for) whose
+// body carries `type` plus the mandate or exercise JSON verbatim (see
+// client.ts's Mandate/MandateExercise). None of these are chat messages, so
+// unlike onMessage/onChatOpened there is no `session`/`reply()` here -- act
+// on the mandate/exercise directly through `client.mandates`, or the ctx
+// helpers below, which are exactly that.
+
+export interface MandateOfferedContext {
+  identity: AgentIdentity;
+  mandate: Mandate;
+  /** Accepts THIS mandate (`client.mandates.accept`) -- binds this identity's current key
+   *  fingerprint and moves it to `active`. Call it, or don't: an offer left untouched just stays
+   *  `proposed` until someone accepts it or the 7-day proposal window lapses. */
+  accept(): Promise<Mandate>;
+}
+
+export interface MandateActivatedContext {
+  identity: AgentIdentity;
+  mandate: Mandate;
+}
+
+export interface MandatePausedContext {
+  identity: AgentIdentity;
+  mandate: Mandate;
+}
+
+export interface MandateRevokedContext {
+  identity: AgentIdentity;
+  mandate: Mandate;
+}
+
+export interface ApprovalRequestedContext {
+  identity: AgentIdentity;
+  exercise: MandateExercise;
+  /** Approve or deny the ask (`client.mandates.decide`). Fires only when THIS identity is the
+   *  mandate's principal (e.g. a governance mandate's `money.pay` ask on an owned agent's own
+   *  account) -- the delegate that made the original call gets `onApprovalDecided` instead, once
+   *  this resolves it one way or the other. */
+  decide(decision: "approve" | "deny", note?: string): Promise<MandateExercise>;
+}
+
+export interface ApprovalDecidedContext {
+  identity: AgentIdentity;
+  /** Already decided (`exercise.decision` is `"approved"` or `"denied"`) -- informational, so the
+   *  delegate that made the original ask-mode call can resume (or give up on) whatever it was
+   *  doing. */
+  exercise: MandateExercise;
+}
+
 export interface Logger {
   info(msg: string): void;
   error(msg: string): void;
@@ -329,6 +382,20 @@ export interface WebhookServerOptions {
   onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
+  /** A mandate was offered to this identity and is waiting to be accepted. See
+   *  MandateOfferedContext -- call `ctx.accept()` to accept it. */
+  onMandateOffered?: (ctx: MandateOfferedContext) => Promise<void> | void;
+  /** A mandate this identity is party to (either side) just became active. */
+  onMandateActivated?: (ctx: MandateActivatedContext) => Promise<void> | void;
+  /** A mandate this identity is party to was paused (e.g. the grantee's key changed). */
+  onMandatePaused?: (ctx: MandatePausedContext) => Promise<void> | void;
+  /** A mandate this identity is party to was revoked. */
+  onMandateRevoked?: (ctx: MandateRevokedContext) => Promise<void> | void;
+  /** This identity is the PRINCIPAL of an ask-mode call someone acting for it just made, and it's
+   *  waiting on a decision. See ApprovalRequestedContext -- call `ctx.decide("approve"|"deny")`. */
+  onApprovalRequested?: (ctx: ApprovalRequestedContext) => Promise<void> | void;
+  /** This identity made the original ask-mode call and its exercise was just decided. */
+  onApprovalDecided?: (ctx: ApprovalDecidedContext) => Promise<void> | void;
   /**
    * An incoming `[[SALT-IDENTITY-ASK]]` -- someone asking this identity to
    * share one or more of its own card sections. Return the subset of
@@ -1633,12 +1700,95 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  // Resolves which of this process's hosted identities a mandate/exercise event is FOR. The
+  // envelope's X-Salt-Agent-Id is authoritative (verifyEnvelope already checked the signature
+  // against that exact identity's own key, so it names a real recipient) -- the `candidateIds`
+  // fallback (party ids off the payload itself) only matters for a caller that runs the dispatcher
+  // directly with no header (e.g. a test, or a future transport that doesn't have one).
+  function resolveMandateIdentity(headerAgentId: SaltId | undefined, ...candidateIds: Array<SaltId | undefined>): AgentIdentity | undefined {
+    if (headerAgentId != null) {
+      const byHeader = identities.get(String(headerAgentId));
+      if (byHeader) return byHeader;
+    }
+    for (const id of candidateIds) {
+      if (id == null) continue;
+      const found = identities.get(String(id));
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  async function handleMandateOffered(body: { mandate: Mandate }, headerAgentId?: SaltId): Promise<void> {
+    const identity = resolveMandateIdentity(headerAgentId, body.mandate?.grantee?.id);
+    if (!identity || !options.onMandateOffered) return;
+    const mandate = body.mandate;
+    const ctx: MandateOfferedContext = {
+      identity,
+      mandate,
+      accept: () => client.mandates.accept(identity.apiKey, mandate.id),
+    };
+    try {
+      await options.onMandateOffered(ctx);
+    } catch (err) {
+      logger.error(`[mandate ${mandate.id}] onMandateOffered failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleMandateLifecycleEvent(
+    kind: "activated" | "paused" | "revoked",
+    body: { mandate: Mandate },
+    headerAgentId?: SaltId
+  ): Promise<void> {
+    const mandate = body.mandate;
+    const identity = resolveMandateIdentity(headerAgentId, mandate?.grantee?.id, mandate?.grantor?.id);
+    const handler = kind === "activated" ? options.onMandateActivated : kind === "paused" ? options.onMandatePaused : options.onMandateRevoked;
+    if (!identity || !handler) return;
+    try {
+      await (handler as (ctx: { identity: AgentIdentity; mandate: Mandate }) => Promise<void> | void)({ identity, mandate });
+    } catch (err) {
+      logger.error(`[mandate ${mandate.id}] onMandate${kind[0].toUpperCase()}${kind.slice(1)} failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleApprovalRequested(body: { exercise: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
+    const exercise = body.exercise;
+    const identity = resolveMandateIdentity(headerAgentId, exercise?.principal?.id);
+    if (!identity || !options.onApprovalRequested) return;
+    const ctx: ApprovalRequestedContext = {
+      identity,
+      exercise,
+      decide: (decision, note) => client.mandates.decide(identity.apiKey, exercise.id, decision, note),
+    };
+    try {
+      await options.onApprovalRequested(ctx);
+    } catch (err) {
+      logger.error(`[exercise ${exercise.id}] onApprovalRequested failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleApprovalDecided(body: { exercise: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
+    const exercise = body.exercise;
+    const identity = resolveMandateIdentity(headerAgentId, exercise?.actor?.id);
+    if (!identity || !options.onApprovalDecided) return;
+    try {
+      await options.onApprovalDecided({ identity, exercise });
+    } catch (err) {
+      logger.error(`[exercise ${exercise.id}] onApprovalDecided failed: ${(err as Error).message}`);
+    }
+  }
+
   async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);
     if (body?.type === "chat_opened") return handleChatOpened(body as never);
     if (body?.type === "handoff_confirmed") return handleHandoffConfirmed(body as never);
     if (body?.type === "handoff_received") return handleHandoffReceived(body as never);
+    if (body?.type === "mandate_offered") return handleMandateOffered(body as never, headerAgentId);
+    if (body?.type === "mandate_activated") return handleMandateLifecycleEvent("activated", body as never, headerAgentId);
+    if (body?.type === "mandate_paused") return handleMandateLifecycleEvent("paused", body as never, headerAgentId);
+    if (body?.type === "mandate_revoked") return handleMandateLifecycleEvent("revoked", body as never, headerAgentId);
+    if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
+    if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
