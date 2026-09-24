@@ -4,6 +4,7 @@
 // each identity's own api-key per call (a process can act as more than one
 // Salt agent: the primary identity, plus any it spawns via createAgent).
 
+import { randomUUID } from "node:crypto";
 import { sameId, type SaltId } from "./ids.js";
 import {
   parseCardSignatureHeader,
@@ -264,6 +265,167 @@ export type SpendGovernanceCode =
   | "request_failed_terminal"
   | "idempotency_key_reuse";
 
+// --- Mandates ("Acting for you", R1+R2) ------------------------------------
+//
+// A mandate is the authority one account (the grantee -- often an agent)
+// has to act with another account's (the grantor/principal's) authority,
+// scoped by capability. `client.actFor(principalId, {mandateId?})` below
+// returns a client that sends `X-Salt-Act-For`/`X-Salt-Mandate` on every
+// call it makes; salt-api's resolver decides allow/ask/refuse per call --
+// this SDK doesn't second-guess it. `client.mandates` is the separate,
+// always-as-yourself management surface: propose one, accept one offered to
+// you, read its trail, decide an open ask. See salt-api's Mandate model and
+// MandateExercise for the source of truth these types mirror.
+
+export type MandateKind = "explicit" | "governance" | "connection";
+export type MandateStatus = "proposed" | "active" | "paused" | "revoked" | "expired";
+export type MandateCapabilityMode = "auto" | "ask" | "notify";
+export type MandateExerciseDecision = "allowed" | "asked" | "approved" | "denied" | "refused" | "expired";
+
+export interface MandateParty {
+  id: SaltId;
+  username: string;
+  display_name: string;
+  account_type: "User" | "Agent";
+  avatar_url?: string;
+  [key: string]: unknown;
+}
+
+export interface MandateCapabilityRow {
+  id: SaltId;
+  capability: string;
+  /** e.g. `{chat_ids: [...]}`, `{wallet_ids: [...]}`, `{product_ids: [...]}`, or `{}` for "every one". */
+  selector: Record<string, unknown>;
+  mode: MandateCapabilityMode;
+  /** e.g. `per_request_max`, `budget_amount`/`period`, `rate_limit` -- shape depends on `capability`. */
+  constraints: Record<string, unknown>;
+}
+
+/** One `{capability, selector, mode, constraints}` row as sent to `propose`/`update` -- same shape as
+ *  MandateCapabilityRow minus the server-assigned `id`. */
+export interface MandateCapabilityInput {
+  capability: string;
+  selector?: Record<string, unknown>;
+  mode: MandateCapabilityMode;
+  constraints?: Record<string, unknown>;
+}
+
+export interface MandateTrail {
+  count: number;
+  today_count: number;
+  last_at?: string;
+  open_asks: number;
+}
+
+export interface MandateChild {
+  id: SaltId;
+  grantee: MandateParty;
+  label?: string;
+}
+
+/** A mandate row as served by `GET /api/v1/mandates`/`:id` and carried on `mandate_offered`/
+ *  `mandate_activated`/`mandate_paused`/`mandate_revoked` webhook events (see webhook.ts). */
+export interface Mandate {
+  id: SaltId;
+  kind: MandateKind;
+  status: MandateStatus;
+  label?: string;
+  grantor: MandateParty;
+  grantee: MandateParty;
+  capabilities: MandateCapabilityRow[];
+  starts_at: string;
+  expires_at?: string;
+  standing: boolean;
+  grantee_fingerprint?: string;
+  /** True when the grantee's current key no longer matches `grantee_fingerprint` -- salt-api pauses
+   *  the mandate the moment it notices (see `mandate_paused` with `pause_reason: "key_changed"`). */
+  key_changed?: boolean;
+  parent_id?: SaltId;
+  depth?: number;
+  version: number;
+  chat_id?: SaltId;
+  proposed_by_id?: SaltId;
+  accepted_at?: string;
+  paused_at?: string;
+  pause_reason?: string;
+  revoked_at?: string;
+  revoke_reason?: string;
+  children?: MandateChild[];
+  trail?: MandateTrail;
+  [key: string]: unknown;
+}
+
+/** One row of a mandate's trail -- an allowed act, an ask (settled or still open), or a refusal.
+ *  `refusal` is only ever populated for the principal (or its governor) -- see salt-api's
+ *  `MandateExercise#as_json_for`. */
+export interface MandateExercise {
+  id: SaltId | number;
+  mandate_id: SaltId;
+  capability: string;
+  action: string;
+  decision: MandateExerciseDecision;
+  reason?: string;
+  refusal?: string;
+  summary: Record<string, unknown>;
+  target?: { type?: string; id?: SaltId };
+  chat_id?: SaltId;
+  message_id?: SaltId;
+  actor: { id: SaltId; username: string; display_name: string; account_type: "User" | "Agent" };
+  principal: { id: SaltId; username: string };
+  created_at: string;
+  decided_at?: string;
+  expires_at?: string;
+  [key: string]: unknown;
+}
+
+export interface ProposeMandateParams {
+  grantee_id?: SaltId;
+  grantee_username?: string;
+  /** Only when proposing UP to a grantor rather than granting down (the caller becomes `proposed_by`). */
+  grantor_id?: SaltId;
+  label?: string;
+  capabilities: MandateCapabilityInput[];
+  standing?: boolean;
+  expires_at?: string;
+  parent_id?: SaltId;
+  chat_id?: SaltId;
+}
+
+export interface UpdateMandateParams {
+  /** Required: compare-and-swap against the mandate's current `version` -- a stale value is a 409. */
+  version: number;
+  label?: string;
+  capabilities?: MandateCapabilityInput[];
+  standing?: boolean;
+  expires_at?: string;
+}
+
+/**
+ * A 202 `{status: "asked", exercise_id, expires_at}` response, resolved rather than thrown --
+ * see `SaltClient.actFor` below. `isAsked` narrows an unknown result to this shape.
+ */
+export interface AskedResult {
+  asked: true;
+  exerciseId: SaltId;
+  expiresAt?: string;
+}
+
+export function isAsked(value: unknown): value is AskedResult {
+  return !!value && typeof value === "object" && (value as { asked?: unknown }).asked === true;
+}
+
+/** Maps a client method's `Promise<R>` to `Promise<R | AskedResult>` -- what every call through
+ *  `actFor`'s returned client can resolve to, since any mapped action can come back an ask
+ *  depending on how the grantor configured that capability's mode. Non-function properties (e.g.
+ *  `mandates`) and non-Promise-returning ones (e.g. `trackEvent`) pass through unchanged. */
+export type Acted<F> = F extends (...args: infer A) => Promise<infer R> ? (...args: A) => Promise<R | AskedResult> : F;
+
+export interface ActForOptions {
+  /** Pin one specific mandate rather than letting salt-api pick the strictest match among every
+   *  active mandate that grants the call. */
+  mandateId?: SaltId;
+}
+
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
@@ -287,11 +449,21 @@ export class SaltApiError extends Error {
  * module-level header, since one process can legitimately act as several
  * Salt agents at once.
  */
+/** Every client method's call shape -- `request<T>` itself, and `actingRequest`'s wrapper below,
+ *  both match this so `buildMethods` (further down) can be built from either one interchangeably. */
+type RequestFn = <T>(
+  method: string,
+  path: string,
+  apiKey: string,
+  body?: unknown,
+  opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
+) => Promise<T>;
+
 export function createSaltClient(options: SaltClientOptions) {
   const host = options.host.replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? fetch;
 
-  async function request<T>(
+  const request: RequestFn = async function request<T>(
     method: string,
     path: string,
     apiKey: string,
@@ -317,7 +489,37 @@ export function createSaltClient(options: SaltClientOptions) {
       throw new SaltApiError(method, url, res.status, parsed);
     }
     if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    const parsed = (await res.json()) as unknown;
+    // A mandate-governed call in "ask" mode never 4xx/5xxs and never throws --
+    // salt-api answers 202 `{status: "asked", exercise_id, expires_at}` instead
+    // (see actFor below). Reachable only through a call that actually carried
+    // X-Salt-Act-For; an ordinary (non-acting) call never gets asked, since
+    // authorize_acting! only runs when that header is present.
+    if (res.status === 202 && parsed && typeof parsed === "object" && (parsed as { status?: unknown }).status === "asked") {
+      const asked = parsed as { exercise_id: SaltId; expires_at?: string };
+      const result: AskedResult = { asked: true, exerciseId: asked.exercise_id, expiresAt: asked.expires_at };
+      return result as unknown as T;
+    }
+    return parsed as T;
+  };
+
+  /** `actFor`'s per-call header injection: `X-Salt-Act-For`/`X-Salt-Mandate` on everything, plus an
+   *  `Idempotency-Key` auto-generated for POST/PATCH when the caller didn't already supply one --
+   *  ask-mode calls need one to be safely retried, and every acting call is potentially ask-mode. */
+  function actingRequest(principalId: SaltId, mandateId: SaltId | undefined): RequestFn {
+    return function actingRequestFn<T>(
+      method: string,
+      path: string,
+      apiKey: string,
+      body?: unknown,
+      opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
+    ): Promise<T> {
+      const extraHeaders: Record<string, string> = { "X-Salt-Act-For": String(principalId), ...opts?.extraHeaders };
+      if (mandateId != null) extraHeaders["X-Salt-Mandate"] = String(mandateId);
+      const isWrite = method === "POST" || method === "PATCH";
+      const idempotencyKey = opts?.idempotencyKey ?? (isWrite ? randomUUID() : undefined);
+      return request<T>(method, path, apiKey, body, { extraHeaders, idempotencyKey });
+    };
   }
 
   async function whoAmI(apiKey: string): Promise<{ agent_id: SaltId; webhook_secret?: string }> {
@@ -370,7 +572,12 @@ export function createSaltClient(options: SaltClientOptions) {
     return signingKeysInFlight;
   }
 
-  return {
+  /** Builds the full method surface once per `request` implementation -- called once for the base
+   *  (as-yourself) client and again, with `actingRequest`'s header-injecting wrapper, from `actFor`
+   *  below. Every method here is written exactly as it always was; only the `request` it closes
+   *  over differs between the two callers. */
+  function buildMethods(request: RequestFn) {
+    return {
     /** A chat's members (with public keys), for encrypting a reply to everyone who should read it. */
     async getChatMembers(apiKey: string, chatId: SaltId): Promise<SaltUser[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
@@ -971,7 +1178,127 @@ export function createSaltClient(options: SaltClientOptions) {
     trackEvent(apiKey: string, name: string, properties: Record<string, unknown> = {}): void {
       request("POST", "/api/v1/events", apiKey, { name, properties }).catch(() => {});
     },
-  };
+
+    /**
+     * Prepares a governed payment for approval -- `money.pay`'s mode is FORCED to `ask`, so this
+     * always resolves to an `AskedResult`, never a Transfer, whether called through `actFor` or (in
+     * the unusual case of preparing your own payment) as yourself. Once the exercise is approved
+     * (see `mandates.decide`/`mandates.exercises`, or the `approval_decided` webhook event), settle
+     * it with `transfers#create`'s own `exercise_id` param (not exposed as a typed method here yet --
+     * salt-api validates the wallet/amount/destination against the exercise's summary before it will
+     * create the Transfer).
+     */
+    async prepareTransfer(
+      apiKey: string,
+      params: { walletId: SaltId; destinationAddress?: string; receiverId?: SaltId; amount: string | number; chain?: string; note?: string; chatId?: SaltId }
+    ): Promise<AskedResult> {
+      return request("POST", "/api/v1/transfers/prepare", apiKey, {
+        wallet_id: params.walletId,
+        destination_address: params.destinationAddress,
+        receiver_id: params.receiverId,
+        amount: params.amount,
+        chain: params.chain,
+        note: params.note,
+        chat_id: params.chatId,
+      });
+    },
+
+    // --- Mandates ("Acting for you") management -- always as yourself, never through actFor ---
+    mandates: {
+      /** Every mandate the caller is party to, as grantor and/or grantee. */
+      async list(apiKey: string, opts?: { role?: "grantor" | "grantee"; status?: MandateStatus }): Promise<{ mandates: Mandate[] }> {
+        const params = new URLSearchParams();
+        if (opts?.role) params.set("role", opts.role);
+        if (opts?.status) params.set("status", opts.status);
+        const qs = params.toString();
+        return request("GET", `/api/v1/mandates${qs ? `?${qs}` : ""}`, apiKey);
+      },
+
+      async get(apiKey: string, mandateId: SaltId): Promise<Mandate> {
+        return request("GET", `/api/v1/mandates/${mandateId}`, apiKey);
+      },
+
+      /** Grantor creates (a proposal the grantee must accept, or auto-active for an account the
+       *  caller governs), or a grantee proposes UP by passing `grantor_id` instead. */
+      async propose(apiKey: string, params: ProposeMandateParams): Promise<Mandate> {
+        return request("POST", "/api/v1/mandates", apiKey, params);
+      },
+
+      /** New version, compare-and-swap on `params.version` -- a 409 SaltApiError means it changed
+       *  under you; re-fetch with `get` and retry against the new version. */
+      async update(apiKey: string, mandateId: SaltId, params: UpdateMandateParams): Promise<Mandate> {
+        return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, params);
+      },
+
+      /** Grantee accepts an offered mandate (binds its current key fingerprint), or the grantor
+       *  activates one still `proposed` by the grantee. See `ctx.mandate.accept()` in webhook.ts,
+       *  which calls this for an incoming `mandate_offered` event. */
+      async accept(apiKey: string, mandateId: SaltId): Promise<Mandate> {
+        return request("POST", `/api/v1/mandates/${mandateId}/accept`, apiKey);
+      },
+
+      /** Standing mandates only: +90 days from now. */
+      async renew(apiKey: string, mandateId: SaltId): Promise<Mandate> {
+        return request("POST", `/api/v1/mandates/${mandateId}/renew`, apiKey);
+      },
+
+      async pause(apiKey: string, mandateId: SaltId, reason?: string): Promise<Mandate> {
+        return request("POST", `/api/v1/mandates/${mandateId}/pause`, apiKey, reason ? { reason } : undefined);
+      },
+
+      async resume(apiKey: string, mandateId: SaltId): Promise<Mandate> {
+        return request("POST", `/api/v1/mandates/${mandateId}/resume`, apiKey);
+      },
+
+      /** The grantor, or a governor of either side, can revoke -- cascades to any child mandates. */
+      async revoke(apiKey: string, mandateId: SaltId, reason?: string): Promise<Mandate> {
+        return request("POST", `/api/v1/mandates/${mandateId}/revoke`, apiKey, reason ? { reason } : undefined);
+      },
+
+      /** A mandate's trail, id-descending. `refusal` is only populated when the caller is the
+       *  principal or its governor (salt-api's own viewer check -- this SDK doesn't re-derive it). */
+      async exercises(apiKey: string, mandateId: SaltId, opts?: { before?: string | number; limit?: number }): Promise<{ exercises: MandateExercise[] }> {
+        const params = new URLSearchParams();
+        if (opts?.before != null) params.set("before", String(opts.before));
+        if (opts?.limit != null) params.set("limit", String(opts.limit));
+        const qs = params.toString();
+        return request("GET", `/api/v1/mandates/${mandateId}/exercises${qs ? `?${qs}` : ""}`, apiKey);
+      },
+
+      /** Every open ask (decision `"asked"`, not yet expired) the caller can decide right now. */
+      async openExercises(apiKey: string): Promise<{ exercises: MandateExercise[] }> {
+        return request("GET", "/api/v1/mandates/exercises/open", apiKey);
+      },
+
+      /** Approve or deny one open ask. See `ctx.approval.decide()` in webhook.ts, which calls this
+       *  for an incoming `approval_requested` event. */
+      async decide(apiKey: string, exerciseId: SaltId | number, decision: "approve" | "deny", note?: string): Promise<MandateExercise> {
+        return request("POST", `/api/v1/mandates/exercises/${exerciseId}/decide`, apiKey, { decision, note });
+      },
+    },
+    };
+  }
+
+  const baseMethods = buildMethods(request);
+
+  /**
+   * Returns a client bound to acting for `principalId`: every call it makes carries
+   * `X-Salt-Act-For: <principalId>` (and `X-Salt-Mandate: <mandateId>` when one is pinned), plus an
+   * auto-generated `Idempotency-Key` on every POST/PATCH that didn't already supply one. Same method
+   * surface as the ordinary client -- salt-api's own capability map decides what's actually allowed;
+   * this SDK doesn't maintain a second copy of that map. Any call can resolve to an `AskedResult`
+   * instead of its normal payload (never a thrown error) -- check with `isAsked(result)` before
+   * reading the normal fields. `mandates.*` is unaffected: mandate management is always done as
+   * yourself, never on someone else's behalf.
+   */
+  function actFor(
+    principalId: SaltId,
+    opts?: ActForOptions
+  ): { [K in keyof ReturnType<typeof buildMethods>]: Acted<ReturnType<typeof buildMethods>[K]> } {
+    return buildMethods(actingRequest(principalId, opts?.mandateId)) as never;
+  }
+
+  return { ...baseMethods, actFor };
 }
 
 export type SaltClient = ReturnType<typeof createSaltClient>;
