@@ -5,7 +5,53 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
-## 0.11.1
+## 0.12.0 — 2026-09-23
+
+### Added
+
+- **Mandates R2: `client.actFor(principalId, {mandateId?})`.** Returns a
+  client with the SAME method surface as the ordinary one (built from the
+  same `buildMethods` implementations, just a different `request` closure),
+  except every call it makes carries `X-Salt-Act-For: <principalId>` (and
+  `X-Salt-Mandate: <mandateId>` when one is pinned), plus an
+  auto-generated `Idempotency-Key` on any POST/PATCH that didn't already
+  supply one -- an ask-mode call needs to be safely retried, and any
+  mapped action can come back an ask depending on how the grantor
+  configured that capability. The delegate's own api-key is still passed
+  per call, exactly like the base client -- `actFor` only adds headers, it
+  never substitutes whose key authenticates the request. A call's return
+  type is `Promise<R | AskedResult>` for every method (`Acted<F>`); check
+  `isAsked(result)` before reading the normal fields. An ask-mode 202
+  `{status: "asked", exercise_id, expires_at}` resolves to
+  `{asked: true, exerciseId, expiresAt}` and never throws. The base
+  (non-acting) client is untouched -- it never sends either header and
+  never sees a 202 (salt-api's resolver only runs the ask/mandate
+  machinery when `X-Salt-Act-For` is present at all).
+- **`client.mandates`**: `list`/`get`/`propose`/`update`/`accept`/`renew`/
+  `pause`/`resume`/`revoke`/`exercises`/`openExercises`/`decide` -- always
+  as yourself, never through `actFor` (mandate management isn't itself a
+  mapped capability). New types `Mandate`, `MandateCapabilityRow`,
+  `MandateExercise`, `MandateParty`, `MandateTrail`, `MandateChild`,
+  `ProposeMandateParams`, `UpdateMandateParams` mirror salt-api's wire
+  shapes.
+- **`client.prepareTransfer`** (`POST /transfers/prepare`): `money.pay`'s
+  mode is forced to `ask`, so this always resolves an `AskedResult`, never
+  a Transfer -- settle it with `transfers#create`'s own `exercise_id` once
+  the exercise is approved.
+- **Six new webhook event types**, same rail as
+  `card_interaction`/`invoice_paid` (a per-recipient plaintext POST,
+  `X-Salt-Agent-Id` names which hosted identity it's for):
+  `onMandateOffered` (`ctx.mandate`, `ctx.accept()` --
+  `client.mandates.accept` under this identity's own key),
+  `onMandateActivated`/`onMandatePaused`/`onMandateRevoked` (`ctx.mandate`,
+  informational), `onApprovalRequested` (delivered to the mandate's
+  PRINCIPAL when it's an agent -- `ctx.exercise`, `ctx.decide("approve" |
+  "deny", note?)`), `onApprovalDecided` (delivered to the DELEGATE that
+  made the original ask-mode call -- `ctx.exercise`, informational only,
+  no further action). None of these carry `session`/`reply()` -- they
+  aren't chat messages, they're mandate/exercise state changes.
+
+
 
 - `identity.share()` is the grant: a section the agent scoped to nobody is shareable, and the share is what admits that recipient (salt-api 0.87.0). The local refusal remains only for a key the agent has never stated.
 - The ledger POST carries no claimed scope; salt-api records the narrowest real scope after the grant. `PostIdentityDisclosureParams.scope` is optional.
