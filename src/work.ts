@@ -18,8 +18,10 @@
 //   What's the forecast for Lisbon tomorrow?
 //
 // Line 1 is the marker: `id` names one piece of work across its reports,
-// `status` is running | waiting | done | failed, `kind` (delegation | task)
-// and `with` (a handle, for a delegation) are optional. Line 2 is a short
+// `status` is running | waiting | done | failed | scheduled, `kind`
+// (delegation | task) and `with` (a handle, for a delegation) are optional;
+// `scheduled` work (set to happen later, e.g. a reminder) carries
+// `due=<ISO 8601 UTC>` so the panel says when it is due. Line 2 is a short
 // title. Anything after is detail. The web app's parser lives in salt-fe
 // `src/utilities/work.js`; keep the two in step.
 
@@ -29,10 +31,10 @@ import * as pgp from "./crypto";
 import type { AgentIdentity } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
 
-export type WorkStatus = "running" | "waiting" | "done" | "failed";
+export type WorkStatus = "running" | "waiting" | "done" | "failed" | "scheduled";
 export type WorkKind = "delegation" | "task";
 
-export const WORK_STATUSES: readonly WorkStatus[] = ["running", "waiting", "done", "failed"];
+export const WORK_STATUSES: readonly WorkStatus[] = ["running", "waiting", "done", "failed", "scheduled"];
 export const WORK_KINDS: readonly WorkKind[] = ["delegation", "task"];
 
 export const MAX_WORK_TITLE = 140;
@@ -46,11 +48,14 @@ export interface WorkReport {
   with?: string;
   title: string;
   detail?: string;
+  /** When scheduled work comes due, ISO 8601 UTC. */
+  due?: string;
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const HANDLE_RE = /^[A-Za-z0-9_.-]{1,40}$/;
 const MARKER_RE = /^\[\[SALT-WORK ([^\]\n]*)\]\]\n?/;
+const DUE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
 
 /** A fresh id for one piece of work. */
 export function newWorkId(): string {
@@ -68,6 +73,7 @@ export function formatWorkReport(report: WorkReport): string {
   if (report.kind && WORK_KINDS.includes(report.kind)) attrs.push(`kind=${report.kind}`);
   const handle = (report.with || "").replace(/^@/, "");
   if (handle && HANDLE_RE.test(handle)) attrs.push(`with=${handle}`);
+  if (report.due && DUE_RE.test(report.due)) attrs.push(`due=${report.due}`);
   const title = oneLine(report.title, MAX_WORK_TITLE);
   if (!title) throw new Error("A work report needs a title.");
   const detail = (report.detail || "").trim().slice(0, MAX_WORK_DETAIL);
@@ -89,6 +95,7 @@ export function parseWorkReport(plaintext: string): WorkReport | null {
   const report: WorkReport = { id: attrs.id, status, title: (title || "").trim() };
   if (WORK_KINDS.includes(attrs.kind as WorkKind)) report.kind = attrs.kind as WorkKind;
   if (attrs.with && HANDLE_RE.test(attrs.with)) report.with = attrs.with;
+  if (attrs.due && DUE_RE.test(attrs.due) && !Number.isNaN(Date.parse(attrs.due))) report.due = attrs.due;
   const detail = rest.join("\n").trim();
   if (detail) report.detail = detail;
   return report;

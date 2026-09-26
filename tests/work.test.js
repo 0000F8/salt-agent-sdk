@@ -146,3 +146,10 @@ test("delegate_to_agent reports running then done to the person the turn answers
   assert.match(reported.id, /^w_/);
   assert.strictEqual(client.posted[client.posted.length - 1].opts.quiet, false);
 });
+
+test("scheduled work carries its due time both ways, and a malformed due is left out", () => {
+  const text = sdk.formatWorkReport({ id: "wake-1", status: "scheduled", title: "Reminder: woof woof", due: "2026-09-26T02:45:00Z" });
+  assert.strictEqual(text, "[[SALT-WORK id=wake-1 status=scheduled due=2026-09-26T02:45:00Z]]\nReminder: woof woof");
+  assert.deepStrictEqual(sdk.parseWorkReport(text), { id: "wake-1", status: "scheduled", title: "Reminder: woof woof", due: "2026-09-26T02:45:00Z" });
+  assert.ok(!sdk.formatWorkReport({ id: "w", status: "scheduled", title: "x", due: "tomorrow" }).includes("due="));
+});
