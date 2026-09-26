@@ -87,6 +87,30 @@ export interface CardBlock {
   [key: string]: unknown;
 }
 
+/** One recorded tap on a card's button, as `getCard` returns it -- newest
+ *  first. `transfer_request_id`/`transfer_request_status` are present only
+ *  for a tap that created a real payment request (a "pay" button), and the
+ *  status is read LIVE by the server, never a snapshot from tap time. */
+export interface CardInteraction {
+  id: string;
+  user_id: SaltId;
+  action_id: string;
+  value?: unknown;
+  created_at: string;
+  transfer_request_id?: SaltId;
+  transfer_request_status?: string;
+}
+
+/** `getCard`'s response shape: the card's raw state (as its owner sees it --
+ *  `state.private` included, unlike the per-viewer projection every other
+ *  member gets in chat payloads) plus its tap history. */
+export interface CardWithInteractions {
+  id: SaltId;
+  state: { blocks: CardBlock[]; [key: string]: unknown };
+  owner_id: SaltId;
+  interactions: CardInteraction[];
+}
+
 export interface InvoiceLineItem {
   name: string;
   qty: number;
@@ -957,6 +981,30 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Replace an owned card's blocks -- re-broadcasts into everyone's bubble live. */
     async updateCard(apiKey: string, cardId: SaltId, blocks: CardBlock[]): Promise<unknown> {
       return request("PATCH", `/api/v1/cards/${cardId}`, apiKey, { blocks });
+    },
+
+    /**
+     * `GET /api/v1/cards/:id` -- a card's OWNER polling its own tap history
+     * instead of the agent's socket-mode outbox, which has exactly ONE
+     * forward-only cursor per agent: two concurrent pollers (or one running
+     * beside a socket listener) can otherwise silently consume each other's
+     * answers. Polling this instead is idempotent and shares nothing across
+     * callers -- any number of concurrent asks.
+     *
+     * Owner-only: `apiKey` must belong to the card's owner or this rejects
+     * with `SaltApiError` status 404 -- byte-identical to an unknown
+     * `cardId`, never 403 (a chat member already sees the card in the chat
+     * and gets nothing new from this endpoint).
+     *
+     * `options.after` is either another interaction's id or an ISO 8601
+     * timestamp and returns only newer rows; an unrecognised value fails
+     * OPEN (the full list comes back, still 200) rather than rejecting.
+     */
+    async getCard(apiKey: string, cardId: SaltId, options?: { after?: string }): Promise<CardWithInteractions> {
+      const path = options?.after
+        ? `/api/v1/cards/${cardId}?after=${encodeURIComponent(options.after)}`
+        : `/api/v1/cards/${cardId}`;
+      return request("GET", path, apiKey);
     },
 
     // --- Commerce (products, invoices, prepaid credits) ---

@@ -5,6 +5,26 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.12.1 — 2026-09-26
+
+### Added
+
+- **`client.getCard(apiKey, cardId, {after?})`** (`GET /api/v1/cards/:id`,
+  salt-api 0.96.0): a card's OWNER polling its own tap history instead of
+  the agent's socket-mode outbox, which has exactly one forward-only
+  cursor per agent -- two concurrent pollers (or one running beside a
+  socket listener) can otherwise silently consume each other's answers.
+  Returns `CardWithInteractions` (`{id, state, owner_id, interactions}`);
+  a "pay" tap's interaction carries a live `transfer_request_status`, not
+  a snapshot from tap time. `after` (another interaction's id or an ISO
+  8601 timestamp) pages forward; an unrecognised value fails open (the
+  full list, still 200) rather than rejecting. Rejects with
+  `SaltApiError` status 404 -- never 403, byte-identical to an unknown
+  `cardId` -- for anyone but the owner. A client method, not an agent
+  action: unlike `post_card`/`update_card` it isn't meant to be called by
+  the agent's own model, so it carries no `actions.ts` entry (and needs
+  no salt-mcp annotation).
+
 ## 0.12.0 — 2026-09-23
 
 ### Added
