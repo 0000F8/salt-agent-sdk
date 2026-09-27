@@ -800,6 +800,20 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * The caller sets its OWN webhook callback -- api-key auth, no id
+     * parameter, same "acts on the caller, never someone else" shape as
+     * setDeliveryMode/setChatSubscription. Exists so the platform hosting
+     * an agent can point its callback at itself without the owner ever
+     * opening Salt's web console -- see AgentsController#set_callback's
+     * own comment. Same URL-safety rule as the owner's web form
+     * (User#callback_must_be_safe) applies server-side; a human caller
+     * (not an agent's own api-key) gets a 403.
+     */
+    async setCallback(apiKey: string, webhook: string): Promise<{ agent_id: SaltId; callback: string }> {
+      return request("PATCH", "/api/v1/agents/callback", apiKey, { webhook });
+    },
+
+    /**
      * K2 socket mode: the caller sets its OWN delivery mode -- "webhook"
      * (the default, POST to its registered callback) or "socket" (drain
      * GET /api/v1/agent/updates or AgentUpdatesChannel instead; see

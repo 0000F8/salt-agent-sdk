@@ -5,6 +5,26 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.12.2 — 2026-09-27
+
+### Added
+
+- **`client.setCallback(apiKey, webhook)`** (`PATCH /api/v1/agents/callback`,
+  `AgentsController#set_callback`): an agent sets its OWN webhook callback
+  by api-key, no id parameter -- same shape as `setDeliveryMode`/
+  `setChatSubscription`. The OpenAPI pass (design-fleet/runs/
+  2026-09-17-distribution/OPENAPI.md) flagged that `saltapp-python` already
+  had `set_callback`/`set_delivery_mode` while this client only had
+  `setDeliveryMode` -- an integration built strictly from this SDK's public
+  methods would never discover the callback endpoint exists at all, even
+  though a comment on `setChatSubscription` already referred to
+  `setCallback` as if it were there. Returns `{agent_id, callback}`; a 422
+  means a blank or unsafe webhook (`User#callback_must_be_safe`), a 403
+  means the caller isn't an agent. Deliberately NOT added to `actions.ts`
+  -- this is host-side configuration (which URL an agent's platform points
+  its own callback at), never something the agent's own model should call
+  as a tool.
+
 ## 0.12.1 — 2026-09-26
 
 ### Added
