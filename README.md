@@ -693,7 +693,7 @@ either side beyond exposing both tools.
 
 | Module | Exports | What it's for |
 |---|---|---|
-| `client.ts` | `createSaltClient({host})` | Typed REST client for every salt-api endpoint (messages, chats, agents, cards, products/invoices/credits, wallets, hand-offs, typing, metrics, identity, mandates). `client.actFor(principalId, {mandateId?})` (`AskedResult`, `isAsked`) and `client.mandates` -- see **Acting for someone**, above. |
+| `client.ts` | `createSaltClient({host})` | Typed REST client for every salt-api endpoint (messages, chats, agents, cards, products/invoices/credits, wallets, hand-offs, typing, metrics, identity, mandates, apps). `client.actFor(principalId, {mandateId?})` (`AskedResult`, `isAsked`) and `client.mandates` -- see **Acting for someone**, above. `client.apps` (`AppStateConflictError`) -- see **Apps in chats**, below. |
 | `crypto.ts` | `decrypt`, `encryptFor`, `generateKeypair`, `encryptWalletPayload`, `decryptAttachment` | PGP message crypto, wallet-payload crypto, attachment decryption. |
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
@@ -710,7 +710,7 @@ either side beyond exposing both tools.
 
 ## Webhook event types
 
-`createWebhookServer` routes twelve kinds of events, each to its own
+`createWebhookServer` routes thirteen kinds of events, each to its own
 optional callback — only implement the ones you need:
 
 - **`onMessage(ctx)`** — an ordinary chat message this identity should
@@ -728,6 +728,14 @@ optional callback — only implement the ones you need:
   a card update *is* the response, so nothing is persisted from this call
   even if you write to `session.note`). Respond by calling
   `client.updateCard` yourself.
+- **`onAppAction(ctx)`** — a reader called `salt.ask` from inside an app
+  this identity is the installation's agent for (see **Apps in chats**,
+  below). `ctx`: `identity`, `installationId`, `app` (`{id, name,
+  version}`), `chatId` (null for a personal "Your apps" installation —
+  `reply()` then has nowhere to post and fails soft), `text`, `data?`,
+  `stateVersion`, `sender`, `reply(text)`. Unlike `onCardInteraction`, this
+  carries no `session` — read/write the installation's own state with
+  `client.apps.state`/`setState` instead.
 - **`onInvoicePaid(ctx)`** — an invoice you issued got paid; this is your
   fulfillment trigger. `ctx`: `identity`, `chatId`, `buyer`, `lineItems`,
   `amount`, `isTopUp`, `transferRequestId`, `session`, `reply(text)`.
@@ -771,14 +779,17 @@ optional callback — only implement the ones you need:
 None of the mandate events above carry `session`/`reply()`/`ask()` — they
 aren't chat messages, they're state changes on a mandate or an exercise.
 
-Every context above except `onCardInteraction` and the six mandate events
-carries `session`, and
+Every context above except `onCardInteraction`, `onAppAction`, and the six
+mandate events carries `session`, and
 whatever you `reply()` with is appended as an assistant turn and persisted
 after your handler returns — by the next `onMessage` call for that chat,
 it's already in `session.transcriptTail`. Every one of those same contexts
 also carries `ask(question, opts)` and `approve(summary, opts)` — see
 **`ctx.ask` / `ctx.approve`**, above — and `shareIdentity(keys, opts?)` —
-see **Identity: share, ask, revoke**, above.
+see **Identity: share, ask, revoke**, above. `onAppAction` has `reply()`
+but no `session`/`ask()`/`approve()`/`shareIdentity()` — an app's own state
+(`client.apps.state`/`setState`) is where its memory lives, not a chat
+session.
 
 Two more callbacks, `onIdentityAsk`/`onIdentityShared`, aren't a *seventh*
 kind of event — they intercept an ordinary message whose plaintext is a
@@ -837,6 +848,66 @@ and every commerce action need no such branch, since they were already
 plain JSON on any chat. `onChatOpened`'s `ctx.encrypted` (from
 `chat.encrypted`, defaulted `true`) says the same thing about a freshly
 opened chat, for a first greeting.
+
+## Apps in chats
+
+An **app** is a small single-file HTML page an agent (or a person) writes
+and installs somewhere — a chat, or the installer's own "Your apps" space
+(`chatId` null). This SDK's part is narrow: manage the app/version/
+installation/state records and receive the one webhook an installed app's
+`salt.ask` produces. Rendering the app itself (a sandboxed iframe hitting
+`GET /api/app_frames/:version_id`, with a `window.salt` bridge injected) is
+entirely salt-fe/salt-api's job — nothing in this SDK renders HTML.
+
+```js
+// Build an app for whoever you're talking to and drop it in this chat.
+const { app, version, installation } = await client.apps.create(identity.apiKey, {
+  name: "Shopping list",
+  description: "A shared list this chat can check off together.",
+  html: shoppingListHtml,
+  chatId: ctx.chatId,
+});
+
+// Ship a fix -- existing installations keep running their OWN pinned
+// version until someone chooses Update.
+await client.apps.newVersion(identity.apiKey, app.id, fixedHtml);
+
+// Read/write an installation's shared state directly (e.g. answering an
+// onAppAction ask by changing the data rather than replying in the chat).
+const { doc, version: stateVersion } = await client.apps.state(identity.apiKey, installation.id);
+try {
+  await client.apps.setState(identity.apiKey, installation.id, { ...doc, done: true }, stateVersion);
+} catch (err) {
+  if (err instanceof AppStateConflictError) {
+    // err.doc / err.version are the CURRENT doc -- merge your change onto
+    // it and retry with err.version, rather than re-fetching first.
+  } else {
+    throw err;
+  }
+}
+```
+
+`client.apps`:
+
+| Method | Calls | Notes |
+|---|---|---|
+| `create(apiKey, {name, description?, html, forId?, chatId?})` | `POST /api/v1/apps` | `forId` builds it for someone else (they must share a chat with you, else 422); `chatId` also installs it there, same transaction. Returns `{app, version, installation?}`. |
+| `newVersion(apiKey, appId, html)` | `POST /api/v1/apps/:id/versions` | Owner or builder only. Never changes an existing installation on its own. |
+| `get(apiKey, appId)` | `GET /api/v1/apps/:id` | Metadata, latest version, owner/builder. |
+| `install(apiKey, appId, {chatId?, copyStateFrom?})` | `POST /api/v1/apps/:id/install` | No `chatId` installs personally. A second active install of the same app in one chat 409s with the existing one. |
+| `installations(apiKey, {chatId?})` | `GET /api/v1/app_installations?chat_id=` or `/mine` | With `chatId`: that chat's installations. Without: your personal ones plus every chat one you're in. |
+| `state(apiKey, installationId)` | `GET /api/v1/app_installations/:id/state` | `{doc, version}`. |
+| `setState(apiKey, installationId, doc, ifVersion)` | `PUT /api/v1/app_installations/:id/state` | Compare-and-swap. A 409 throws `AppStateConflictError` (`.doc`/`.version` — the CURRENT state, straight off the response) instead of an ordinary `SaltApiError`. |
+
+`onAppAction(ctx)` (see **Webhook event types**, above) is how the
+installation's own agent hears about `salt.ask` calls from inside the
+running app — a person tapping "add" in a shopping-list app, say.
+`ctx.reply(text)` posts into the chat (a no-op, logged, for a personal
+installation, which has no chat); the more common answer is changing the
+shared data with `client.apps.state`/`setState` so `salt.state.subscribe`
+pushes the update to everyone with the app open, live, with no reply at
+all. Works identically under webhook and socket mode, like every other
+event this SDK dispatches.
 
 ## Reference implementations
 
