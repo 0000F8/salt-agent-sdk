@@ -46,13 +46,29 @@ test("apps.create posts name/description/html plus for_id/chat_id (snake_case) a
   assert.deepStrictEqual(out, result);
 });
 
-test("apps.create omits for_id/chat_id when not given", async () => {
+test("apps.create omits for_id/chat_id/actions when not given", async () => {
   const fetchImpl = recordingFetch(() => jsonResponse(200, { app: {}, version: {} }));
   const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
 
   await client.apps.create("agent-key", { name: "Notes", html: "<html></html>" });
   assert.strictEqual(fetchImpl.calls[0].body.for_id, undefined);
   assert.strictEqual(fetchImpl.calls[0].body.chat_id, undefined);
+  assert.strictEqual("actions" in fetchImpl.calls[0].body, false);
+});
+
+test("apps.create posts actions ({id, label, input?}) verbatim, and the response's version.actions round-trips untouched", async () => {
+  const actions = [
+    { id: "add", label: "Add item", input: { placeholder: "What do you need?" } },
+    { id: "clear", label: "Clear list" },
+  ];
+  const result = { app: { id: "app-1", name: "Notes" }, version: { id: "ver-1", number: 1, actions } };
+  const fetchImpl = recordingFetch(() => jsonResponse(200, result));
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  const out = await client.apps.create("agent-key", { name: "Notes", html: "<html></html>", actions });
+
+  assert.deepStrictEqual(fetchImpl.calls[0].body.actions, actions);
+  assert.deepStrictEqual(out.version.actions, actions);
 });
 
 test("apps.newVersion posts html to /apps/:id/versions", async () => {
@@ -64,7 +80,20 @@ test("apps.newVersion posts html to /apps/:id/versions", async () => {
   assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/apps/app-1/versions");
   assert.strictEqual(fetchImpl.calls[0].method, "POST");
   assert.deepStrictEqual(fetchImpl.calls[0].body, { html: "<html>v2</html>" });
+  assert.strictEqual("actions" in fetchImpl.calls[0].body, false, "no actions arg given -- the key must be absent, not null");
   assert.deepStrictEqual(out, result);
+});
+
+test("apps.newVersion posts its (optional) fourth actions arg, replacing whatever the prior version had", async () => {
+  const actions = [{ id: "reset", label: "Start over" }];
+  const result = { app: { id: "app-1" }, version: { id: "ver-3", number: 3, actions } };
+  const fetchImpl = recordingFetch(() => jsonResponse(200, result));
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  const out = await client.apps.newVersion("agent-key", "app-1", "<html>v3</html>", actions);
+  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/apps/app-1/versions");
+  assert.deepStrictEqual(fetchImpl.calls[0].body, { html: "<html>v3</html>", actions });
+  assert.deepStrictEqual(out.version.actions, actions);
 });
 
 test("apps.get fetches /apps/:id", async () => {
@@ -88,6 +117,27 @@ test("apps.install posts chat_id/copy_state_from (snake_case) to /apps/:id/insta
   assert.strictEqual(fetchImpl.calls[0].method, "POST");
   assert.deepStrictEqual(fetchImpl.calls[0].body, { chat_id: "chat-1", copy_state_from: "inst-old" });
   assert.deepStrictEqual(out, installation);
+});
+
+test("apps.install's returned installation carries the pinned version's actions, flattened and nested, both untouched", async () => {
+  const actions = [{ id: "add", label: "Add item", input: { placeholder: "What do you need?" } }];
+  const installation = { id: "inst-4", chat_id: "chat-1", actions, version: { id: "ver-1", number: 1, actions } };
+  const fetchImpl = recordingFetch(() => jsonResponse(200, installation));
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  const out = await client.apps.install("agent-key", "app-1", { chatId: "chat-1" });
+  assert.deepStrictEqual(out.actions, actions);
+  assert.deepStrictEqual(out.version.actions, actions);
+});
+
+test("apps.installations rows carry actions too, when the server sends them", async () => {
+  const actions = [{ id: "reset", label: "Start over" }];
+  const rows = [{ id: "inst-5", chat_id: "chat-1", actions }];
+  const fetchImpl = recordingFetch(() => jsonResponse(200, rows));
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  const out = await client.apps.installations("agent-key", { chatId: "chat-1" });
+  assert.deepStrictEqual(out[0].actions, actions);
 });
 
 test("apps.install with no params installs personally (empty body, chat_id absent)", async () => {
