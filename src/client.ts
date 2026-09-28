@@ -131,6 +131,106 @@ export interface CardWithInteractions {
   interactions: CardInteraction[];
 }
 
+// --- Apps in chats (contract 2026-09-28, §1/§3) ----------------------------
+//
+// A small single-file HTML page an agent (or a person) writes, installed
+// into a chat or into the installer's own "Your apps" space. The html
+// itself never travels through this client -- an installed app RUNS from
+// `GET /api/app_frames/:version_id` (a public, sandboxed-iframe route, not
+// part of this SDK's surface) with `window.salt` (the bridge) injected;
+// this client only manages the app/version/installation/state records.
+
+export interface AppPerson {
+  id: SaltId;
+  username: string;
+  display_name: string;
+}
+
+/** A version's identity as it rides on an app's metadata, a `newVersion` response, or a chat resource -- never the html itself (fetch that via the app_frames route, keyed by `id`). */
+export interface AppVersionRef {
+  id: SaltId;
+  number: number;
+}
+
+/** An app's metadata -- `GET /api/v1/apps/:id`, the App Store listing, and `/mine`. */
+export interface AppSummary {
+  id: SaltId;
+  name: string;
+  description?: string;
+  listed?: boolean;
+  installs_count?: number;
+  latest_version_id?: SaltId | null;
+  /** Present on the single-app GET -- the latest version's {id, number}. */
+  version?: AppVersionRef;
+  owner?: AppPerson;
+  built_by?: AppPerson | null;
+  [key: string]: unknown;
+}
+
+export interface CreateAppParams {
+  name: string;
+  description?: string;
+  html: string;
+  /** An agent building FOR a person -- that person must share a chat with the caller, else 422. Omit to build for the caller itself. */
+  forId?: SaltId;
+  /** Installs the new app into this chat in the same transaction (caller must be a member). */
+  chatId?: SaltId;
+}
+
+/** `AppInstallation#as_chat_resource` -- what a chat message's `resource` carries for `resource_type: "AppInstallation"`, and what `create`/`install` return. */
+export interface AppInstallation {
+  id: SaltId;
+  app_id?: SaltId;
+  app_version_id?: SaltId;
+  installed_by_id?: SaltId;
+  /** Null for a personal ("Your apps") installation. */
+  chat_id?: SaltId | null;
+  /** The agent that answers this installation's `ask` -- null when it has none. */
+  agent_id?: SaltId | null;
+  removed_at?: string | null;
+  app?: { id: SaltId; name: string; description?: string; owner?: AppPerson; built_by?: AppPerson | null };
+  version?: AppVersionRef;
+  latest_number?: number;
+  [key: string]: unknown;
+}
+
+export interface CreateAppResult {
+  app: AppSummary;
+  version: AppVersionRef;
+  /** Present only when `chatId` was given -- installed in the same transaction. */
+  installation?: AppInstallation;
+}
+
+export interface InstallAppParams {
+  chatId?: SaltId;
+  /** Another installation of the SAME app the caller can read -- copies its doc once into the new installation's state. */
+  copyStateFrom?: SaltId;
+}
+
+/** `GET`/`PUT .../state`'s shape -- also `.../mine`'s (the viewer's private doc), same CAS rules. */
+export interface AppStateDoc {
+  doc: Record<string, unknown>;
+  version: number;
+}
+
+/**
+ * Thrown by `setState` on a 409 -- the installation's shared state moved
+ * under the caller since `ifVersion`. Carries the CURRENT `{doc, version}`
+ * straight off the response body (salt-api's own 409 payload), so a caller
+ * can merge its change onto the fresh doc and retry with the new version
+ * rather than spending a second round trip just to re-fetch first.
+ */
+export class AppStateConflictError extends Error {
+  doc: Record<string, unknown>;
+  version: number;
+  constructor(doc: Record<string, unknown>, version: number) {
+    super("App state changed under you -- merge onto the current doc and retry with its version.");
+    this.name = "AppStateConflictError";
+    this.doc = doc;
+    this.version = version;
+  }
+}
+
 export interface InvoiceLineItem {
   name: string;
   qty: number;
@@ -1356,6 +1456,95 @@ export function createSaltClient(options: SaltClientOptions) {
        *  for an incoming `approval_requested` event. */
       async decide(apiKey: string, exerciseId: SaltId | number, decision: "approve" | "deny", note?: string): Promise<MandateExercise> {
         return request("POST", `/api/v1/mandates/exercises/${exerciseId}/decide`, apiKey, { decision, note });
+      },
+    },
+
+    // --- Apps in chats (contract 2026-09-28, §1) ---
+    apps: {
+      /**
+       * Creates an app + version 1. `forId` builds it for someone else (that
+       * person must share a chat with the caller, else 422); omitted, the
+       * app belongs to the caller. `chatId` also installs it there in the
+       * same transaction (caller must be a member) -- see `installation` on
+       * the result.
+       */
+      async create(apiKey: string, params: CreateAppParams): Promise<CreateAppResult> {
+        return request("POST", "/api/v1/apps", apiKey, {
+          name: params.name,
+          description: params.description,
+          html: params.html,
+          for_id: params.forId,
+          chat_id: params.chatId,
+        });
+      },
+
+      /**
+       * Publishes a new immutable version (owner or builder only) and moves
+       * the app's `latest_version_id` to it. Never changes an existing
+       * installation on its own -- each keeps running its own pinned
+       * version until it calls `update`, below.
+       */
+      async newVersion(apiKey: string, appId: SaltId, html: string): Promise<{ app: AppSummary; version: AppVersionRef }> {
+        return request("POST", `/api/v1/apps/${appId}/versions`, apiKey, { html });
+      },
+
+      /** An app's metadata: owner, builder, latest version -- and, once listed, what the App Store shows. */
+      async get(apiKey: string, appId: SaltId): Promise<AppSummary> {
+        return request("GET", `/api/v1/apps/${appId}`, apiKey);
+      },
+
+      /**
+       * Installs `appId` -- into `chatId` (caller must be a non-observer
+       * member; a second active install of the same app there 409s with the
+       * existing installation instead of creating a duplicate) or, with no
+       * `chatId`, into the caller's own personal space ("Your apps").
+       * `copyStateFrom` copies another readable installation's doc into the
+       * new one once.
+       */
+      async install(apiKey: string, appId: SaltId, params?: InstallAppParams): Promise<AppInstallation> {
+        const body: Record<string, unknown> = {};
+        if (params?.chatId) body.chat_id = params.chatId;
+        if (params?.copyStateFrom) body.copy_state_from = params.copyStateFrom;
+        return request("POST", `/api/v1/apps/${appId}/install`, apiKey, body);
+      },
+
+      /**
+       * This identity's installations: every one in `chatId` (chat members
+       * only) when given, else its own personal installations plus every
+       * chat installation in a chat it's a member of. Cache-busted -- an
+       * install just made should show up immediately.
+       */
+      async installations(apiKey: string, opts?: { chatId?: SaltId }): Promise<AppInstallation[]> {
+        const path = opts?.chatId
+          ? `/api/v1/app_installations?chat_id=${encodeURIComponent(String(opts.chatId))}&_=${Date.now()}`
+          : `/api/v1/app_installations/mine?_=${Date.now()}`;
+        return request("GET", path, apiKey);
+      },
+
+      /** The installation's shared state doc and its CAS version. Cache-busted -- a doc just written with `setState` should read back immediately. */
+      async state(apiKey: string, installationId: SaltId): Promise<AppStateDoc> {
+        return request("GET", `/api/v1/app_installations/${installationId}/state?_=${Date.now()}`, apiKey);
+      },
+
+      /**
+       * Compare-and-swap write of the installation's shared state doc. A 409
+       * (the doc moved under the caller since `ifVersion`) is never handed
+       * back as a bare SaltApiError -- it's re-thrown as
+       * AppStateConflictError carrying the CURRENT `{doc, version}` straight
+       * off the response body, so a caller can merge its change onto the
+       * fresh doc and retry with the new version in one more call rather
+       * than round-tripping to re-fetch first.
+       */
+      async setState(apiKey: string, installationId: SaltId, doc: Record<string, unknown>, ifVersion: number): Promise<AppStateDoc> {
+        try {
+          return await request("PUT", `/api/v1/app_installations/${installationId}/state`, apiKey, { doc, if_version: ifVersion });
+        } catch (err) {
+          if (err instanceof SaltApiError && err.status === 409) {
+            const body = err.body as { doc?: Record<string, unknown>; version?: number } | undefined;
+            throw new AppStateConflictError(body?.doc ?? {}, typeof body?.version === "number" ? body.version : ifVersion);
+          }
+          throw err;
+        }
       },
     },
     };
