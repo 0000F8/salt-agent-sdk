@@ -84,11 +84,14 @@ const BLOCKS_SCHEMA: JsonSchema = {
     '{type:"section", text?:"markdown <=2000", fields?:[{label:"<=40",value:"<=160"}] (<=10)} | ' +
     '{type:"divider"} | ' +
     '{type:"image", url:"http(s) <=500", alt?} | ' +
+    '{type:"input", block_id:"a-z0-9_- <=40, unique across the whole card", label:"1-40", ' +
+    'placeholder?:"<=40", multiline?:bool, max_length?:"1-1000, default 500"} | ' +
     '{type:"actions", elements:[1-5 of {type:"button", action_id:"a-z0-9_- <=40, unique", label:"<=40", ' +
     'style?:"primary"|"danger", action_type?:"default"|"pay", pay?:{amount:"base units string", currency}, ' +
     'restricted_to?:[user_id,...] (<=20, must be real members of this chat)}]}. ' +
     "Buttons with action_type 'pay' become real Salt payment requests handled by the app itself; " +
-    "all other buttons come back as card_interaction events. Every chat member can tap a button by " +
+    "all other buttons come back as card_interaction events carrying every input block's current " +
+    "value (keyed by block_id) alongside the tapped action_id. Every chat member can tap a button by " +
     "default -- set restricted_to on any button that shouldn't be that open (delete, restart, admin " +
     "actions, a purchase meant for one specific person). Everyone still sees the button; anyone not " +
     "on the list sees it locked and can't invoke it, server-enforced.",
