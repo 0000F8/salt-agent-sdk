@@ -28,6 +28,7 @@ import { sameId, type SaltId } from "./ids.js";
 import { reconcileIdentityIds } from "./reconcile";
 import * as sessions from "./sessions";
 import type { Session, SessionStore, SessionTurn } from "./sessions";
+import { parseWorkCancel } from "./work";
 
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
@@ -142,6 +143,26 @@ export interface MessageContext {
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
 }
 
+/** An incoming `[[SALT-WORK-CANCEL id=...]]` (work.ts) -- the person
+ *  cancelling a `scheduled` report, sent as a whole message into the same
+ *  lane the report came from. Always intercepted before `onMessage`, same
+ *  as a SALT-IDENTITY-SLICE/DECLINE/REVOKE (there's no "ordinary text"
+ *  reading of a bare cancel marker). See WebhookServerOptions.onWorkCancel. */
+export interface WorkCancelContext {
+  identity: AgentIdentity;
+  /** The work id named by the marker. */
+  workId: string;
+  /** The chat the cancelled work came from -- matches work.ts's
+   *  WorkTarget.chatId (the room, not the lane the cancel arrived in). */
+  chatId: SaltId;
+  /** The lane chat this cancel message actually arrived in -- the same
+   *  sidechain the report it's cancelling was posted into. Equal to
+   *  `chatId` when, unusually, the cancel didn't arrive inside a lane. */
+  laneId: SaltId;
+  /** Whoever sent the cancel -- the person the work was for. */
+  sender: RawSender;
+}
+
 export interface CardInteractionContext {
   identity: AgentIdentity;
   chatId: SaltId;
@@ -149,6 +170,11 @@ export interface CardInteractionContext {
   actionId: string;
   user: RawSender;
   blocks: unknown;
+  /** Every `input` block's current value at tap time, keyed by `block_id`
+   *  (NEW) -- `{}` when the card has no input blocks or the tapped button
+   *  ignored them (pay/handoff buttons always do). See client.ts's
+   *  InputCardBlock / CardInteraction.values. */
+  values: Record<string, string>;
   /** This identity's memory of `chatId` (see MessageContext.session). Loaded
    *  before this handler runs, same as everywhere else -- but there's no
    *  reply() here (a card update IS the response), so nothing is appended
@@ -417,6 +443,16 @@ export interface WebhookServerOptions {
    * under the same id first. See identityShare.ts's IdentitySharedEvent.
    */
   onIdentityShared?: IdentitySharedHandler;
+  /**
+   * An incoming `[[SALT-WORK-CANCEL id=...]]` (work.ts) -- always
+   * intercepted, never reaches `onMessage`, whether or not this is set. The
+   * usual answer is a fresh report under the same id with
+   * `status: "cancelled"` (see `createWorkReporter`'s `report`, or
+   * `client.postMessage` directly for a lower-level answer). Leave unset
+   * and a cancel is silently swallowed rather than answered -- the sender
+   * still never sees the marker itself.
+   */
+  onWorkCancel?: (ctx: WorkCancelContext) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -1290,6 +1326,24 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       }
     }
 
+    // Cancel (work.ts's [[SALT-WORK-CANCEL id=...]]): the person cancelling
+    // a scheduled report of theirs, sent as a whole message into the lane
+    // that report was posted into. Wire protocol, never a prompt -- always
+    // intercepted, whether or not onWorkCancel is set, same as a SLICE/
+    // DECLINE/REVOKE above (there's no "ordinary text" reading of it).
+    const cancelWorkId = parseWorkCancel(caption);
+    if (cancelWorkId) {
+      if (options.onWorkCancel) {
+        const cancelRoomId: SaltId = (chatMeta?.coaching_for_chat_id as SaltId) || chatId;
+        try {
+          await options.onWorkCancel({ identity, workId: cancelWorkId, chatId: cancelRoomId, laneId: chatId, sender: senderRaw });
+        } catch (err) {
+          logger.error(`[chat ${chatId}] onWorkCancel failed: ${(err as Error).message}`);
+        }
+      }
+      return;
+    }
+
     // Mediated Chat: this identity is the configured Mediator, and this
     // message is in the SHARED chat it silently observes -- present for
     // context, but it only actually speaks in each human's own private
@@ -1430,6 +1484,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     action_id: string;
     user: RawSender;
     state?: { blocks?: unknown };
+    /** Every `input` block's current value at tap time, keyed by `block_id`
+     *  (NEW) -- absent or `{}` when the card has none. */
+    values?: Record<string, string>;
   }): Promise<void> {
     // A tap answering a pending ctx.ask's own card is wire-level bookkeeping
     // for ask.ts, never something the consumer's onCardInteraction should
@@ -1451,6 +1508,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         actionId: body.action_id,
         user: body.user,
         blocks: body.state?.blocks,
+        values: body.values || {},
         session,
       });
     } catch (err) {
