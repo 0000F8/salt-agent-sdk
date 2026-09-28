@@ -146,10 +146,33 @@ export interface AppPerson {
   display_name: string;
 }
 
+/** One placeholder text field a quick action collects before it's sent -- omitted, the action has no input and its `label` alone is the ask's `text`. */
+export interface AppQuickActionInput {
+  placeholder?: string;
+}
+
+/**
+ * A small "quick tap" a version declares alongside its html -- rendered as
+ * a chip/button beside the running app (e.g. `AppMessage.jsx`) that calls
+ * `salt.ask` bound to `id`, using `label` as the ask's text (or, with
+ * `input` set, whatever one line the person typed into that field).
+ * Versioned exactly like the html itself: a new version's `actions`
+ * replace the prior version's for any installation that later updates to
+ * it -- an installation still pinned to an older version keeps that
+ * version's own `actions`.
+ */
+export interface AppQuickAction {
+  id: string;
+  label: string;
+  input?: AppQuickActionInput;
+}
+
 /** A version's identity as it rides on an app's metadata, a `newVersion` response, or a chat resource -- never the html itself (fetch that via the app_frames route, keyed by `id`). */
 export interface AppVersionRef {
   id: SaltId;
   number: number;
+  /** This version's quick actions, if it declared any -- see AppQuickAction. */
+  actions?: AppQuickAction[];
 }
 
 /** An app's metadata -- `GET /api/v1/apps/:id`, the App Store listing, and `/mine`. */
@@ -175,6 +198,8 @@ export interface CreateAppParams {
   forId?: SaltId;
   /** Installs the new app into this chat in the same transaction (caller must be a member). */
   chatId?: SaltId;
+  /** Version 1's quick actions -- see AppQuickAction. */
+  actions?: AppQuickAction[];
 }
 
 /** `AppInstallation#as_chat_resource` -- what a chat message's `resource` carries for `resource_type: "AppInstallation"`, and what `create`/`install` return. */
@@ -191,6 +216,8 @@ export interface AppInstallation {
   app?: { id: SaltId; name: string; description?: string; owner?: AppPerson; built_by?: AppPerson | null };
   version?: AppVersionRef;
   latest_number?: number;
+  /** The PINNED version's quick actions, flattened here (same values as `version.actions`) so a chat bubble can render them without a nested lookup. */
+  actions?: AppQuickAction[];
   [key: string]: unknown;
 }
 
@@ -1475,17 +1502,20 @@ export function createSaltClient(options: SaltClientOptions) {
           html: params.html,
           for_id: params.forId,
           chat_id: params.chatId,
+          actions: params.actions,
         });
       },
 
       /**
        * Publishes a new immutable version (owner or builder only) and moves
-       * the app's `latest_version_id` to it. Never changes an existing
-       * installation on its own -- each keeps running its own pinned
-       * version until it calls `update`, below.
+       * the app's `latest_version_id` to it. `actions` (omitted: none)
+       * replace whatever the PRIOR version declared -- they don't merge.
+       * Never changes an existing installation on its own -- each keeps
+       * running its own pinned version (and that version's own `actions`)
+       * until it calls `update`, below.
        */
-      async newVersion(apiKey: string, appId: SaltId, html: string): Promise<{ app: AppSummary; version: AppVersionRef }> {
-        return request("POST", `/api/v1/apps/${appId}/versions`, apiKey, { html });
+      async newVersion(apiKey: string, appId: SaltId, html: string, actions?: AppQuickAction[]): Promise<{ app: AppSummary; version: AppVersionRef }> {
+        return request("POST", `/api/v1/apps/${appId}/versions`, apiKey, { html, actions });
       },
 
       /** An app's metadata: owner, builder, latest version -- and, once listed, what the App Store shows. */

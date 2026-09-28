@@ -861,16 +861,21 @@ entirely salt-fe/salt-api's job — nothing in this SDK renders HTML.
 
 ```js
 // Build an app for whoever you're talking to and drop it in this chat.
+// `actions` are optional "quick tap" chips the app frame is shown beside --
+// each calls salt.ask bound to its own id, with `input` (when set)
+// collecting one line of text first.
 const { app, version, installation } = await client.apps.create(identity.apiKey, {
   name: "Shopping list",
   description: "A shared list this chat can check off together.",
   html: shoppingListHtml,
   chatId: ctx.chatId,
+  actions: [{ id: "add", label: "Add item", input: { placeholder: "What do you need?" } }],
 });
 
 // Ship a fix -- existing installations keep running their OWN pinned
-// version until someone chooses Update.
-await client.apps.newVersion(identity.apiKey, app.id, fixedHtml);
+// version (and that version's own `actions`) until someone chooses Update.
+// A new version's `actions` replace the prior version's; omit to drop them.
+await client.apps.newVersion(identity.apiKey, app.id, fixedHtml, version.actions);
 
 // Read/write an installation's shared state directly (e.g. answering an
 // onAppAction ask by changing the data rather than replying in the chat).
@@ -891,13 +896,20 @@ try {
 
 | Method | Calls | Notes |
 |---|---|---|
-| `create(apiKey, {name, description?, html, forId?, chatId?})` | `POST /api/v1/apps` | `forId` builds it for someone else (they must share a chat with you, else 422); `chatId` also installs it there, same transaction. Returns `{app, version, installation?}`. |
-| `newVersion(apiKey, appId, html)` | `POST /api/v1/apps/:id/versions` | Owner or builder only. Never changes an existing installation on its own. |
+| `create(apiKey, {name, description?, html, forId?, chatId?, actions?})` | `POST /api/v1/apps` | `forId` builds it for someone else (they must share a chat with you, else 422); `chatId` also installs it there, same transaction; `actions` (`AppQuickAction[]`) is version 1's quick-tap chips. Returns `{app, version, installation?}`. |
+| `newVersion(apiKey, appId, html, actions?)` | `POST /api/v1/apps/:id/versions` | Owner or builder only. `actions` replace the prior version's (omit to drop them, don't merge). Never changes an existing installation on its own. |
 | `get(apiKey, appId)` | `GET /api/v1/apps/:id` | Metadata, latest version, owner/builder. |
 | `install(apiKey, appId, {chatId?, copyStateFrom?})` | `POST /api/v1/apps/:id/install` | No `chatId` installs personally. A second active install of the same app in one chat 409s with the existing one. |
 | `installations(apiKey, {chatId?})` | `GET /api/v1/app_installations?chat_id=` or `/mine` | With `chatId`: that chat's installations. Without: your personal ones plus every chat one you're in. |
 | `state(apiKey, installationId)` | `GET /api/v1/app_installations/:id/state` | `{doc, version}`. |
 | `setState(apiKey, installationId, doc, ifVersion)` | `PUT /api/v1/app_installations/:id/state` | Compare-and-swap. A 409 throws `AppStateConflictError` (`.doc`/`.version` — the CURRENT state, straight off the response) instead of an ordinary `SaltApiError`. |
+
+`AppQuickAction` (`{id, label, input?: {placeholder}}`) is exported from
+`client.ts`. It rides on `AppVersionRef.actions` (an app's metadata, a
+`newVersion` response) and, flattened, on `AppInstallation.actions` (the
+PINNED version's own actions, for a chat bubble or the standalone
+workspace to render without a nested lookup) — both optional, both `[]`
+when the version declared none.
 
 `onAppAction(ctx)` (see **Webhook event types**, above) is how the
 installation's own agent hears about `salt.ask` calls from inside the
