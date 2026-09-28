@@ -183,6 +183,38 @@ export interface CardInteractionContext {
   session: Session;
 }
 
+// --- Apps in chats (contract 2026-09-28, §1/§3/§7) --------------------------
+//
+// An `app_action` webhook fires once, to the installation's OWN agent only
+// (never broadcast to every chat member the way a message webhook is),
+// whenever a reader calls `salt.ask` from inside the app's sandboxed
+// iframe -- `POST /api/v1/app_installations/:id/ask`. Plaintext, like
+// card_interaction/invoice_paid, and delivered through the same
+// ApplicationJob#deliver_to_agent! rail (delivery id, retries,
+// WebhookDelivery.record!) -- but unlike those two, salt-api never names
+// the receiving identity anywhere IN the body (no owner_id/seller_id here),
+// so X-Salt-Agent-Id is the only way this SDK knows which hosted identity
+// it's for -- same resolution as the mandate rail events further down.
+
+export interface AppActionContext {
+  identity: AgentIdentity;
+  installationId: SaltId;
+  /** The app's identity and the PINNED version number this installation was running at ask time -- not necessarily the app's latest published version. */
+  app: { id: SaltId; name: string; version: number };
+  /** Null for a personal ("Your apps") installation -- `reply()` then has nothing to post into and fails soft (logged), the same way `salt.post` on the bridge side rejects with "Not in a chat." */
+  chatId: SaltId | null;
+  /** The ask's own text (1..2000, salt-api-enforced). */
+  text: string;
+  /** The ask's optional structured payload (≤ 16 KB, salt-api-enforced). */
+  data?: Record<string, unknown>;
+  /** The shared state's `version` at ask time -- a snapshot, not a lock; read fresh with `client.apps.state` (or just `setState`'s own conflict) before writing. */
+  stateVersion: number;
+  /** Whoever tapped `salt.ask` inside the app. */
+  sender: RawSender;
+  /** Encrypts `text` for every current chat member (+ this identity's own copy) and posts it -- same closure every other context type gets. A no-op (logged) on a personal installation, which has no chat to post into. */
+  reply(text: string): Promise<void>;
+}
+
 export interface InvoicePaidContext {
   identity: AgentIdentity;
   chatId: SaltId;
@@ -404,6 +436,15 @@ export interface WebhookServerOptions {
   logger?: Logger;
   onMessage?: (ctx: MessageContext) => Promise<void> | void;
   onCardInteraction?: (ctx: CardInteractionContext) => Promise<void> | void;
+  /**
+   * Someone tapped `salt.ask` inside an app this identity is the
+   * installation's agent for (`POST /api/v1/app_installations/:id/ask`) --
+   * see AppActionContext. The usual answer is `client.apps.state`/
+   * `setState` (change the shared data) and/or `ctx.reply` (say something
+   * in the chat); `salt.ask`'s own promise on the app side resolves as soon
+   * as the webhook is accepted, regardless of what this handler does.
+   */
+  onAppAction?: (ctx: AppActionContext) => Promise<void> | void;
   onInvoicePaid?: (ctx: InvoicePaidContext) => Promise<void> | void;
   onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
@@ -1516,6 +1557,59 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function handleAppAction(
+    body: {
+      installation_id: SaltId;
+      app: { id: SaltId; name: string; version: number };
+      chat_id?: SaltId | null;
+      text: string;
+      data?: Record<string, unknown>;
+      state_version: number;
+      user: RawSender;
+    },
+    headerAgentId?: SaltId
+  ): Promise<void> {
+    // No owner_id/seller_id in this body to fall back on (unlike
+    // card_interaction/invoice_paid) -- X-Salt-Agent-Id is the only signal,
+    // same as the mandate rail events further down. verifyEnvelope already
+    // proved the signature against that exact identity's own key.
+    const identity = headerAgentId != null ? identities.get(String(headerAgentId)) : undefined;
+    if (!identity || !options.onAppAction) return;
+
+    const chatId = body.chat_id ?? null;
+    // A personal ("Your apps") installation has no chat at all -- nothing
+    // for a reply to post into, same as salt.post's "Not in a chat."
+    // rejection on the bridge side. Fails soft (logged), the same
+    // convention every other reply() failure in this file follows.
+    const reply =
+      chatId != null
+        ? makeReply(identity, chatId)
+        : async (_text: string): Promise<void> => {
+            logger.error(`[app ${body.installation_id}] reply() has no chat -- this is a personal installation.`);
+          };
+
+    const ctx: AppActionContext = {
+      identity,
+      installationId: body.installation_id,
+      app: body.app,
+      chatId,
+      text: body.text,
+      data: body.data,
+      stateVersion: body.state_version,
+      sender: body.user,
+      reply,
+    };
+    try {
+      if (chatId != null) {
+        await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onAppAction!(ctx)));
+      } else {
+        await options.onAppAction(ctx);
+      }
+    } catch (err) {
+      logger.error(`[app ${body.installation_id}] onAppAction failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleInvoicePaid(body: {
     seller_id: SaltId;
     chat_id?: SaltId;
@@ -1837,6 +1931,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
 
   async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
+    if (body?.type === "app_action") return handleAppAction(body as never, headerAgentId);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);
     if (body?.type === "chat_opened") return handleChatOpened(body as never);
     if (body?.type === "handoff_confirmed") return handleHandoffConfirmed(body as never);
