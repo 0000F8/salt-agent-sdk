@@ -153,3 +153,42 @@ test("scheduled work carries its due time both ways, and a malformed due is left
   assert.deepStrictEqual(sdk.parseWorkReport(text), { id: "wake-1", status: "scheduled", title: "Reminder: woof woof", due: "2026-09-26T02:45:00Z" });
   assert.ok(!sdk.formatWorkReport({ id: "w", status: "scheduled", title: "x", due: "tomorrow" }).includes("due="));
 });
+
+test("cancelled is a real status, and a recurring schedule's repeat round-trips, tolerantly", () => {
+  const cancelled = sdk.formatWorkReport({ id: "wake-1", status: "cancelled", title: "Reminder: woof woof" });
+  assert.strictEqual(cancelled, "[[SALT-WORK id=wake-1 status=cancelled]]\nReminder: woof woof");
+  assert.deepStrictEqual(sdk.parseWorkReport(cancelled), { id: "wake-1", status: "cancelled", title: "Reminder: woof woof" });
+
+  const recurring = sdk.formatWorkReport({
+    id: "routine-9",
+    status: "scheduled",
+    title: "Reminder: daily brief",
+    due: "2026-09-28T08:00:00Z",
+    repeat: "daily",
+  });
+  assert.strictEqual(recurring, "[[SALT-WORK id=routine-9 status=scheduled due=2026-09-28T08:00:00Z repeat=daily]]\nReminder: daily brief");
+  assert.deepStrictEqual(sdk.parseWorkReport(recurring), {
+    id: "routine-9",
+    status: "scheduled",
+    title: "Reminder: daily brief",
+    due: "2026-09-28T08:00:00Z",
+    repeat: "daily",
+  });
+
+  // Unknown repeat values are ignored (tolerant parse), both directions.
+  assert.ok(!sdk.formatWorkReport({ id: "w", status: "scheduled", title: "x", repeat: "fortnightly" }).includes("repeat="));
+  const parsed = sdk.parseWorkReport("[[SALT-WORK id=w_1 status=scheduled repeat=fortnightly]]\nx");
+  assert.strictEqual(parsed.repeat, undefined);
+});
+
+test("parseWorkCancel reads the person's [[SALT-WORK-CANCEL id=...]] and refuses everything else", () => {
+  assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK-CANCEL id=w_3f9a2c]]"), "w_3f9a2c");
+  assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK-CANCEL id=wake-1]]\n"), "wake-1", "a trailing newline is tolerated");
+  assert.strictEqual(sdk.parseWorkCancel("  [[SALT-WORK-CANCEL id=w_1]]  "), "w_1", "surrounding whitespace is tolerated");
+
+  assert.strictEqual(sdk.parseWorkCancel(""), null);
+  assert.strictEqual(sdk.parseWorkCancel("hello"), null);
+  assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK-CANCEL id=bad id]]"), null, "an invalid id character never matches");
+  assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK-CANCEL id=w_1]] extra text"), null, "a cancel is a WHOLE message, nothing riding alongside it");
+  assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK id=w_1 status=cancelled]]\nx"), null, "a work REPORT of status cancelled is not the cancel marker");
+});

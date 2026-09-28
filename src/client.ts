@@ -87,15 +87,35 @@ export interface CardBlock {
   [key: string]: unknown;
 }
 
+/** The `input` block (NEW): one text field. `block_id` must be unique
+ *  across the whole card (including private blocks), `[a-z0-9_-]{1,40}`.
+ *  Tapping any `default` button in the same card sends every input block's
+ *  current value alongside the action -- see `CardInteractionContext.values`
+ *  / `CardInteraction.values`, keyed by `block_id`. A plain object satisfies
+ *  `CardBlock` already; this is here for callers who want the shape typed. */
+export interface InputCardBlock extends CardBlock {
+  type: "input";
+  block_id: string;
+  label: string;
+  placeholder?: string;
+  multiline?: boolean;
+  /** 1..1000, defaults to 500 server-side when omitted. */
+  max_length?: number;
+}
+
 /** One recorded tap on a card's button, as `getCard` returns it -- newest
  *  first. `transfer_request_id`/`transfer_request_status` are present only
  *  for a tap that created a real payment request (a "pay" button), and the
- *  status is read LIVE by the server, never a snapshot from tap time. */
+ *  status is read LIVE by the server, never a snapshot from tap time.
+ *  `values` (NEW) carries whatever the card's `input` blocks held at tap
+ *  time, keyed by `block_id` -- `{}` when the card has none or the tapped
+ *  button ignored them (pay/handoff buttons always do). */
 export interface CardInteraction {
   id: string;
   user_id: SaltId;
   action_id: string;
   value?: unknown;
+  values?: Record<string, string>;
   created_at: string;
   transfer_request_id?: SaltId;
   transfer_request_status?: string;

@@ -437,6 +437,19 @@ yourself with `createWorkReporter(client).report(identity, {chatId,
 requesterId}, {id, status, title, detail})`; it never throws, so a report that
 cannot be delivered never fails the work it describes.
 
+Two more statuses round it out: `scheduled` (set to happen later, e.g. a
+reminder -- carries `due` and, optionally, `repeat: "hourly" | "daily" |
+"weekdays" | "weekly" | "monthly"` for a recurring one) and `cancelled`. A
+person cancels a `scheduled` report from Salt's web app by sending a whole
+message, `[[SALT-WORK-CANCEL id=w_3f9a2c]]`, into the same lane the report
+came from -- `onWorkCancel({identity, workId, chatId, laneId, sender})` on
+`createWebhookServer`/`createSocketClient` intercepts it before it would
+otherwise reach `onMessage` (there's no ordinary-text reading of a bare
+cancel marker, so it's swallowed even with no handler registered). The
+usual answer is a fresh report under the same id with `status: "cancelled"`.
+`chatId` is the room the work came from (matches `WorkTarget.chatId`);
+`laneId` is the actual lane chat the cancel arrived in.
+
 `execute` fires a `tool_used` metrics beacon and throws a plain `Error`
 with a model-readable message on bad input — catch it and hand
 `err.message` back as the tool result, same as any other tool-calling loop.
@@ -685,7 +698,7 @@ either side beyond exposing both tools.
 | `identities.ts` | `createIdentityStore(path?)` | Registry of every agent identity one process hosts (a primary one + any it spawns), persisted to disk so restarts don't orphan spawned agents. `store.reassignId(from, to)` moves one to the id salt-api now uses for it. |
 | `reconcile.ts` | `reconcileIdentityIds(store, client, logger?)` | Asks salt-api (`client.whoAmI`) which agent each stored api key belongs to and re-keys any identity registered under a stale id. Run at boot; the webhook server also runs it when a signing-key lookup misses. |
 | `delegations.ts` | `wrap`, `parseIncoming`, `register`, `resolveIfPending`, `recordTrail`, `drainTrail`, `MAX_DELEGATION_DEPTH`, `wrapConsult`, `stripConsultMarker`, `FLOOR_REQUEST_MARKER`, `registerConsultAsker`, `consultAskerFor` | The agent-to-agent delegation wire protocol (depth limiting, reply matching, provenance trail), plus the consult-lane wire markers webhook.ts and actions.ts share. |
-| `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format). |
+| `work.ts` | `createWorkReporter(client)`, `formatWorkReport`, `parseWorkReport`, `parseWorkCancel`, `newWorkId` | Private progress reports to the person an agent works for, in the lane they share (the `[[SALT-WORK …]]` wire format, statuses including `scheduled`/`cancelled` and an optional `repeat`); `parseWorkCancel` reads the person's `[[SALT-WORK-CANCEL id=…]]` reply, wired into `createDispatcher`'s `onWorkCancel` below. |
 | `sessions.ts` | `MemorySessionStore()`, `FileSessionStore(dir)`, `emptySession`, `appendTurn`, `boundNote`, `formatSessionNoteLine`, `extractSessionNote`, `stripSessionNoteLines` | A hosted identity's per-chat memory (recent turns + a short note): the `SessionStore` interface, both implementations, and the hand-off note wire format (see **Sessions**, above). |
 | `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a websocket push connection instead. |
 | `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
@@ -783,9 +796,15 @@ code ever runs. You only decide *what to say*.
 
 `post_card`/`update_card` (via `actions`) or `client.postCard`/`updateCard`
 directly take a `blocks` array following the shared vocabulary: `section`,
-`divider`, `image`, and `actions` (button rows, including `action_type:
-"pay"` buttons that become real Salt payment requests). See the parent
-repo's `CARD_PROTOCOL_SPEC.md` for the full spec.
+`divider`, `image`, `input` (NEW -- a text field, `{block_id, label,
+placeholder?, multiline?, max_length?}`; see `InputCardBlock` in
+`client.ts`), and `actions` (button rows, including `action_type: "pay"`
+buttons that become real Salt payment requests). Tapping any `default`
+button sends every `input` block's current value alongside the action --
+`onCardInteraction`'s `ctx.values` (`{}` when the card has none), keyed by
+`block_id`; `getCard`'s `interactions` carry the same shape as
+`CardInteraction.values`. See the parent repo's `CARD_PROTOCOL_SPEC.md` for
+the full spec.
 
 ## Open rooms
 
