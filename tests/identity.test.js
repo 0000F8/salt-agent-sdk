@@ -341,6 +341,34 @@ test("identity_set only forwards known claim keys and notes a claim is not a pro
   assert.match(result.note, /not verified as true/i);
 });
 
+test("identity_set forwards capabilities as a trimmed list of {title, detail?}", async () => {
+  const client = fakeIdentityClient();
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "k1", publicKey: "pub" };
+
+  await actions.execute(
+    "identity_set",
+    { capabilities: [{ title: " Builds plugins ", detail: " Lists and polls. " }, { title: "Remembers what matters", detail: "" }] },
+    caller,
+    { depth: 0, mainChatId: null }
+  );
+
+  assert.deepStrictEqual(client.setCalls[0].claims, {
+    capabilities: [{ title: "Builds plugins", detail: "Lists and polls." }, { title: "Remembers what matters" }],
+  });
+});
+
+test("identity_set refuses more than five capabilities or one without a title", async () => {
+  const client = fakeIdentityClient();
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "", publicWebhookUrl: "" });
+  const caller = { saltAppId: "agent-1", apiKey: "k1", publicKey: "pub" };
+  const six = Array.from({ length: 6 }, (_, i) => ({ title: `Thing ${i}` }));
+
+  await assert.rejects(actions.execute("identity_set", { capabilities: six }, caller, { depth: 0, mainChatId: null }), /at most 5/);
+  await assert.rejects(actions.execute("identity_set", { capabilities: [{ detail: "no title" }] }, caller, { depth: 0, mainChatId: null }), /needs a title/);
+  assert.strictEqual(client.setCalls.length, 0);
+});
+
 test("identity_set throws when no known section is provided", async () => {
   const client = fakeIdentityClient();
   const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "", publicWebhookUrl: "" });

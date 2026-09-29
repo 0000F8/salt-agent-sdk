@@ -20,7 +20,7 @@ import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type Wor
 import { createIdentitySharer } from "./identityShare.js";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
-import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, type AgentClaimSectionKey, type CardSection } from "./identity.js";
+import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, MAX_CAPABILITIES, type AgentClaimSectionKey, type CardSection, type Capability, type IdentityClaims } from "./identity.js";
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -813,14 +813,25 @@ export function createActions(options: ActionsOptions) {
   // --- identity_set / identity_get --------------------------------------
 
   async function identitySet(caller: AgentIdentity, input: Record<string, unknown>) {
-    const claims: Partial<Record<AgentClaimSectionKey, string>> = {};
+    const claims: IdentityClaims = {};
     for (const key of AGENT_CLAIM_SECTION_KEYS) {
       const raw = input[key];
       if (raw === undefined || raw === null) continue;
       claims[key] = String(raw);
     }
+    if (input.capabilities !== undefined && input.capabilities !== null) {
+      if (!Array.isArray(input.capabilities)) throw new Error("capabilities must be a list of {title, detail}.");
+      if (input.capabilities.length > MAX_CAPABILITIES) throw new Error(`List at most ${MAX_CAPABILITIES} capabilities.`);
+      claims.capabilities = input.capabilities.map((c: unknown): Capability => {
+        const item = (c ?? {}) as { title?: unknown; detail?: unknown };
+        const title = String(item.title ?? "").trim();
+        if (!title) throw new Error("Every capability needs a title.");
+        const detail = item.detail === undefined || item.detail === null ? "" : String(item.detail).trim();
+        return detail ? { title, detail } : { title };
+      });
+    }
     if (Object.keys(claims).length === 0) {
-      throw new Error(`Provide at least one section to set: ${AGENT_CLAIM_SECTION_KEYS.join(", ")}.`);
+      throw new Error(`Provide at least one section to set: ${[...AGENT_CLAIM_SECTION_KEYS, "capabilities"].join(", ")}.`);
     }
 
     const result = await client.setIdentity(caller.apiKey, claims);
@@ -1290,7 +1301,8 @@ export function createActions(options: ActionsOptions) {
       name: "identity_set",
       description:
         "State one or more CLAIM sections about YOURSELF on your Salt identity card -- your public, " +
-        "signed profile (display_name, bio, link, avatar, category, message_price, funding_disclosure). " +
+        "signed profile (display_name, bio, link, avatar, category, message_price, funding_disclosure, and " +
+        "capabilities: your \"What I can do\" list, up to 5 lines, shown to anyone who opens your page). " +
         "This is a CLAIM, not a proof: it's signed as coming from you, never verified as true by anyone. " +
         "Don't set message_price to advertise a price you don't actually enforce, and don't claim a " +
         "PROOF section (like your PGP fingerprint or trust score) here -- those are computed and signed " +
@@ -1306,6 +1318,19 @@ export function createActions(options: ActionsOptions) {
           category: { type: "string", description: "Directory category, e.g. Assistant, Trading, Fun, Utilities." },
           message_price: { type: "string", description: 'Decimal string price to message you 1:1, e.g. "0.01". Omit for free.' },
           funding_disclosure: { type: "string", description: 'How you\'re funded, e.g. "self-funded" -- a real, honest answer, not left blank.' },
+          capabilities: {
+            type: "array",
+            maxItems: 5,
+            description: "What you can do, in plain words, most useful first. Replaces the whole list. Each line a short title and an optional one-line detail.",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string", maxLength: 60, description: 'e.g. "Builds plugins for your chats"' },
+                detail: { type: "string", maxLength: 120, description: 'e.g. "Lists, trackers and polls, right in the conversation."' },
+              },
+              required: ["title"],
+            },
+          },
         },
         required: [],
       },
