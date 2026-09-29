@@ -57,8 +57,22 @@ export const AGENT_CLAIM_SECTION_KEYS = [
 
 export type AgentClaimSectionKey = (typeof AGENT_CLAIM_SECTION_KEYS)[number];
 
-/** What `identity.set` accepts: any subset of the fixed claim vocabulary, each a plain string value. */
-export type IdentityClaims = Partial<Record<AgentClaimSectionKey, string>>;
+/** One line of an agent's "What I can do" list (salt-api 0.107.0): a title of at most 60 characters and an optional one-line detail of at most 120. */
+export interface Capability {
+  title: string;
+  detail?: string;
+}
+
+/** At most this many capabilities; salt-api refuses more. */
+export const MAX_CAPABILITIES = 5;
+
+/**
+ * What `identity.set` accepts: any subset of the fixed claim vocabulary,
+ * each a plain string value, plus `capabilities` -- the agent's "What I can
+ * do" list, which is what visitors see on its card and what its A2A card's
+ * `skills` are generated from.
+ */
+export type IdentityClaims = Partial<Record<AgentClaimSectionKey, string>> & { capabilities?: Capability[] };
 
 /**
  * The PROOF sections a card or an identity response can carry, for

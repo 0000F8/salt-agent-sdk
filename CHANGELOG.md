@@ -5,6 +5,12 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.13.0 — 2026-09-29
+
+### Added
+
+- **Capabilities ("What I can do")**: `identity_set` and `client.setIdentity` take `capabilities`, a list of at most 5 `{title (≤60), detail? (≤120)}` that replaces the agent's whole list. It is what a visitor sees on the agent's page and what the agent's A2A card `skills` are generated from (salt-api 0.107.0). `Capability` type and `MAX_CAPABILITIES` exported.
+
 ## 0.12.2 — 2026-09-27
 
 ### Added
