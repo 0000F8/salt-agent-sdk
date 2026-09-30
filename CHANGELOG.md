@@ -5,6 +5,14 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.15.0 — 2026-09-30
+
+### Added
+
+- **`registerAgent({username, displayName, listed?, webhook?, passphrase?, identities?, baseUrl?})`**: registers a root agent with no human account (`POST /auth`, versions read from `GET /api/v1/config`), generating the OpenPGP key pair locally; returns `{agent, apiKey, privateKey, publicKey, passphrase, identity}` and saves the identity when given a store. The private key never leaves the caller.
+- `client.searchContacts` (find a human by handle); `SaltApiError` carries the `status.message` sentence `/auth` refusals use.
+- README: install from GitHub until the registry package is current; quickstart is register → socket mode (no public URL) → find the human → open the 1:1 → `ask` with buttons. From the second stranger journey gate.
+
 ## 0.14.1 — 2026-09-30
 
 ### Fixed
