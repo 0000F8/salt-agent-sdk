@@ -1962,6 +1962,48 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  // Answers to a pending ctx.ask (or a pending delegation reply), resolved
+  // WITHOUT running a handler. socket.ts feeds frames through one serial
+  // queue, and the handler that called `await ctx.ask(...)` occupies it, so
+  // the frame carrying the answer would wait behind the very handler that is
+  // waiting for it. socket.ts therefore calls this at frame arrival, ahead
+  // of the queue. Same checks, same order as handleMessage /
+  // handleCardInteraction (which still run for anything this does not
+  // consume), so nothing is answered by a sender those would not accept.
+  // Returns true when the frame was consumed and must not be dispatched.
+  async function resolveAnswer(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<boolean> {
+    if (!asks.hasPendingAsks()) return false;
+    if (body?.type === "card_interaction") {
+      const b = body as unknown as { owner_id: SaltId; chat_id: SaltId; card_id: SaltId; action_id: string; user: RawSender };
+      return asks.resolveCardInteraction(b.owner_id, b.chat_id, b.card_id, b.action_id, b.user);
+    }
+    if (body?.type !== undefined || !body?.message) return false;
+    const message = (body as { message: Record<string, unknown> }).message;
+    if (message.event_type) return false;
+    const rawMessage = message.message;
+    if (typeof rawMessage !== "string") return false;
+    const chatId = message.chat_id as SaltId;
+    let identity: AgentIdentity | undefined;
+    let caption: string;
+    if (message.encrypted === false) {
+      identity = headerAgentId ? identities.get(headerAgentId) : undefined;
+      caption = rawMessage;
+    } else {
+      if (!PGP_MESSAGE_RE.test(rawMessage)) return false;
+      const resolved = await resolveIdentity(rawMessage, headerAgentId);
+      identity = resolved?.identity;
+      caption = resolved?.plaintext ?? "";
+    }
+    if (!identity) return false;
+    const activeId = (body as { chat?: RawChatMeta }).chat?.active_agent_id;
+    if (activeId) identity = identities.get(String(activeId)) ?? identity;
+    const senderRaw = message.user as RawSender | undefined;
+    if (!senderRaw) return false;
+    const senderId: SaltId = String(senderRaw.id);
+    if (delegations.resolveIfPending(chatId, senderId, caption)) return true;
+    return asks.resolveMessage(identity.saltAppId, chatId, senderId, senderRaw.account_type !== "Agent", caption);
+  }
+
   async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "app_action") return handleAppAction(body as never, headerAgentId);
@@ -1978,7 +2020,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
-  return { dispatch, verifyEnvelope };
+  return { dispatch, verifyEnvelope, resolveAnswer };
 }
 
 /** What createDispatcher returns -- the two things any transport (an
@@ -1992,6 +2034,11 @@ export interface Dispatcher {
     opts?: { toleranceSeconds?: number }
   ): Promise<{ ok: true } | { ok: false; reason: string; transient: boolean }>;
   dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void>;
+  /** Settles a pending ctx.ask / delegation wait with this (already
+   *  verified) body if it is the answer, returning true when consumed. Never
+   *  runs a handler, so a transport whose handlers block its frame queue
+   *  (socket.ts) can call it ahead of that queue. */
+  resolveAnswer(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<boolean>;
 }
 
 /**

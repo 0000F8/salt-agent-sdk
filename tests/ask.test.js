@@ -39,6 +39,12 @@ async function encryptForPublicKey(text, publicKeyArmored) {
   });
 }
 
+// What POST /api/v1/cards really answers: a MESSAGE envelope. The card id is
+// resource_id (mirrored at resource.id); there is NO top-level `id`.
+function cardEnvelope(cardId) {
+  return { chat_id: "chat", message_id: `msg-${cardId}`, message_type: "card", resource_type: "Card", resource_id: cardId, resource: { id: cardId, card_type: "blocks" } };
+}
+
 function baseApi(overrides = {}) {
   return {
     async getChatMembers() {
@@ -105,7 +111,7 @@ test("ask() posts a card with one button per option, and a matching tap resolves
   const api = withSecret({
     async postCard(apiKey, chatId, blocks, text) {
       posted.push({ chatId, blocks, text });
-      return { id: "card-1" };
+      return cardEnvelope("card-1");
     },
     async updateCard(apiKey, cardId, blocks) {
       updated.push({ cardId, blocks });
@@ -139,7 +145,7 @@ test("ask() posts a card with one button per option, and a matching tap resolves
 test("a plain reply also answers a free-text-eligible ask(), and never reaches onMessage as a fresh prompt", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: "card-2" };
+      return cardEnvelope("card-2");
     },
     async updateCard() {
       return {};
@@ -172,7 +178,7 @@ test("a plain reply also answers a free-text-eligible ask(), and never reaches o
 test("options-only ask() (freeText not requested) ignores a plain reply and waits for a tap", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: "card-3" };
+      return cardEnvelope("card-3");
     },
     async updateCard() {
       return {};
@@ -213,7 +219,7 @@ test("options-only ask() (freeText not requested) ignores a plain reply and wait
 test("approve() resolves approved:true on Yes and approved:false on No, by either button or a typed word", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: `card-${Math.random()}` };
+      return cardEnvelope(`card-${Math.random()}`);
     },
     async updateCard() {
       return {};
@@ -278,7 +284,7 @@ test("a card_interaction unrelated to any pending ask still reaches the consumer
 test("ask() rejects on timeout, and clears its pending state so a later ask() in the same chat can proceed", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: "card-timeout" };
+      return cardEnvelope("card-timeout");
     },
   });
 
@@ -314,7 +320,7 @@ test("the posted card's buttons carry restricted_to: [answererId] (the message's
   const api = withSecret({
     async postCard(apiKey, chatId, blocks, text) {
       posted.push({ chatId, blocks, text });
-      return { id: "card-restrict" };
+      return cardEnvelope("card-restrict");
     },
     async updateCard() {
       return {};
@@ -341,7 +347,7 @@ test("the posted card's buttons carry restricted_to: [answererId] (the message's
 test("a tap or reply from someone other than the named answerer is ignored, and the ask keeps waiting", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: "card-other" };
+      return cardEnvelope("card-other");
     },
     async updateCard() {
       return {};
@@ -388,7 +394,7 @@ test("a tap or reply from someone other than the named answerer is ignored, and 
 test("approve(): an exact 'yes'/'y' (optionally with . or !) approves; a near-miss like 'yeah' does not", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: `card-${Math.random()}` };
+      return cardEnvelope(`card-${Math.random()}`);
     },
     async updateCard() {
       return {};
@@ -417,7 +423,7 @@ test("approve(): an exact 'yes'/'y' (optionally with . or !) approves; a near-mi
 test("approve(): 'Yes.' with a trailing period still approves", async (t) => {
   const api = withSecret({
     async postCard() {
-      return { id: `card-${Math.random()}` };
+      return cardEnvelope(`card-${Math.random()}`);
     },
     async updateCard() {
       return {};
