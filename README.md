@@ -227,9 +227,9 @@ timestamp — both default to the same `~/.salt/agents/<agentId>/` files.
 
 Sometimes an agent needs a person's word before it continues — one more
 tool call, a clarification, permission to spend. `ctx.ask` posts the
-question as a card (one button per option, plus by default an invitation
-to just type a reply) and resolves with whichever answer arrives first —
-a tap or a plain message. Available on every context that has `reply()`,
+question as a card (one button per option) and resolves with whichever
+answer arrives first — a tap, or, when typed replies are enabled (see
+below), a plain message. Available on every context that has `reply()`,
 and works identically under webhook or socket mode:
 
 ```js
@@ -249,6 +249,17 @@ an optional trailing "." or "!" — "yeah" doesn't count) resolving
 `{approved, by, via}`. Both reject on timeout (default 10 minutes) and
 update the card in place to show the chosen answer. Only one `ask` can be
 pending per (identity, chat) at a time.
+
+**Typed replies are off when you give `options`.** `freeText` defaults to
+`true` only when you pass no `options` (a question with no buttons has no
+other way to be answered). With `options`, a typed reply is NOT an answer
+unless you pass `freeText: true`; it arrives as an ordinary message instead.
+`approve` sets `freeText: true` itself, so a typed "yes" works there.
+
+`await ctx.ask(...)` is safe inside any handler in either delivery mode. In
+socket mode the answer is matched as it arrives, even while your handler is
+still waiting on it, and connection keep-alive pings are never held up by a
+running handler.
 
 **Exactly one person may answer.** `ctx.ask`/`ctx.approve` default
 `answererId` to whoever's message triggered the current `onMessage` call

@@ -108,6 +108,32 @@
 // path) honours Retry-After exactly like the old poll client did,
 // overriding the backoff for that one wait.
 //
+// FRAME ORDERING vs. HANDLERS THAT WAIT (fix, 2026-09-30): envelope frames are
+// still verified, deduped and dispatched strictly in arrival order through
+// one serial queue, and a handler occupies that queue until it returns. A
+// handler that does `await ctx.ask(...)` therefore blocks the queue while
+// the answer it waits for (a card tap, or the person's typed reply) is a
+// frame queued BEHIND it -- and before this fix the pings sat there too, so
+// the 30s watchdog killed the connection, the reconnect replayed the same
+// chat_opened, and every restart posted the question again. Two rules now
+// hold, and the ordering promise above is unchanged for everything else:
+//   (a) Action Cable control frames (welcome, ping, confirm/reject,
+//       disconnect) are handled the instant they arrive, never queued: they
+//       carry no ordering relative to envelopes and a busy handler must not
+//       starve the liveness watchdog.
+//   (b) An envelope that ANSWERS a pending ctx.ask (a card_interaction on
+//       its card, or the named person's plain reply -- Dispatcher.resolveAnswer)
+//       is verified and resolved at arrival, ahead of the handler queue, and
+//       is then consumed (deduped, acked) instead of queued. Everything else,
+//       including every envelope that does not answer an ask, still goes
+//       through the queue in order. Arrival itself is a second, tiny serial
+//       chain (verify + maybe decrypt only, never a handler) so relative
+//       order into the handler queue is preserved.
+// Because an early-resolved answer can be processed while an earlier row's
+// handler is still running, the ack never advances past the lowest row whose
+// handler is still in flight (ackable(), below): a crash mid-handler still
+// replays that row.
+//
 // verifyEnvelope/dispatch are unchanged from the poll-based client: every
 // envelope, however it arrived (replay, backfill page, ack response, or a
 // live frame), goes through the SAME signature check and the SAME
@@ -119,6 +145,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import WebSocket from "ws";
 import { createDispatcher, type Logger, type WebhookServerOptions } from "./webhook.js";
+import { hasPendingAsks } from "./ask.js";
 import type { SaltId } from "./ids.js";
 
 const consoleLogger: Logger = {
@@ -619,10 +646,17 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
       logger.error(`[socket ${agentId}] update ${update.id} had unparseable body: ${(err as Error).message}`);
       return "advance";
     }
+    // A row whose handler is still running (started on a connection that has
+    // since closed) is being handled: replaying it into a second handler is
+    // how a stuck ask used to post the same question card again per restart.
+    if (handlersInFlight.has(update.id)) return "advance";
+    handlersInFlight.add(update.id);
     try {
       await dispatcher.dispatch(body, headers["X-Salt-Agent-Id"]);
     } catch (err) {
       logger.error(`[socket ${agentId}] unhandled error dispatching update ${update.id}: ${(err as Error).message}`);
+    } finally {
+      handlersInFlight.delete(update.id);
     }
     await dedupeStore.add(agentId, update.delivery_id).catch((err) => {
       logger.error(`[socket ${agentId}] recording dedupe for ${update.delivery_id} failed: ${(err as Error).message}`);
@@ -632,6 +666,13 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
 
   // --- Ack (coalesced, event-driven -- see this file's header comment) ---
   let highestProcessed = 0;
+  // Rows whose handler is running right now (see FRAME ORDERING above).
+  const handlersInFlight = new Set<number>();
+  function ackable(): number {
+    let cap = highestProcessed;
+    for (const id of handlersInFlight) cap = Math.min(cap, id - 1);
+    return cap;
+  }
   let ackInFlight = false;
   let ackPending = false;
   function noteProcessed(id: number): void {
@@ -639,13 +680,13 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
   }
   function runAck(): void {
     if (stopped) return;
-    if (highestProcessed === 0) return; // nothing processed yet -- nothing to ack
+    if (ackable() <= 0) return; // nothing processed yet (or only rows still in a handler) -- nothing to ack
     if (ackInFlight) {
       ackPending = true;
       return;
     }
     ackInFlight = true;
-    const after = highestProcessed;
+    const after = ackable();
     ackTail = (async () => {
       try {
         currentAbort = new AbortController();
@@ -853,28 +894,18 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
           runAck();
         }
 
-        async function handleFrame(raw: WebSocket.RawData): Promise<void> {
-          let frame: Record<string, unknown>;
-          try {
-            frame = JSON.parse(raw.toString());
-          } catch (err) {
-            logger.error(`[socket ${agentId}] unparseable frame: ${(err as Error).message}`);
-            return;
-          }
-
+        // Control frames: handled at arrival, never queued (rule (a) in the
+        // FRAME ORDERING comment). Returns true when the frame was one.
+        function handleControl(frame: Record<string, unknown>): boolean {
           const type = frame.type as string | undefined;
-          if (type === "ping") {
+          if (type === "ping" || type === "welcome") {
             armPingWatchdog();
-            return;
-          }
-          if (type === "welcome") {
-            armPingWatchdog();
-            return;
+            return true;
           }
           if (type === "confirm_subscription") {
             subscribed = true;
             logger.info(`[socket ${agentId}] subscribed (cursor ${localCursor})`);
-            return;
+            return true;
           }
           if (type === "reject_subscription") {
             logger.error(`[socket ${agentId}] subscription rejected; reconnecting`);
@@ -883,15 +914,47 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
             } catch {
               // already gone
             }
-            return;
+            return true;
           }
           if (type === "disconnect") {
             // Server-initiated close (e.g. a deploy) -- the 'close' event
             // follows and drives reconnect the same as any other close.
             logger.info(`[socket ${agentId}] server requested disconnect${frame.reason ? ` (${frame.reason})` : ""}`);
-            return;
+            return true;
           }
+          return false;
+        }
 
+        // Rule (b): settles a pending ctx.ask from an envelope that answers
+        // it, ahead of the handler queue. False for anything else (including
+        // a bad signature or a repeat delivery -- the queued path logs and
+        // skips those exactly as before).
+        async function tryEarlyAnswer(update: RawAgentUpdate): Promise<boolean> {
+          if (!hasPendingAsks()) return false;
+          // The row whose handler is asking must never answer itself when a
+          // reconnect replays it.
+          if (handlersInFlight.has(update.id)) return false;
+          const headers = update.headers || {};
+          try {
+            const verified = await dispatcher.verifyEnvelope(headers["X-Salt-Agent-Id"], headers["X-Salt-Signature"], update.body);
+            if (!verified.ok) return false;
+            if (await dedupeStore.has(agentId, update.delivery_id)) return false;
+            const body = JSON.parse(update.body) as Record<string, unknown>;
+            if (!(await dispatcher.resolveAnswer(body, headers["X-Salt-Agent-Id"]))) return false;
+          } catch (err) {
+            logger.error(`[socket ${agentId}] early answer check for update ${update.id} failed: ${(err as Error).message}; queueing it normally`);
+            return false;
+          }
+          noteResolved(update.id);
+          await dedupeStore.add(agentId, update.delivery_id).catch((err) => {
+            logger.error(`[socket ${agentId}] recording dedupe for ${update.delivery_id} failed: ${(err as Error).message}`);
+          });
+          noteProcessed(update.id);
+          if (state === "live") runAck();
+          return true;
+        }
+
+        async function handleFrame(frame: Record<string, unknown>): Promise<void> {
           const payload = frame.message as Record<string, unknown> | undefined;
           if (!payload || typeof payload !== "object") return;
 
@@ -921,10 +984,32 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
           socket.send(JSON.stringify({ command: "subscribe", identifier }));
         });
 
+        // Arrival chain: verify + maybe decrypt an answer, never a handler, so
+        // it cannot deadlock; it only exists to keep frames entering
+        // messageQueue in arrival order while an early check is in flight.
+        let arrivalChain: Promise<void> = Promise.resolve();
         socket.on("message", (raw) => {
-          messageQueue = messageQueue.then(() => handleFrame(raw)).catch((err) => {
-            logger.error(`[socket ${agentId}] error handling frame: ${(err as Error).message}`);
-          });
+          let frame: Record<string, unknown>;
+          try {
+            frame = JSON.parse(raw.toString());
+          } catch (err) {
+            logger.error(`[socket ${agentId}] unparseable frame: ${(err as Error).message}`);
+            return;
+          }
+          if (handleControl(frame)) return;
+          arrivalChain = arrivalChain
+            .then(async () => {
+              const payload = frame.message as Record<string, unknown> | undefined;
+              if (payload && typeof payload === "object" && payload.type !== "replay_done" && typeof payload.id === "number") {
+                if (await tryEarlyAnswer(payload as unknown as RawAgentUpdate)) return;
+              }
+              messageQueue = messageQueue.then(() => handleFrame(frame)).catch((err) => {
+                logger.error(`[socket ${agentId}] error handling frame: ${(err as Error).message}`);
+              });
+            })
+            .catch((err) => {
+              logger.error(`[socket ${agentId}] error handling frame: ${(err as Error).message}`);
+            });
         });
 
         socket.on("unexpected-response", (_req, res) => {
@@ -934,11 +1019,11 @@ export function createSocketClient(options: SocketClientOptions): SocketClient {
           }
           logger.error(`[socket ${agentId}] handshake failed: HTTP ${status}`);
           res.resume(); // drain so the underlying socket can close cleanly
-          messageQueue.finally(finish);
+          finish(); // never wait on messageQueue: a handler parked in ctx.ask would hold the reconnect hostage
         });
 
         socket.on("close", () => {
-          messageQueue.finally(finish);
+          finish(); // never wait on messageQueue: a handler parked in ctx.ask would hold the reconnect hostage
         });
 
         socket.on("error", (err) => {

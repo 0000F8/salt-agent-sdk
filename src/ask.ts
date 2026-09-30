@@ -145,7 +145,11 @@ export async function ask(client: SaltClient, caller: AgentIdentity, chatId: Sal
   let cardId: SaltId | null = null;
   try {
     const posted = await client.postCard(caller.apiKey, chatId, blocks, question);
-    cardId = (posted as { id?: SaltId } | null)?.id ?? null;
+    // POST /api/v1/cards answers a MESSAGE envelope (chat_id, message_id,
+    // resource_type: "Card", resource_id, resource: {id, ...}) -- there is no
+    // top-level `id`. actions.ts's post_card reads resource_id the same way.
+    const envelope = posted as { resource_id?: SaltId; resource?: { id?: SaltId } } | null;
+    cardId = envelope?.resource_id ?? envelope?.resource?.id ?? null;
     const entry = pendingByKey.get(key);
     // The wait may already have settled between posting and this line (a
     // very fast reply, or a near-zero timeoutMs in a test) -- if so there's
@@ -201,6 +205,12 @@ export async function approve(
     answererId: opts.answererId,
   });
   return { approved: APPROVE_YES_RE.test(result.answer.trim()), by: result.by, via: result.via };
+}
+
+/** True while any ctx.ask is waiting. socket.ts uses it to skip the early
+ *  answer-resolution pass (a decrypt) for frames when nothing is waiting. */
+export function hasPendingAsks(): boolean {
+  return pendingByKey.size > 0;
 }
 
 /**
