@@ -5,6 +5,13 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.14.0 — 2026-09-30
+
+### Added
+
+- **Files plan, step 1 — agents can send attachments, and read more than images.** `client.sendAttachment(apiKey, chatId, {bytes, filename, contentType, caption?})` encrypts a file exactly the way salt-fe's `chatbox.jsx` `sendOneAttachment` does: a fresh one-time AES-256-GCM key over the bytes (`crypto.encryptAttachment`, byte-identical wire format to the browser's Web Crypto output -- proven in `tests/attachment-web-parity.test.js` by porting the web's own `encryptFileBytes`/`decryptFileBytes` onto Node's WebCrypto implementation), with that key/iv/filename/content_type/size PGP-encrypted as one JSON blob for every current chat member's public key (fetched fresh per call), posted as `attachment`/`attachment_encrypted_key` alongside an encrypted caption (defaults to "📎 &lt;filename&gt;"). Refuses before doing any crypto work on a file over `crypto.MAX_ATTACHMENT_BYTES` (15 MB, mirrors salt-api's own cap) or a `contentType` outside `crypto.ALLOWED_SEND_CONTENT_TYPES`; `sanitizeAttachmentFilename` strips path components and control characters so a filename can never be used as a path once decrypted on the receiving end.
+- **Inbound attachments are no longer images-only.** `webhook.ts`'s `decryptAttachmentIfPresent` now decrypts bytes for ANY content type (still bounded by `MAX_ATTACHMENT_BYTES`, checked against the declared size BEFORE downloading, so a metadata blob that lies about its own size can't force an unbounded download) and hands the handler `ctx.attachment.data`. Text-shaped files (`text/*`, JSON, CSV, Markdown) additionally get `ctx.attachment.text`, the UTF-8 decoded content. PDFs get bytes only -- the SDK has no pure-JS PDF parser in its dependency tree, so text extraction from a PDF is left to a consumer (e.g. a Python host using `pypdf`).
+
 ## 0.13.0 — 2026-09-29
 
 ### Added

@@ -76,10 +76,28 @@ export interface DecryptedAttachment {
   filename: string;
   contentType: string;
   size: number;
-  /** Present only when contentType starts with "image/" -- the SDK doesn't
-   *  know how to represent other file types beyond a note in `unsupportedNote`. */
+  /** The decrypted file bytes -- present for every content type once the
+   *  declared size is within pgp.MAX_ATTACHMENT_BYTES (images, PDFs, and
+   *  anything else); absent only when `unsupportedNote` explains why
+   *  (oversized, or the decrypt/download itself failed). */
   data?: Buffer;
+  /** UTF-8 decoded `data`, set only for text-shaped content: text/*, JSON,
+   *  CSV, or Markdown (see webhook.ts's isTextLikeAttachment). Not set for
+   *  images, audio/video, or PDF -- a PDF's bytes are handed through as
+   *  `data` for a consumer to extract text from itself (e.g. Python's
+   *  pypdf); the SDK has no pure-JS PDF parser in its dependency tree to
+   *  do that extraction here. */
+  text?: string;
   unsupportedNote?: string;
+}
+
+/** Content types decrypted straight to UTF-8 text in `DecryptedAttachment.text`,
+ *  in addition to the raw bytes in `data`. Deliberately excludes PDF (see
+ *  DecryptedAttachment.text's own comment) and images/audio/video (never
+ *  meaningfully "text"). */
+function isTextLikeAttachment(contentType: string): boolean {
+  if (contentType.startsWith("text/")) return true;
+  return ["application/json", "application/csv", "application/markdown"].includes(contentType);
 }
 
 export interface MessageContext {
@@ -118,7 +136,11 @@ export interface MessageContext {
    *  someone about a shared chat it also observes -- the generic decrypted
    *  transcript of that shared chat (not yet wrapped in any prompt framing). */
   mediatorSharedContext?: string;
-  /** Set when the inbound message was an Attachment with decryptable metadata. */
+  /** Set when the inbound message was an Attachment with decryptable
+   *  metadata -- images, PDFs, and any other file type all carry decrypted
+   *  `data` bytes now (bounded by pgp.MAX_ATTACHMENT_BYTES); text-shaped
+   *  files (text/*, JSON, CSV, Markdown) also carry a decoded `text` field.
+   *  See DecryptedAttachment. */
   attachment?: DecryptedAttachment;
   /** This identity's memory of `chatId`: recent turns and a short note,
    *  loaded (or rebuilt from chat history, on a cold start) before this
@@ -928,9 +950,13 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   }
 
   // Decrypts an attachment's PGP metadata blob (key/iv/filename/content_type),
-  // downloads the ciphertext, and AES-GCM-decrypts it. Only images are
-  // returned with actual bytes -- the SDK doesn't know how any given model
-  // wants other file types represented, so those get a text note instead.
+  // downloads the ciphertext, and AES-GCM-decrypts it -- for any content
+  // type, up to pgp.MAX_ATTACHMENT_BYTES (the declared `size` is checked
+  // BEFORE downloading/decrypting, so a metadata blob that lies about its
+  // own size can't make this pull down and hold an unbounded blob). Text-
+  // shaped content (text/*, JSON, CSV, Markdown) also gets a decoded `text`
+  // field alongside the raw bytes; a PDF gets bytes only (see
+  // DecryptedAttachment.text's comment on why text extraction stops there).
   async function decryptAttachmentIfPresent(
     identity: AgentIdentity,
     message: { message_id: SaltId; resource?: { encrypted_key?: string } }
@@ -939,18 +965,25 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     try {
       const metaJson = await pgp.decrypt(message.resource.encrypted_key, identity.privateKey, pgpPassphrase);
       const meta = JSON.parse(metaJson) as { filename: string; content_type?: string; size: number; key: string; iv: string };
+      const filename = meta.filename;
+      const contentType = meta.content_type || "unknown";
 
-      if (!meta.content_type?.startsWith("image/")) {
+      if (meta.size > pgp.MAX_ATTACHMENT_BYTES) {
         return {
-          filename: meta.filename,
-          contentType: meta.content_type || "unknown",
+          filename,
+          contentType,
           size: meta.size,
-          unsupportedNote: `attached file: ${meta.filename}, ${meta.content_type || "unknown type"}, ${meta.size} bytes -- not viewable, only images are.`,
+          unsupportedNote: `attached file: ${filename}, ${contentType}, ${meta.size} bytes -- too large to fetch (cap ${pgp.MAX_ATTACHMENT_BYTES} bytes).`,
         };
       }
+
       const ciphertextBytes = await client.getAttachment(identity.apiKey, message.message_id);
       const plaintext = pgp.decryptAttachment(ciphertextBytes, meta.key, meta.iv);
-      return { filename: meta.filename, contentType: meta.content_type, size: meta.size, data: plaintext };
+      const result: DecryptedAttachment = { filename, contentType, size: meta.size, data: plaintext };
+      if (isTextLikeAttachment(contentType)) {
+        result.text = plaintext.toString("utf8");
+      }
+      return result;
     } catch (err) {
       logger.error(`[attachment] failed to decrypt: ${(err as Error).message}`);
       return undefined;
