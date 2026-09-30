@@ -5,6 +5,14 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.14.1 — 2026-09-30
+
+### Fixed
+
+- **`ctx.ask()` with buttons never resolved a tap.** It read the card id as `posted.id`, but `POST /api/v1/cards` answers the card's chat message envelope: the card id is `resource_id` (mirrored at `resource.id`). Taps never matched and the card never updated to "Answered". Every `postCard` fixture now uses the real envelope. Found by a stranger's journey gate (salt-api 0.117.0 changelog).
+- **`await ctx.ask()` inside a handler deadlocked socket mode.** Every frame, pings and the answer included, went through one serial queue, so the handler waited on a frame queued behind itself; the socket died at ~30 s, reconnected and replayed `chat_opened` (duplicate cards). Control frames (ping, welcome, confirm, reject, disconnect) are now handled on arrival; `Dispatcher.resolveAnswer` settles a pending ask or delegation reply before the frame reaches the handler queue; everything else stays ordered; the ack never passes a row whose handler is still running; a replayed row whose handler is still running is skipped. `tests/socket-ask.test.js` hangs on the old code. Known: a handler blocked in `delegate_to_agent` (not `ctx.ask`) is not covered by the early pass.
+- README: typed replies are on by default only when `options` is empty; pass `freeText: true` to allow both.
+
 ## 0.14.0 — 2026-09-30
 
 ### Added
