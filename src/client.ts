@@ -14,6 +14,7 @@ import {
   type IdentitySections,
   type SignedCard,
 } from "./identity.js";
+import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
 
 // --- Identity disclosures (R3, identityShare.ts) --------------------------
 //
@@ -68,6 +69,40 @@ export interface SaltChat {
   session?: { users?: SaltUser[]; encrypted?: boolean };
   messages?: unknown[];
   [key: string]: unknown;
+}
+
+export interface SendAttachmentParams {
+  bytes: Buffer;
+  filename: string;
+  /** Must be one of crypto.ts's ALLOWED_SEND_CONTENT_TYPES -- sendAttachment
+   *  throws rather than send an unrecognised value another member's client
+   *  will make a rendering decision on (see that list's own comment). */
+  contentType: string;
+  /** Defaults to "📎 <sanitized filename>", the same fallback salt-fe's
+   *  chatbox.jsx sendOneAttachment uses, so a captionless attachment reads
+   *  identically whether it came from a person or an agent. */
+  caption?: string;
+}
+
+/**
+ * Basename only, control characters and path separators stripped, capped at
+ * 200 characters, falling back to "attachment" when nothing usable is left.
+ * A filename lives only inside an attachment's PGP-encrypted metadata blob
+ * (see Attachment's header comment in salt-api) -- Salt itself never sees
+ * or sanitizes it -- so anything that later treats a DECRYPTED filename as
+ * a filesystem path (an agent's own read/save-to-disk tool) must sanitize
+ * on the way OUT, since it is exactly as attacker-controlled as any other
+ * chat member's input. Exported so both sendAttachment (outgoing) and a
+ * consumer's incoming-attachment handler can share one rule.
+ */
+export function sanitizeAttachmentFilename(name: string | undefined | null): string {
+  const base = String(name ?? "")
+    .split(/[\\/]/)
+    .pop() ?? "";
+  // eslint-disable-next-line no-control-regex
+  const cleaned = base.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  const safe = cleaned.replace(/^\.+/, "").slice(0, 200);
+  return safe || "attachment";
 }
 
 export interface CreateAgentParams {
@@ -812,6 +847,66 @@ export function createSaltClient(options: SaltClientOptions) {
       if (mentions && mentions.length > 0) body.mentions = mentions;
       if (opts?.quiet) body.quiet = true;
       return request("POST", "/api/v1/messages", apiKey, body);
+    },
+
+    /**
+     * Sends a file into a chat, encrypted exactly the way salt-fe's
+     * chatbox.jsx sendOneAttachment encrypts one: a fresh one-time AES-256-
+     * GCM key encrypts the file bytes (crypto.ts's encryptAttachment,
+     * byte-identical wire format to the browser's Web Crypto output), and
+     * that key/iv plus the real filename/content_type/size are PGP-
+     * encrypted as one JSON blob for every current chat member's public
+     * key -- the SAME single recipient list the caption text is encrypted
+     * for, fetched fresh via GET /api/v1/chats/:id so a just-added or
+     * just-removed member is never missed or over-included. Unlike
+     * postMessage's reply() there is no separate sender_message: the web
+     * never excludes the sender from an attachment's recipient list (it
+     * has no reason to -- there's only one `attachment_encrypted_key`
+     * field, see Attachment#as_chat_resource), so a single PGP blob
+     * covering every member already covers the sender too.
+     *
+     * Throws before doing any crypto work on an oversized file (matches
+     * salt-api's own MAX_ATTACHMENT_BYTES so a doomed upload never even
+     * starts) or a content_type outside ALLOWED_SEND_CONTENT_TYPES.
+     */
+    async sendAttachment(apiKey: string, chatId: SaltId, params: SendAttachmentParams): Promise<unknown> {
+      if (params.bytes.length > MAX_ATTACHMENT_BYTES) {
+        throw new Error(`attachment too large: ${params.bytes.length} bytes (cap ${MAX_ATTACHMENT_BYTES})`);
+      }
+      if (!isAllowedSendContentType(params.contentType)) {
+        throw new Error(`content type not allowed: ${params.contentType}`);
+      }
+      const filename = sanitizeAttachmentFilename(params.filename);
+
+      const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
+      const recipientKeys = (chat?.session?.users ?? [])
+        .map((u) => u.public_key)
+        .filter((k): k is string => Boolean(k));
+      if (recipientKeys.length === 0) {
+        throw new Error(`chat ${chatId}: no recipient public keys; not sending attachment.`);
+      }
+
+      const { ciphertext, keyB64, ivB64 } = encryptAttachment(params.bytes);
+      const metaJson = JSON.stringify({
+        key: keyB64,
+        iv: ivB64,
+        filename,
+        content_type: params.contentType,
+        size: params.bytes.length,
+      });
+      const caption = params.caption || `📎 ${filename}`;
+
+      const [encryptedMeta, encryptedCaption] = await Promise.all([
+        encryptFor(metaJson, recipientKeys),
+        encryptFor(caption, recipientKeys),
+      ]);
+
+      return request("POST", "/api/v1/messages", apiKey, {
+        chat_id: chatId,
+        message: encryptedCaption,
+        attachment: ciphertext.toString("base64"),
+        attachment_encrypted_key: encryptedMeta,
+      });
     },
 
     /**

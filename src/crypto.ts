@@ -152,3 +152,85 @@ export function decryptAttachment(ciphertextBuffer: Buffer, keyB64: string, ivB6
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(encrypted), decipher.final()]);
 }
+
+/**
+ * Mirrors salt-api's Api::V1::MessagesController::MAX_ATTACHMENT_BYTES --
+ * the decoded-file-size cap enforced server-side on upload. Checked again
+ * here on BOTH ends: client.sendAttachment refuses to even try encrypting
+ * more than this (no point burning a PGP round-trip on an upload the
+ * server will 413), and webhook.ts's inbound decrypt refuses to download
+ * and decrypt a declared size above this cap before ever calling
+ * getAttachment, so a message whose PGP-encrypted metadata lies about its
+ * own size can't make an agent pull down and hold an unbounded blob.
+ */
+export const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
+
+export interface EncryptedAttachmentBytes {
+  /** Ciphertext with the 16-byte GCM auth tag appended -- byte-identical
+   *  shape to what salt-fe's encryptFileBytes (Web Crypto subtle.encrypt)
+   *  produces, and what decryptAttachment above (and the web's
+   *  decryptFileBytes) expect to split apart again. */
+  ciphertext: Buffer;
+  keyB64: string;
+  ivB64: string;
+}
+
+/**
+ * Encrypt a file's plaintext bytes for a chat attachment: a fresh one-time
+ * AES-256-GCM key per file (no key reuse across attachments, matching
+ * salt-fe's src/utilities/attachments.js encryptFileBytes), producing the
+ * exact wire format salt-api's Attachment stores and decryptAttachment
+ * above (and the web's own decryptFileBytes) already parse. The key/iv are
+ * never sent to Salt directly -- callers PGP-encrypt them (alongside the
+ * real filename/content_type) into the message's `attachment_encrypted_key`
+ * field via encryptFor, exactly as client.sendAttachment does.
+ */
+export function encryptAttachment(plaintext: Buffer): EncryptedAttachmentBytes {
+  const key = nodeCrypto.randomBytes(32);
+  const iv = nodeCrypto.randomBytes(12);
+  const cipher = nodeCrypto.createCipheriv("aes-256-gcm", key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    ciphertext: Buffer.concat([encrypted, tag]),
+    keyB64: key.toString("base64"),
+    ivB64: iv.toString("base64"),
+  };
+}
+
+/**
+ * Content types client.sendAttachment (and any agent-driven "send a file"
+ * tool built on it) will actually send. Deliberately narrow: an agent's
+ * `content_type` argument is caller-supplied, and salt-api/salt-fe both
+ * trust whatever content_type rides inside the PGP-encrypted metadata blob
+ * (it's never sniffed from bytes), so refusing anything outside a known-good
+ * list here is the one place that catches a mistaken or malicious value
+ * before it reaches another member's browser as a rendering decision (e.g.
+ * an inline <img>/<video>/<audio> tag keyed on this exact string). Extend
+ * deliberately, not by removing the check.
+ */
+export const ALLOWED_SEND_CONTENT_TYPES: readonly string[] = [
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/svg+xml",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/webm",
+  "audio/ogg",
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "text/markdown",
+  "text/calendar",
+  "application/json",
+  "application/octet-stream",
+];
+
+export function isAllowedSendContentType(contentType: string): boolean {
+  return ALLOWED_SEND_CONTENT_TYPES.includes(contentType);
+}
