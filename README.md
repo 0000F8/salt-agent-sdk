@@ -16,14 +16,94 @@ in a few lines.
 ## Install
 
 ```bash
-npm install salt-agent-sdk
+npm install github:0000F8/salt-agent-sdk
 ```
+
+Registry packages are coming; the `salt-agent-sdk` on npm today is a stale
+0.1.0, so install from GitHub.
 
 Requires Node 18+ (uses the global `fetch`).
 
 ## Quickstart
 
+Register an agent, run it with no public URL, and have it ask a human a
+question. Nothing here needs a human account, an open port or a tunnel.
+
 ### 1. Register your agent
+
+`registerAgent` generates the OpenPGP key pair on your machine, registers a
+root agent with Salt, and hands back everything once. The private key is
+never sent: Salt receives only the public key, so `privateKey` (and
+`apiKey`, which Salt shows exactly once) are yours to keep. Passing an
+identity store saves them to `./data/identities.json`.
+
+```js
+const { registerAgent, createIdentityStore } = require("salt-agent-sdk");
+
+(async () => {
+  const identities = createIdentityStore(); // ./data/identities.json
+  const { agent, apiKey, passphrase } = await registerAgent({
+    username: "my_agent",
+    displayName: "My Agent", // must not start with "salt"
+    identities,              // saves the identity, keys included
+    // listed: true,         // show it in the Agents directory (default: unlisted)
+    // webhook: "https://...",  // omit it: no webhook means socket mode
+  });
+  console.log(agent.id, "registered; keep this passphrase:", passphrase);
+})();
+```
+
+### 2. Run it with no public URL (socket mode)
+
+An agent registered without a `webhook` is in socket mode: no public URL
+needed. `createSocketClient` holds one websocket to Salt and events are
+pushed down it (no polling, zero requests while idle).
+
+```js
+const { createSaltClient, createIdentityStore, createSocketClient } = require("salt-agent-sdk");
+
+const client = createSaltClient({ host: "https://saltapp.ai" });
+const identities = createIdentityStore();
+const me = identities.all()[0]; // the identity from step 1
+
+const socket = createSocketClient({
+  host: "https://saltapp.ai",
+  apiKey: me.apiKey,
+  agentId: me.saltAppId,
+  client,
+  identities,
+  pgpPassphrase: process.env.PGP_PASSPHRASE, // the passphrase from step 1
+  async onMessage(ctx) {
+    await ctx.reply(`You said: ${ctx.text}`);
+  },
+});
+socket.start(); // keep this running: it is what receives the answer in step 3
+```
+
+### 3. Start a conversation and ask a question
+
+Find the human by handle, open the 1:1, and `ask` with buttons. The answer
+arrives on the socket from step 2 and `ask` resolves with it; the card is
+then updated in place to show "Answered: ...".
+
+```js
+const { ask } = require("salt-agent-sdk");
+
+const [human] = await client.searchContacts(me.apiKey, { username: "their_handle" });
+const chat = await client.createOrGetChat(me.apiKey, human.id);
+
+const { answer, by, via } = await ask(client, me, chat.id, "Which city?", {
+  options: ["Lisbon", "Porto"],
+  answererId: human.id, // the one person allowed to answer
+});
+console.log(answer); // "Porto"
+```
+
+Inside an `onMessage` handler the same thing is `await ctx.ask(...)`, with
+the sender as the default answerer (see **`ctx.ask` / `ctx.approve`**
+below).
+
+### Alternative: register under a human account
 
 You need a PGP keypair and an API key before you can receive or send
 messages. Generate a keypair and register:
@@ -76,7 +156,7 @@ AGENT's own api-key, `{ public_key: keys.publicKey }` in the body. Salt
 holds no copy of the old key to hand back, and this endpoint refuses a
 plaintext `private_key` the same way createAgent does.
 
-### 2. Run a webhook server
+### Webhook mode: run a server (you have a public URL)
 
 ```js
 require("dotenv").config();
