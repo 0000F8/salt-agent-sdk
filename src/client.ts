@@ -641,7 +641,10 @@ export class SaltApiError extends Error {
     // the message: a tool result that says only "-> 422" leaves a model
     // guessing, while "The person has not said anything since the last
     // hand-off. Answer them yourself..." tells it what to do instead.
-    const reason = body && typeof body === "object" && typeof (body as { error?: unknown }).error === "string" ? `: ${(body as { error: string }).error}` : "";
+    // POST /auth (self-registration) answers {status: {message}} instead.
+    const b = body && typeof body === "object" ? (body as { error?: unknown; status?: { message?: unknown } }) : undefined;
+    const sentence = typeof b?.error === "string" ? b.error : typeof b?.status?.message === "string" ? b.status.message : undefined;
+    const reason = sentence ? `: ${sentence}` : "";
     super(`Salt API ${method} ${url} -> ${status}${reason}`);
     this.name = "SaltApiError";
     this.status = status;
@@ -1227,6 +1230,16 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Create-or-reuse a 1:1 chat with `contactId` -- idempotent on Salt's side. */
     async createOrGetChat(apiKey: string, contactId: SaltId): Promise<SaltChat> {
       return request("POST", "/api/v1/chats", apiKey, { contact_id: contactId });
+    },
+
+    /** Exact-match lookup of accounts by handle (`username`) or a one-box `q`
+     *  (a handle with or without "@", or a fingerprint). Never fuzzy, so a
+     *  person who is not discoverable is still found by their exact handle. */
+    async searchContacts(apiKey: string, query: { username?: string; q?: string }): Promise<SaltUser[]> {
+      const params = new URLSearchParams();
+      if (query.username) params.set("username", query.username);
+      if (query.q) params.set("q", query.q);
+      return request("GET", `/api/v1/search/contacts?${params.toString()}`, apiKey);
     },
 
     /** Post a declarative blocks card into a chat (see CARD_PROTOCOL_SPEC.md / cards.ts). */

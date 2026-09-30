@@ -4,6 +4,7 @@ export * from "./crypto";
 export * from "./identity";
 export * from "./identityShare";
 export * from "./identities";
+export * from "./register";
 export * from "./reconcile";
 export * from "./delegations";
 export * from "./work";
