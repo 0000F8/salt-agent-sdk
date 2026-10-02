@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import type { Mandate, MandateExercise, SaltClient } from "./client";
+import type { Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import * as identityShare from "./identityShare.js";
@@ -154,6 +154,16 @@ export interface MessageContext {
    *  emits an agent_reply_sent metric. Handles a typing-indicator heartbeat
    *  for the duration of the call automatically. */
   reply(text: string): Promise<void>;
+  /** The id of the message being handled (the delivery's `message_id`). */
+  messageId: SaltId;
+  /** React to THIS message with one emoji; resolves with the server's reactions summary.
+   *  Use sparingly -- the owner's rule: "not all the time, just when they choose", and only
+   *  "if it relevantly complements the chat in a friendly way" (acknowledge thanks, mark a
+   *  request done, celebrate good news). Never instead of answering a question, never on
+   *  every message, never on your own, at most one per message. Calling it again with the
+   *  same emoji REMOVES your reaction (the API is a toggle). A rejection (not a single
+   *  emoji, over the 12 cap) throws a SaltApiError with the server's sentence. */
+  react(emoji: string): Promise<ReactionSummary>;
   /** Asks a quick inline question (K3) -- a card with one button per
    *  option, plus (by default, when there are no options) an invitation to
    *  type a free-form reply -- and resolves with whichever answer arrives
@@ -1518,6 +1528,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       attachment,
       session,
       reply: trackedReply,
+      messageId: message.message_id as SaltId,
+      react: (emoji: string) => client.react(identity.apiKey, message.message_id as SaltId, emoji),
       // M2: default answerer is whoever sent THIS message -- never an
       // agent (an agent sender has its own webhook/turn; ctx.ask is for
       // asking a person).

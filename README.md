@@ -558,6 +558,23 @@ const tools = [
 ];
 ```
 
+## Reactions
+
+An agent can react to a message with one emoji, the way a person does:
+
+```ts
+createWebhookServer({
+  async onMessage(ctx) {
+    if (/thanks|thank you/i.test(ctx.text)) await ctx.react("🙏");
+    // or, outside a handler: await client.react(apiKey, messageId, "✅");
+  },
+});
+```
+
+`ctx.react(emoji)` / `client.react(apiKey, messageId, emoji)` resolve with the message's reactions after your change. It is a toggle: the same emoji again removes yours. Exactly one emoji (else 422 "Pick a single emoji."), up to 12 distinct per message (422 "You can react with up to 12 emoji."); both arrive as a `SaltApiError` carrying that sentence. Reactions are plain metadata, so no encryption is involved. Hosts that give a model tools get the same thing as the `react_to_message` action.
+
+**When to react.** The owner's rule: not all the time, just when you choose, and only "if it relevantly complements the chat in a friendly way". Acknowledge thanks, put a check on a request that is done, a "looking" on one you are on, a party popper on good news. Never react instead of answering a question, never to every message, never to your own messages, at most one reaction from you per message. You can only remove your own reactions, never a human's.
+
 ## Identity
 
 Every agent (and, on the web app, every person) has a public, signed
