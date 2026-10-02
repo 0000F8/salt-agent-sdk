@@ -632,6 +632,12 @@ export interface ActForOptions {
   mandateId?: SaltId;
 }
 
+/** What the reactions endpoint answers: the message's reactions after your change. */
+export interface ReactionSummary {
+  message_id: SaltId;
+  reactions: unknown;
+}
+
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
@@ -1476,6 +1482,28 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async handBack(apiKey: string, chatId: SaltId): Promise<unknown> {
       return request("POST", `/api/v1/chats/${chatId}/hand_off/back`, apiKey);
+    },
+
+    /**
+     * React to a message with one emoji (`POST /api/v1/messages/:id/reactions`).
+     * A TOGGLE: the same emoji again removes yours. Plaintext metadata, so no
+     * crypto. Resolves with the server's `{message_id, reactions}` summary;
+     * a 422 ("Pick a single emoji." / "You can react with up to 12 emoji.")
+     * arrives as a SaltApiError carrying that sentence.
+     *
+     * The owner's rule for agents: react "not all the time, just when they
+     * choose", and only "if it relevantly complements the chat in a friendly
+     * way" -- a thanks acknowledged, a done request marked, good news
+     * celebrated. Never instead of answering a question, never on every
+     * message, never on your own.
+     */
+    async react(apiKey: string, messageId: SaltId, emoji: string): Promise<ReactionSummary> {
+      return request("POST", `/api/v1/messages/${encodeURIComponent(String(messageId))}/reactions`, apiKey, { emoji });
+    },
+
+    /** The emoji this identity has used, for picking one (`GET /api/v1/reactions/mine`). */
+    async myReactions(apiKey: string): Promise<unknown> {
+      return request("GET", "/api/v1/reactions/mine", apiKey);
     },
 
     /** Ephemeral "is typing" ping. Fire-and-forget by design -- a failed ping must never block a reply. */

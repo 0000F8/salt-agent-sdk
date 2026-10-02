@@ -1395,6 +1395,28 @@ export function createActions(options: ActionsOptions) {
       execute: identityAskAction,
     },
     {
+      name: "react_to_message",
+      description:
+        "React to a message with ONE emoji. Use sparingly: not all the time, just when you choose, and only if it " +
+        "relevantly complements the chat in a friendly way (thank someone back, mark a request done with a check, " +
+        "celebrate good news, show you are on it). Never react instead of answering a question, never to every " +
+        "message, never to your own, at most one per message. Calling it again with the same emoji removes yours.",
+      schema: {
+        type: "object",
+        properties: {
+          message_id: { type: "string", description: "The id of the message to react to (the incoming message's message_id)." },
+          emoji: { type: "string", description: "Exactly one emoji, e.g. a thumbs up or a check mark." },
+        },
+        required: ["message_id", "emoji"],
+      },
+      execute: async (caller: AgentIdentity, input: { message_id: SaltId; emoji: string }) => {
+        const id = String(input?.message_id ?? "").trim();
+        if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("message_id must be a plain Salt message id.");
+        const result = await client.react(caller.apiKey, id, String(input?.emoji ?? ""));
+        return { ok: true, ...result };
+      },
+    },
+    {
       name: "identity_revoke",
       description:
         "Revoke a section disclosure you previously sent with identity_share -- stops it being served again " +
