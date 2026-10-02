@@ -1410,7 +1410,9 @@ export function createActions(options: ActionsOptions) {
         required: ["message_id", "emoji"],
       },
       execute: async (caller: AgentIdentity, input: { message_id: SaltId; emoji: string }) => {
-        const result = await client.react(caller.apiKey, input.message_id, input.emoji);
+        const id = String(input?.message_id ?? "").trim();
+        if (!/^[A-Za-z0-9_-]+$/.test(id)) throw new Error("message_id must be a plain Salt message id.");
+        const result = await client.react(caller.apiKey, id, String(input?.emoji ?? ""));
         return { ok: true, ...result };
       },
     },

@@ -1498,7 +1498,7 @@ export function createSaltClient(options: SaltClientOptions) {
      * message, never on your own.
      */
     async react(apiKey: string, messageId: SaltId, emoji: string): Promise<ReactionSummary> {
-      return request("POST", `/api/v1/messages/${messageId}/reactions`, apiKey, { emoji });
+      return request("POST", `/api/v1/messages/${encodeURIComponent(String(messageId))}/reactions`, apiKey, { emoji });
     },
 
     /** The emoji this identity has used, for picking one (`GET /api/v1/reactions/mine`). */
