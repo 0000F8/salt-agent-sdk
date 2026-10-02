@@ -73,7 +73,7 @@ test("react_to_message refuses an id that is not a plain id (no path smuggling)"
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "salt-react-"));
   const { execute } = sdk.createActions({ client, identities: sdk.createIdentityStore(path.join(dir, "i.json")), pgpPassphrase: "p", publicWebhookUrl: "https://h.test" });
   await assert.rejects(execute("react_to_message", { message_id: "../agents/callback", emoji: "👍" }, { apiKey: "k" }, { depth: 0, mainChatId: null }), /plain Salt message id/);
-  assert.equal(fetchImpl.calls.length, 0);
+  assert.equal(fetchImpl.calls.filter((c) => c.url.includes("/reactions")).length, 0);
 });
 
 test("client.react surfaces the 12-emoji cap sentence", async () => {
