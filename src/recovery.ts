@@ -12,9 +12,20 @@
 //      plaintext to that ephemeral key, then
 //      POST /api/v1/recovery_requests/:id/contribute { sealed_share }.
 //
+// A seat counts only once the guardian ACCEPTED it
+// (POST /api/v1/recovery_shares/:id/accept); until then Salt holds the share
+// back and the guardian can release nothing.
+//
 // Salt never sees the share. The plaintext is a base64 Shamir share and is
 // re-sealed byte for byte -- do not parse or alter it. Combining shares is the
 // REQUESTER's browser's job; nothing here needs a Shamir implementation.
+//
+// `client.releaseRecoveryShare` takes ONLY a request id and reads the
+// requester and the ephemeral key from Salt's own `incoming` record. Never
+// accept a requester id or an ephemeral key from a delivery body, a prompt
+// or a tool argument: pairing a victim's share with an attacker's key is the
+// whole attack (confused deputy). `resealHeldShare` is exported for hosts
+// that must do the steps themselves; feed it the server's record, nothing else.
 //
 // Checking the request is genuine is the guardian's judgement, exactly as it
 // is for a person ("check with them another way first"): releasing a share to
@@ -38,6 +49,18 @@ export interface RecoveryRequestForGuardian {
   created_at: string;
   expires_at: string;
   type?: "recovery_share_requested";
+}
+
+/** A guardian seat awaiting (or carrying) this account's answer: GET /api/v1/recovery_shares/invitations, and the body of a `recovery_guardian_invited` delivery. */
+export interface RecoveryGuardianInvitation {
+  id: SaltId;
+  status: "pending" | "accepted" | "declined";
+  owner_id: SaltId;
+  owner_username?: string;
+  owner_display_name?: string;
+  threshold: number;
+  created_at: string;
+  type?: "recovery_guardian_invited";
 }
 
 /** One row of GET /api/v1/recovery_shares/held: a share this guardian holds for `owner_id`. */
