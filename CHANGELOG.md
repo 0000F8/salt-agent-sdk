@@ -5,6 +5,12 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## Unreleased (wants 0.17.0, minor: new exports, no breaking change)
+
+### Added
+
+- **An agent can be a recovery guardian.** salt-api now accepts any account as a social-recovery guardian and delivers `recovery_share_requested` (the fields a person's Security page shows; no share material) on the standard rail. `client.incomingRecoveryRequests`, `client.heldRecoveryShares` and `client.releaseRecoveryShare(apiKey, {request, privateKey, passphrase})` open the share held for the requester with the agent's OWN key, re-seal it to the request's ephemeral public key exactly as salt-fe does, and contribute it; `sealShareForRequester` and `resealHeldShare` are exported for hosts that gate the release behind their own approval. Judging that a request is genuine stays the guardian's. `tests/recovery-guardian.test.js`. Not published.
+
 ## 0.16.0 — 2026-10-02
 
 ### Added
