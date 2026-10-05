@@ -27,15 +27,18 @@ test("releaseRecoveryShare opens the held share, re-seals it to the ephemeral ke
   const calls = [];
   const fetchImpl = async (url, opts) => {
     calls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : undefined, key: opts.headers["api-key"] });
+    if (url.includes("/recovery_request/incoming")) {
+      return jsonResponse(200, [{ id: "req-1", requester_id: "owner-1", ephemeral_public_key: ephemeral.publicKey,
+        threshold: 2, collected: 0, already_contributed: false, created_at: "t", expires_at: "t" }]);
+    }
     if (url.includes("/recovery_shares/held")) {
       return jsonResponse(200, [{ owner_id: "owner-1", encrypted_share, threshold: 2 }]);
     }
     return jsonResponse(201, { collected: 1, threshold: 2 });
   };
   const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
-  const request = { id: "req-1", requester_id: "owner-1", ephemeral_public_key: ephemeral.publicKey };
 
-  const result = await client.releaseRecoveryShare("agent-key", { request, privateKey: guardian.privateKey, passphrase: "g-pass" });
+  const result = await client.releaseRecoveryShare("agent-key", { requestId: "req-1", privateKey: guardian.privateKey, passphrase: "g-pass" });
   assert.deepStrictEqual(result, { collected: 1, threshold: 2 });
 
   const post = calls.find((c) => c.method === "POST");
@@ -47,6 +50,40 @@ test("releaseRecoveryShare opens the held share, re-seals it to the ephemeral ke
   const opened = await sdk.decrypt(post.body.sealed_share, ephemeral.privateKey, "e-pass");
   assert.strictEqual(opened, SHARE);
   await assert.rejects(sdk.decrypt(post.body.sealed_share, guardian.privateKey, "g-pass"));
+});
+
+test("releaseRecoveryShare refuses an id the server did not list, and ignores any requester/key a caller smuggles in", async () => {
+  const guardian = await keypair("g");
+  const attacker = await keypair("a");
+  const real = await keypair("r");
+  const encrypted_share = await sdk.encryptFor("SHARE", [guardian.publicKey]);
+  const posts = [];
+  const fetchImpl = async (url, opts) => {
+    if (opts.method === "POST") { posts.push(JSON.parse(opts.body)); return jsonResponse(201, { collected: 1, threshold: 2 }); }
+    if (url.includes("/recovery_request/incoming")) {
+      return jsonResponse(200, [{ id: "req-1", requester_id: "owner-1", ephemeral_public_key: real.publicKey }]);
+    }
+    return jsonResponse(200, [{ owner_id: "owner-1", encrypted_share, threshold: 2 }]);
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+
+  await assert.rejects(client.releaseRecoveryShare("k", { requestId: "forged", privateKey: guardian.privateKey, passphrase: "g" }), /no open recovery request/);
+  assert.strictEqual(posts.length, 0);
+
+  // Extra fields (a forged requester / key) are not part of the contract and change nothing.
+  await client.releaseRecoveryShare("k", { requestId: "req-1", requester_id: "victim", ephemeral_public_key: attacker.publicKey, privateKey: guardian.privateKey, passphrase: "g" });
+  assert.strictEqual(await sdk.decrypt(posts[0].sealed_share, real.privateKey, "r"), "SHARE");
+  await assert.rejects(sdk.decrypt(posts[0].sealed_share, attacker.privateKey, "a"));
+});
+
+test("invitations can be listed, accepted and declined", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => { calls.push(`${opts.method} ${url.split("salt.test")[1].split("?")[0]}`); return jsonResponse(200, []); };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+  await client.recoveryGuardianInvitations("k");
+  await client.acceptRecoveryGuardian("k", "s1");
+  await client.declineRecoveryGuardian("k", "s2");
+  assert.deepStrictEqual(calls, ["GET /api/v1/recovery_shares/invitations", "POST /api/v1/recovery_shares/s1/accept", "POST /api/v1/recovery_shares/s2/decline"]);
 });
 
 test("resealHeldShare refuses when no share is held for that requester", async () => {

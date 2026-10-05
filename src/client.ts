@@ -14,7 +14,7 @@ import {
   type IdentitySections,
   type SignedCard,
 } from "./identity.js";
-import { resealHeldShare, type HeldRecoveryShare, type RecoveryRequestForGuardian } from "./recovery.js";
+import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitation, type RecoveryRequestForGuardian } from "./recovery.js";
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
 
 // --- Identity disclosures (R3, identityShare.ts) --------------------------
@@ -1406,25 +1406,56 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * Seats other accounts have asked the caller to hold and the caller has
+     * not answered yet (`recovery_guardian_invited` arrives the same way on
+     * the delivery rail). Nothing is released until a seat is accepted.
+     */
+    async recoveryGuardianInvitations(apiKey: string): Promise<RecoveryGuardianInvitation[]> {
+      return request("GET", `/api/v1/recovery_shares/invitations?_=${Date.now()}`, apiKey);
+    },
+
+    /** Accept a guardian seat (only the named guardian can). Idempotent answers are refused with 422. */
+    async acceptRecoveryGuardian(apiKey: string, seatId: SaltId): Promise<RecoveryGuardianInvitation> {
+      return request("POST", `/api/v1/recovery_shares/${seatId}/accept`, apiKey);
+    },
+
+    /** Decline a guardian seat. */
+    async declineRecoveryGuardian(apiKey: string, seatId: SaltId): Promise<RecoveryGuardianInvitation> {
+      return request("POST", `/api/v1/recovery_shares/${seatId}/decline`, apiKey);
+    },
+
+    /**
      * Release the caller's share for one recovery request: open the held
      * share with the caller's OWN private key, re-seal it to the request's
      * ephemeral public key (what salt-fe does in a person's browser), and
-     * POST it. Salt only ever sees the re-sealed armor. Only call this once
-     * the request is believed genuine -- see recovery.ts. Idempotent: a
+     * POST it. Salt only ever sees the re-sealed armor.
+     *
+     * Takes only the request id. The requester and the ephemeral key are
+     * read from Salt's own record (`GET /recovery_request/incoming`), never
+     * from the caller, so a delivery body or a hostile prompt cannot pair a
+     * victim's share with an attacker's key (confused deputy). Only call this
+     * once the request is believed genuine -- see recovery.ts. Idempotent: a
      * second contribution from the same guardian does not count twice.
      */
     async releaseRecoveryShare(
       apiKey: string,
-      params: { request: RecoveryRequestForGuardian; privateKey: string; passphrase: string }
+      params: { requestId: SaltId; privateKey: string; passphrase: string }
     ): Promise<{ collected: number; threshold: number | null }> {
+      const incoming = await request<RecoveryRequestForGuardian[]>(
+        "GET",
+        `/api/v1/recovery_request/incoming?_=${Date.now()}`,
+        apiKey
+      );
+      const record = incoming.find((r) => String(r.id) === String(params.requestId));
+      if (!record) throw new Error("no open recovery request with that id is waiting on this guardian");
       const held = await request<HeldRecoveryShare[]>("GET", `/api/v1/recovery_shares/held?_=${Date.now()}`, apiKey);
       const sealed_share = await resealHeldShare({
         held,
-        request: params.request,
+        request: record,
         privateKey: params.privateKey,
         passphrase: params.passphrase,
       });
-      return request("POST", `/api/v1/recovery_requests/${params.request.id}/contribute`, apiKey, { sealed_share });
+      return request("POST", `/api/v1/recovery_requests/${record.id}/contribute`, apiKey, { sealed_share });
     },
 
     /**
