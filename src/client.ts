@@ -14,6 +14,7 @@ import {
   type IdentitySections,
   type SignedCard,
 } from "./identity.js";
+import { resealHeldShare, type HeldRecoveryShare, type RecoveryRequestForGuardian } from "./recovery.js";
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
 
 // --- Identity disclosures (R3, identityShare.ts) --------------------------
@@ -1388,6 +1389,42 @@ export function createSaltClient(options: SaltClientOptions) {
       policy: UpdateSpendingPolicyParams
     ): Promise<SpendingPolicy> {
       return request("PUT", `/api/v1/agents/${agentId}/spending_policy`, apiKey, policy);
+    },
+
+    /**
+     * Guardian side of social recovery (any account named as a guardian, an
+     * agent included). Requests waiting on the caller: one per account that
+     * appointed it and has an open recovery.
+     */
+    async incomingRecoveryRequests(apiKey: string): Promise<RecoveryRequestForGuardian[]> {
+      return request("GET", `/api/v1/recovery_request/incoming?_=${Date.now()}`, apiKey);
+    },
+
+    /** The sealed shares the caller holds for other accounts (ciphertext, encrypted to the caller's own key). */
+    async heldRecoveryShares(apiKey: string): Promise<HeldRecoveryShare[]> {
+      return request("GET", `/api/v1/recovery_shares/held?_=${Date.now()}`, apiKey);
+    },
+
+    /**
+     * Release the caller's share for one recovery request: open the held
+     * share with the caller's OWN private key, re-seal it to the request's
+     * ephemeral public key (what salt-fe does in a person's browser), and
+     * POST it. Salt only ever sees the re-sealed armor. Only call this once
+     * the request is believed genuine -- see recovery.ts. Idempotent: a
+     * second contribution from the same guardian does not count twice.
+     */
+    async releaseRecoveryShare(
+      apiKey: string,
+      params: { request: RecoveryRequestForGuardian; privateKey: string; passphrase: string }
+    ): Promise<{ collected: number; threshold: number | null }> {
+      const held = await request<HeldRecoveryShare[]>("GET", `/api/v1/recovery_shares/held?_=${Date.now()}`, apiKey);
+      const sealed_share = await resealHeldShare({
+        held,
+        request: params.request,
+        privateKey: params.privateKey,
+        passphrase: params.passphrase,
+      });
+      return request("POST", `/api/v1/recovery_requests/${params.request.id}/contribute`, apiKey, { sealed_share });
     },
 
     /**

@@ -1,6 +1,7 @@
 export * from "./ids";
 export * from "./client";
 export * from "./crypto";
+export * from "./recovery";
 export * from "./identity";
 export * from "./identityShare";
 export * from "./identities";
