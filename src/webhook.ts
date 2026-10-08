@@ -2041,7 +2041,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "mandate_revoked") return handleMandateLifecycleEvent("revoked", body as never, headerAgentId);
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
-    if (typeof body?.type === "string" && body.type.startsWith("device_session")) {
+    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue")) {
       await options.onDeviceDelivery?.(body.type, body);
       return;
     }
