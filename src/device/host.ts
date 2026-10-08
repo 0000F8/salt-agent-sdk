@@ -42,12 +42,15 @@ import {
   MAX_COMMANDS_PER_SECOND,
   MAX_DEVICE_PLAINTEXT_BYTES,
   MAX_OBSERVE_PER_SECOND,
+  MUTATING_OPS,
+  RESULT_CACHE_SIZE,
   type AppsResult,
   type ClickArgs,
   type DeviceCountClass,
   type DeviceErrorCode,
   type DeviceHeader,
   type DeviceOp,
+  type DevicePauseReason,
   type FileResult,
   type KeyArgs,
   type ObservationResult,
@@ -111,9 +114,53 @@ export interface DeviceHostTransport {
   reportCounts(sessionId: SaltId, counts: Partial<Record<DeviceCountClass, number>>): Promise<void>;
   /** POST /device_sessions/:sid/stop with an end reason (subtract-only). */
   stop(sessionId: SaltId, reason: string): Promise<void>;
+  /** POST /device_sessions/:sid/pause `{reason}` (device key). Optional: a
+   *  transport without it still pauses locally. The only place the pause
+   *  endpoint's shape lives is httpDeviceHostTransport (http.ts). */
+  pause?(sessionId: SaltId, reason: DevicePauseReason): Promise<void>;
+  /** POST /device_sessions/:sid/resume (device key). */
+  resume?(sessionId: SaltId): Promise<void>;
 }
 
 export class DeviceBeatOverError extends Error {}
+
+/** A FIFO async mutex. One of these guards every mutating command (click /
+ *  type / key / scroll / focus_app) on the machine, whichever session sent it.
+ *  `sharedDeviceLock` is the process-wide instance every host uses by default,
+ *  so two sessions on one machine can never interleave input. salt-device may
+ *  pass its own via `options.deviceLock` (e.g. to also hold it around local
+ *  tray actions that inject input). */
+export class DeviceLock {
+  private tail: Promise<void> = Promise.resolve();
+  /** Resolves with a release function once every earlier holder released. */
+  acquire(): Promise<() => void> {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const ready = this.tail.then(() => release_once(release));
+    this.tail = this.tail.then(() => gate);
+    return ready;
+  }
+  /** Run `fn` while holding the lock. */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    const release = await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+}
+function release_once(release: () => void): () => void {
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    release();
+  };
+}
+
+/** The process-wide device mutex (default for every host). */
+export const sharedDeviceLock = new DeviceLock();
 
 export interface DeviceHostCallbacks {
   /** The LOCAL approval prompt for an `ask`-mode command. Resolves true if the
@@ -169,6 +216,16 @@ export interface DeviceHost {
   stop(reason?: string): Promise<void>;
   /** The spent count of budgeted actions, for the indicator. */
   actionsSpent(): number;
+  /** Pause the session: every command (except `stop` and `cancel`) is refused
+   *  `paused` with `reason` until resume(). Takes effect synchronously; the
+   *  returned promise settles when Salt has been told (a failed report never
+   *  un-pauses). Idempotent; a second reason replaces the first. Does not
+   *  interrupt a command already executing. */
+  pause(reason: DevicePauseReason): Promise<void>;
+  /** Clear the pause and tell Salt. No-op when not paused. */
+  resume(): Promise<void>;
+  /** The current pause reason, or null. */
+  pausedReason(): DevicePauseReason | null;
 }
 
 export function createDeviceHost(
@@ -176,12 +233,30 @@ export function createDeviceHost(
   handlers: DeviceHostHandlers,
   transport: DeviceHostTransport,
   callbacks: DeviceHostCallbacks = {},
-  options: { beatIntervalMs?: number; neverAllowedApps?: readonly string[] } = {}
+  options: {
+    beatIntervalMs?: number;
+    neverAllowedApps?: readonly string[];
+    /** Device-wide mutex for mutating ops. Default: the process-wide
+     *  `sharedDeviceLock`, so every host in this process shares one. */
+    deviceLock?: DeviceLock;
+    /** Clock, for tests. */
+    now?: () => number;
+  } = {}
 ): DeviceHost {
+  const deviceLock = options.deviceLock ?? sharedDeviceLock;
+  const clock = options.now ?? Date.now;
   const beatIntervalMs = options.beatIntervalMs ?? 5_000;
   const neverAllowed = (options.neverAllowedApps ?? NEVER_ALLOWED_APPS).map((s) => s.toLowerCase());
 
   let lastSeq = 0;
+  let pausedReason: DevicePauseReason | null = null;
+  // One command at a time per session: every command runs behind this tail.
+  let tail: Promise<unknown> = Promise.resolve();
+  // Ids received and not yet started / ids a `cancel` asked us to drop.
+  const queuedIds = new Map<string, number>();
+  const cancelledIds = new Set<string>();
+  // The last RESULT_CACHE_SIZE results by command id (insertion order = age).
+  const resultCache = new Map<string, { op: string; body?: unknown }>();
   let spent = 0; // budgeted actions used
   let ended = false;
   const startedAt = Date.now();
@@ -226,7 +301,7 @@ export function createDeviceHost(
     return true;
   }
 
-  async function reply(header: DeviceHeader, op: string, body?: unknown): Promise<void> {
+  async function reply(header: DeviceHeader, op: string, body?: unknown): Promise<{ op: string; body?: unknown }> {
     const id = deviceMessageId();
     const plaintext = encodeDeviceMessage(
       { v: DEVICE_PROTOCOL_VERSION, id, seq: nextOutSeq(), op, session: snapshot.sessionId, re: header.id },
@@ -241,9 +316,18 @@ export function createDeviceHost(
       );
       await transport.postResult(small, snapshot.readers);
       bump("error");
-      return;
+      return { op: "error", body: { code: "too_large", message: "result exceeds the per-message limit" } };
     }
     await transport.postResult(plaintext, snapshot.readers);
+    return { op, body };
+  }
+
+  function remember(id: string, r: { op: string; body?: unknown }): void {
+    resultCache.delete(id);
+    resultCache.set(id, r);
+    while (resultCache.size > RESULT_CACHE_SIZE) {
+      resultCache.delete(resultCache.keys().next().value as string);
+    }
   }
 
   let outSeq = 0;
@@ -252,10 +336,15 @@ export function createDeviceHost(
     return outSeq;
   }
 
-  async function refuse(header: DeviceHeader, code: DeviceErrorCode, message?: string): Promise<void> {
+  async function refuse(
+    header: DeviceHeader,
+    code: DeviceErrorCode,
+    message?: string,
+    extra: { expected_seq?: number; reason?: DevicePauseReason } = {}
+  ): Promise<{ op: string; body?: unknown }> {
     audit({ commandId: header.id, op: header.op, decision: code === "needs_approval" ? "needs_approval" : "refused", code, reason: message });
     if (code !== "needs_approval") bump("error");
-    await reply(header, "error", { code, message });
+    return reply(header, "error", { code, message, ...extra });
   }
 
   function fileInScope(rule: DeviceCapRule | undefined, path: string): boolean {
@@ -271,6 +360,9 @@ export function createDeviceHost(
     return rule.apps.some((a) => a.toLowerCase() === app.toLowerCase());
   }
 
+  /** Entry point. Sync part: decode, drop what is not ours, handle `cancel`
+   *  immediately. Everything else queues behind the session's tail so commands
+   *  run strictly one at a time, in arrival order. */
   async function handleCommand(plaintext: string): Promise<boolean> {
     if (ended) return false;
     let decoded;
@@ -289,16 +381,60 @@ export function createDeviceHost(
     // Only our active session; anything else is dropped silently.
     if (!sameId(header.session, snapshot.sessionId)) return false;
 
+    if (header.op === "cancel" && header.v === DEVICE_PROTOCOL_VERSION) {
+      // Out of band: never queued, consumes no seq. Drops a command that has
+      // not started; a started or finished one keeps its stored result.
+      const id = (body as { id?: unknown } | undefined)?.id;
+      if (typeof id === "string" && (queuedIds.get(id) ?? 0) > 0) cancelledIds.add(id);
+      return true;
+    }
+
+    queuedIds.set(header.id, (queuedIds.get(header.id) ?? 0) + 1);
+    const run = tail.then(() => processCommand(header, body));
+    tail = run.catch(() => undefined);
+    return run;
+  }
+
+  async function processCommand(header: DeviceHeader, body: unknown): Promise<boolean> {
+    const left = (queuedIds.get(header.id) ?? 1) - 1;
+    if (left > 0) queuedIds.set(header.id, left);
+    else queuedIds.delete(header.id);
+    if (cancelledIds.delete(header.id)) {
+      audit({ commandId: header.id, op: header.op, decision: "refused", reason: "cancelled before start" });
+      return true;
+    }
+    if (ended) return true;
+
     if (header.v !== DEVICE_PROTOCOL_VERSION) {
       await refuse(header, "unsupported", `protocol v=${header.v}`);
       return true;
     }
 
-    // Ordering: strictly increasing seq per sender. A repeat is a dedupe no-op;
-    // a forward gap is out_of_order (the agent must not skip).
-    if (header.seq <= lastSeq) return true; // already processed or a replay
+    // Idempotency: a repeated id returns the stored result, never re-executes.
+    const stored = resultCache.get(header.id);
+    if (stored) {
+      await reply(header, stored.op, stored.body);
+      return true;
+    }
+
+    // Expiry: not executed, consumes no seq.
+    if (header.exp !== undefined && clock() >= header.exp) {
+      await refuse(header, "expired", "command expired before it started", { expected_seq: lastSeq + 1 });
+      return true;
+    }
+
+    // Paused: the person (or a secure field) has the device. `stop` still works.
+    if (pausedReason !== null && header.op !== "stop") {
+      await refuse(header, "paused", `paused: ${pausedReason}`, { expected_seq: lastSeq + 1, reason: pausedReason });
+      return true;
+    }
+
+    // Ordering: strictly increasing seq per sender. A repeat of a KNOWN id was
+    // answered from the cache above; any other seq that is not exactly the next
+    // one (a gap, or a stale seq from a client that lost its place) is
+    // out_of_order, and the agent resyncs to expected_seq.
     if (header.seq !== lastSeq + 1) {
-      await refuse(header, "out_of_order", `expected seq ${lastSeq + 1}, got ${header.seq}`);
+      await refuse(header, "out_of_order", `expected seq ${lastSeq + 1}, got ${header.seq}`, { expected_seq: lastSeq + 1 });
       return true;
     }
     lastSeq = header.seq;
@@ -385,17 +521,24 @@ export function createDeviceHost(
       return true;
     }
 
-    // Run the handler (the seam).
+    // Run the handler (the seam). Mutating ops hold the device-wide mutex so
+    // two sessions on one machine never interleave input.
     try {
-      const result = await dispatch(op, body);
+      const result = MUTATING_OPS.includes(op)
+        ? await deviceLock.run(() => dispatch(op, body))
+        : await dispatch(op, body);
       if (budgeted) spent += 1;
       if (cls) bump(cls);
       audit({ commandId: header.id, op: header.op, decision: "ran" });
       if (mode === "notify") callbacks.onNotify?.(op, body);
+      remember(header.id, { op: result.op, body: result.body });
       await reply(header, result.op, result.body);
     } catch (e) {
       const code: DeviceErrorCode = e instanceof DeviceProtocolError ? e.code : "failed";
-      await refuse(header, code, e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      // The handler ran (or tried to): a retry by id must not run it again.
+      remember(header.id, { op: "error", body: { code, message } });
+      await refuse(header, code, message);
       return true;
     }
 
@@ -473,7 +616,31 @@ export function createDeviceHost(
     }
   }
 
-  return { handleCommand, start, stop, actionsSpent: () => spent };
+  async function pause(reason: DevicePauseReason): Promise<void> {
+    if (ended) return;
+    const changed = pausedReason !== reason;
+    pausedReason = reason;
+    audit({ commandId: "-", op: "pause", decision: "refused", reason });
+    if (!changed) return;
+    try {
+      await transport.pause?.(snapshot.sessionId, reason);
+    } catch {
+      /* the local pause stands; Salt learns on the next report */
+    }
+  }
+
+  async function resume(): Promise<void> {
+    if (ended || pausedReason === null) return;
+    pausedReason = null;
+    audit({ commandId: "-", op: "resume", decision: "ran" });
+    try {
+      await transport.resume?.(snapshot.sessionId);
+    } catch {
+      /* see pause() */
+    }
+  }
+
+  return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason };
 }
 
 const AGENT_OP_SET = new Set<DeviceOp>([
@@ -487,5 +654,6 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "read_file",
   "write_file",
   "stop",
+  "cancel",
   "shell",
 ]);

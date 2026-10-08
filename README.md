@@ -1029,6 +1029,50 @@ pushes the update to everyone with the app open, live, with no reply at
 all. Works identically under webhook and socket mode, like every other
 event this SDK dispatches.
 
+## Device control: one controller, a queue, the person first
+
+A device (a computer running the Salt desktop app) has at most ONE controlling
+agent at a time. `createDeviceClient` (agent side) and `createDeviceHost`
+(device side) implement the lock; the server half is in
+`salt-api/docs/DEVICE_PROTOCOL.md`.
+
+```ts
+const device = createDeviceClient(httpDeviceAgentTransport({ host, apiKey }), { deviceId });
+device.onState((s) => console.log(s)); // queued(position) | requested | active | paused(reason) | resumed | ended(reason)
+await device.open();                    // waits through queued/requested on deliveries, never polls
+await device.open({ wait: false });     // or: return at once with the queued state
+await device.click({ x: 10, y: 20 });   // one command at a time, however many callers
+```
+
+- **Queue.** `open()` against a device another agent controls is answered 202 `queued`;
+  it resolves when a `device_session` delivery (`promoted`, then approval) makes the
+  session `active`. Feed deliveries in with `device.handleDelivery("device_session", body)`
+  (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext)`.
+- **Reattach.** If this agent already has a live session (409 `session_live`) `open()`
+  calls `POST /device_sessions/:id/reattach` and continues at `last_seq + 1`.
+- **One command in flight.** Commands carry `id`, `seq` and `exp` (epoch ms, now + 30 s).
+  The client queues concurrent calls and sends them one at a time; a resend reuses the
+  `id`; `out_of_order` (with `expected_seq`) and `expired` are resent once; a client
+  timeout sends `cancel {id}`.
+- **Paused.** While the person is using the machine or a secure field needs them, the
+  session is paused: commands reject at once with `DevicePausedError` (`.reason`) and
+  nothing is sent. Wait for the `resumed` state.
+
+Device side:
+
+```ts
+const host = createDeviceHost(snapshot, handlers, httpDeviceHostTransport({ host, apiKey }), callbacks);
+host.start();
+await host.pause("person_active");  // refuses commands with `paused`; tells Salt (POST .../pause)
+await host.resume();                 // POST .../resume
+```
+
+The host runs one command at a time per session, keeps the last 64 results by `id`
+(a repeated `id` returns the stored result without executing), refuses `expired`
+commands, and holds ONE device-wide mutex around `click/type/key/scroll/focus_app`
+shared by every host in the process (`sharedDeviceLock`, or pass `{deviceLock}`).
+Constants (`COMMAND_TTL_MS`, `RESULT_CACHE_SIZE`, `MUTATING_OPS`) live in `device/protocol.ts`.
+
 ## Reference implementations
 
 - [`salt-claude-agent`](../salt-claude-agent) — full-featured agent built

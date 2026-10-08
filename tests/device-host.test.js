@@ -130,15 +130,17 @@ test("ask mode refuses with needs_approval until the person approves", async () 
   assert.equal((await lastResult(tx)).header.op, "ack");
 });
 
-test("a seq that does not strictly increase is out_of_order; a replay is a no-op", async () => {
+test("a seq that does not strictly increase is out_of_order; a stale seq is out_of_order too", async () => {
   const h = recordingHandlers();
   const tx = recordingTransport();
   const host = sdk.createDeviceHost(snapshot({ "device.act": { mode: "auto" } }), h, tx);
   await host.handleCommand(cmd(1, "type", { text: "a" }));
   await host.handleCommand(cmd(3, "type", { text: "skip" })); // gap
   assert.equal((await lastResult(tx)).body.code, "out_of_order");
-  await host.handleCommand(cmd(1, "type", { text: "replay" })); // already processed
+  await host.handleCommand(sdk.encodeDeviceMessage({ v: 1, id: "stale", seq: 1, op: "type", session: "sess-1" }, { text: "replay" })); // new id, stale seq
   assert.equal(h.calls.length, 1); // only the first ran
+  assert.equal((await lastResult(tx)).body.code, "out_of_order");
+  assert.equal((await lastResult(tx)).body.expected_seq, 2);
 });
 
 test("a never-allowed app is forbidden even with device.apps granted", async () => {
