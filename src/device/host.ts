@@ -109,9 +109,15 @@ export interface DeviceHostTransport {
   postResult(plaintext: string, readers: LaneReaders): Promise<void>;
   /** POST /device_sessions/:sid/beat. A 409 means the session is over: the
    *  transport should throw a DeviceBeatOverError so the host stops at once. */
-  beat(sessionId: SaltId): Promise<void>;
-  /** PATCH /device_sessions/:sid/counts with whole-number per-class counts. */
-  reportCounts(sessionId: SaltId, counts: Partial<Record<DeviceCountClass, number>>): Promise<void>;
+  beat(sessionId: SaltId, report?: DeviceBeatReport): Promise<void>;
+  /** PATCH /device_sessions/:sid/counts with whole-number per-class counts and
+   *  the newest executed seq. Salt extends an agent's lease ONLY from these
+   *  device reports (it never sees commands). */
+  reportCounts(
+    sessionId: SaltId,
+    counts: Partial<Record<DeviceCountClass, number>>,
+    report?: { last_seq?: number }
+  ): Promise<void>;
   /** POST /device_sessions/:sid/stop with an end reason (subtract-only). */
   stop(sessionId: SaltId, reason: string): Promise<void>;
   /** POST /device_sessions/:sid/pause `{reason}` (device key). Optional: a
@@ -120,6 +126,13 @@ export interface DeviceHostTransport {
   pause?(sessionId: SaltId, reason: DevicePauseReason): Promise<void>;
   /** POST /device_sessions/:sid/resume (device key). */
   resume?(sessionId: SaltId): Promise<void>;
+}
+
+/** The optional body of a beat: when the device last executed a command
+ *  (ISO8601) and that command's seq. Sent on every beat once one has run. */
+export interface DeviceBeatReport {
+  last_command_at?: string;
+  last_seq?: number;
 }
 
 export class DeviceBeatOverError extends Error {}
@@ -249,6 +262,9 @@ export function createDeviceHost(
   const neverAllowed = (options.neverAllowedApps ?? NEVER_ALLOWED_APPS).map((s) => s.toLowerCase());
 
   let lastSeq = 0;
+  // Newest command this host actually executed (for lease reports).
+  let lastRanAt: string | null = null;
+  let lastRanSeq: number | null = null;
   let pausedReason: DevicePauseReason | null = null;
   // One command at a time per session: every command runs behind this tail.
   let tail: Promise<unknown> = Promise.resolve();
@@ -284,7 +300,7 @@ export function createDeviceHost(
       for (const k of Object.keys(pendingCounts) as DeviceCountClass[]) delete pendingCounts[k];
       if (Object.keys(batch).length === 0) return;
       try {
-        await transport.reportCounts(snapshot.sessionId, batch);
+        await transport.reportCounts(snapshot.sessionId, batch, lastRanSeq !== null ? { last_seq: lastRanSeq } : undefined);
       } catch {
         /* counts are metadata; a failed PATCH never stops control */
       }
@@ -528,6 +544,8 @@ export function createDeviceHost(
         ? await deviceLock.run(() => dispatch(op, body))
         : await dispatch(op, body);
       if (budgeted) spent += 1;
+      lastRanAt = new Date(clock()).toISOString();
+      lastRanSeq = header.seq;
       if (cls) bump(cls);
       audit({ commandId: header.id, op: header.op, decision: "ran" });
       if (mode === "notify") callbacks.onNotify?.(op, body);
@@ -584,7 +602,12 @@ export function createDeviceHost(
     if (ended || beatTimer) return;
     beatTimer = setInterval(async () => {
       try {
-        await transport.beat(snapshot.sessionId);
+        // Beats keep running while paused: Salt ends a paused session that stops
+        // beating after 15 s. After a command has run, every beat says so.
+        await transport.beat(
+          snapshot.sessionId,
+          lastRanAt !== null ? { last_command_at: lastRanAt, last_seq: lastRanSeq ?? undefined } : undefined
+        );
       } catch (e) {
         if (e instanceof DeviceBeatOverError) {
           await stop("lost_contact");

@@ -11,7 +11,8 @@
 import { encryptFor } from "../crypto.js";
 import type { SaltId } from "../ids.js";
 import { DeviceSessionLiveError, type DeviceClientTransport, type DeviceSessionMeta, type LaneReaders } from "./client.js";
-import { DeviceBeatOverError, type DeviceHostTransport } from "./host.js";
+import { DeviceBeatOverError, type DeviceBeatReport, type DeviceHostTransport } from "./host.js";
+import { DeviceProtocolError } from "./protocol.js";
 import type { DeviceCountClass, DevicePauseReason } from "./protocol.js";
 
 export interface DeviceHttpOptions {
@@ -68,6 +69,10 @@ export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientT
         "POST",
         `/api/v1/device_sessions/${sessionId}/reattach`
       );
+      if (status === 409) {
+        const d = data as unknown as { code?: string; end_reason?: string } | undefined;
+        throw new DeviceProtocolError("failed", `session ended: ${d?.end_reason ?? d?.code ?? "ended"}`);
+      }
       if (status >= 400) throw new Error(`reattachSession failed: ${status}`);
       return data;
     },
@@ -107,13 +112,17 @@ export function httpDeviceHostTransport(opts: DeviceHttpOptions): DeviceHostTran
       });
       if (status >= 400) throw new Error(`postResult failed: ${status}`);
     },
-    async beat(sessionId: SaltId): Promise<void> {
-      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/beat`);
+    async beat(sessionId: SaltId, report?: DeviceBeatReport): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/beat`, report);
       if (status === 409) throw new DeviceBeatOverError("session over");
       if (status >= 400) throw new Error(`beat failed: ${status}`);
     },
-    async reportCounts(sessionId: SaltId, counts: Partial<Record<DeviceCountClass, number>>): Promise<void> {
-      await call(opts, "PATCH", `/api/v1/device_sessions/${sessionId}/counts`, { counts });
+    async reportCounts(
+      sessionId: SaltId,
+      counts: Partial<Record<DeviceCountClass, number>>,
+      report?: { last_seq?: number }
+    ): Promise<void> {
+      await call(opts, "PATCH", `/api/v1/device_sessions/${sessionId}/counts`, { counts, ...(report ?? {}) });
     },
     async stop(sessionId: SaltId, reason: string): Promise<void> {
       await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`, { reason });

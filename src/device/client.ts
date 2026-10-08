@@ -488,7 +488,20 @@ export function createDeviceClient(
     const type = typeof b.type === "string" ? b.type : kind;
     // New deliveries carry `event`; the legacy ones only a `device_session_<x>` type.
     const ev = typeof b.event === "string" ? b.event : type.replace(/^device_session_?/, "");
-    const sess = b.session && typeof b.session === "object" ? (b.session as DeviceSessionMeta) : undefined;
+    // The API's delivery IS the session JSON plus type/event/session_id; older
+    // shapes nest it under `session`.
+    const flat = typeof b.id === "string" && typeof b.status === "string";
+    const sess =
+      b.session && typeof b.session === "object"
+        ? (b.session as DeviceSessionMeta)
+        : flat
+          ? ({ ...b } as unknown as DeviceSessionMeta)
+          : undefined;
+    if (flat && sess) {
+      delete (sess as unknown as Record<string, unknown>).type;
+      delete (sess as unknown as Record<string, unknown>).event;
+      delete (sess as unknown as Record<string, unknown>).session_id;
+    }
     const sid = (sess?.id ?? b.session_id) as SaltId | undefined;
     if (meta && sid !== undefined && !sameId(sid, meta.id)) return;
     const status = (b.status ?? sess?.status) as DeviceSessionStatus | undefined;
