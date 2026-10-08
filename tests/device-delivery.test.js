@@ -41,3 +41,10 @@ test("a device_session delivery with no handler set is a silent no-op", async ()
   await d.dispatch({ type: "device_session_request", session: { id: "s1" } }, "dev-1");
   assert.ok(true); // reached here without throwing, and it never fell through to onMessage
 });
+
+test("a device_queue delivery (the device's own rail) reaches onDeviceDelivery too", async () => {
+  const seen = [];
+  const d = dispatcherWith((type, body) => void seen.push([type, body]));
+  await d.dispatch({ type: "device_queue", device_id: "d", controller: null, queue: [] }, "dev-1");
+  assert.deepEqual(seen.map((s) => s[0]), ["device_queue"]);
+});
