@@ -180,6 +180,20 @@ export interface ObserveArgs {
   window?: string;
   max_width?: number;
   format?: "png" | "jpeg";
+  /** Which representation the agent wants back. The device PREFERS and defaults
+   *  to `ui` (a structured snapshot): it is smaller, machine-readable, auditable
+   *  and does not read pixels. `pixels` asks for a rendered image (the raw
+   *  framebuffer path) and `both` asks for a tree with an image beside it; a
+   *  device may still answer `ui` only if its pixel primitive is absent. */
+  want?: "ui" | "pixels" | "both";
+}
+export interface ElementRef {
+  /** The observation id these coordinates / this node were read from. */
+  obs: string;
+  /** A `UiNode.id` within that observation. Present for a SEMANTIC action
+   *  (invoke / set value / focus the named element); absent for a raw
+   *  coordinate action. */
+  node: string;
 }
 export interface ClickArgs {
   x: number;
@@ -187,9 +201,17 @@ export interface ClickArgs {
   button?: "left" | "right";
   count?: 1 | 2;
   obs?: string; // the observation these coordinates were read from
+  /** When present, the device performs the SEMANTIC action on this element
+   *  (its accessibility `press`), not a coordinate click. Preferred: it is
+   *  robust to layout and logs the element, not an (x,y). x/y remain the
+   *  fallback for elements the tree cannot name (a canvas, a custom view). */
+  element?: ElementRef;
 }
 export interface TypeArgs {
   text: string;
+  /** When present, set the value of / type into this named field via the
+   *  accessibility layer, rather than typing at whatever currently has focus. */
+  into?: ElementRef;
 }
 export interface KeyArgs {
   keys: string[];
@@ -211,13 +233,48 @@ export interface WriteFileArgs {
   content_b64: string;
 }
 
+/** One node of a structured UI snapshot: a window, a control, a menu item.
+ *  This is what the PREFERRED observe path returns instead of pixels — the UI
+ *  as the operating system's own accessibility layer already describes it. */
+export interface UiNode {
+  /** Stable within THIS observation, so a later semantic action can name it
+   *  (ElementRef.node). Not stable across observations. */
+  id: string;
+  /** The accessibility role: "window", "button", "textfield", "menuitem", ... */
+  role: string;
+  /** The accessible label / title, when the element has one. */
+  name?: string;
+  /** The current value (a text field's contents, a slider's position, ...). A
+   *  redaction pass blanks this for anything the floor must never reveal. */
+  value?: string;
+  /** Screen bounds, so the agent can still reason spatially and so a raw
+   *  fallback action has coordinates if the semantic one is unavailable. */
+  bounds?: { x: number; y: number; w: number; h: number };
+  /** The owning app's bundle id / exe name. */
+  app?: string;
+  /** The semantic actions this element supports, e.g. ["press","setValue"]. */
+  actions?: string[];
+  children?: UiNode[];
+}
+export interface UiSnapshot {
+  /** The frontmost app at capture time (bundle id / exe). */
+  app?: string;
+  /** The frontmost window's title. */
+  window?: string;
+  root: UiNode;
+}
+/** The result of an `observe`. It carries a structured `ui` snapshot and/or a
+ *  rendered image. The device prefers `ui`; `image_b64` and its size fields are
+ *  present only when pixels were asked for (`want:"pixels"|"both"`) or the tree
+ *  alone could not answer. At least one of `ui` / `image_b64` is always set. */
 export interface ObservationResult {
   obs: string;
-  width: number;
-  height: number;
-  scale: number;
-  format: "png" | "jpeg";
-  image_b64: string;
+  ui?: UiSnapshot;
+  width?: number;
+  height?: number;
+  scale?: number;
+  format?: "png" | "jpeg";
+  image_b64?: string;
 }
 export interface AppsResult {
   apps: Array<{ id: string; name: string; frontmost: boolean }>;

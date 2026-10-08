@@ -7,22 +7,28 @@
 // per-class counts (never content) to the server.
 //
 // ============================================================================
-// THE TWO SEAMS (deliberately NOT implemented here).
+// THE SEAM BOUNDARY (deliberately NOT implemented here).
 // ============================================================================
-// This module performs NO screen capture and NO input injection. Those are the
+// This module performs NO observation and NO input of any kind. It calls the
 // `DeviceHostHandlers` the desktop app injects:
-//   - observe()                      -> screen / window capture  (OS: Electron
-//                                        desktopCapturer + screen)
-//   - click/type/key/scroll()        -> input injection          (OS: a
-//                                        maintained prebuilt native module)
+//   - observe()                      -> a UI observation
+//   - click/type/key/scroll()        -> acting on the UI
 //   - focusApp/listApps/readFile/writeFile() -> app + filesystem access
 // The host decides IF a handler may run (capability, scope, approval mode,
 // never-allowed floor, budget, rate limit, ordering) and what the device tells
-// the server about it afterwards (counts only). The handler decides HOW, using
-// the OS. Everything in THIS file is policy and plumbing; the capability lives
-// entirely in the injected handlers. That split is what keeps the capture +
-// input code -- the part a safety review scrutinises -- in one small, signed,
-// locally-installed place, and keeps the authority model reviewable on its own.
+// the server afterwards (per-class counts only, never content). The handler
+// decides HOW.
+//
+// On the device side (salt-device) each handler is an ORCHESTRATOR over two OS
+// primitives, a preferred one and a sensitive fallback, kept in separate files
+// so either can be replaced on its own:
+//   - observe -> a structured UI snapshot (accessibility tree)   [preferred]
+//                falling back to a raw framebuffer grab           [sensitive]
+//   - act     -> semantic accessibility actions (press/setValue) [preferred]
+//                falling back to raw input-event synthesis        [sensitive]
+// The two sensitive primitives (framebuffer grab, event synthesis) are the only
+// pieces a safety review scrutinises, and the split keeps them small, isolated
+// and swappable while the authority model here stays reviewable on its own.
 // ============================================================================
 
 import {
