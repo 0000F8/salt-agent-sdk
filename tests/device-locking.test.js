@@ -193,8 +193,8 @@ test("host: pause() still pauses when Salt cannot be told", async () => {
   const t = transport();
   t.pause = async () => { throw new Error("offline"); };
   const dh = host(handlers(), t, {}, "sess-1", { deviceLock: new sdk.DeviceLock() });
-  await dh.pause("person_paused");
-  assert.equal(dh.pausedReason(), "person_paused");
+  await dh.pause("person");
+  assert.equal(dh.pausedReason(), "person");
 });
 
 test("host: mutating ops are serialised device-wide across hosts (shared lock)", async () => {
