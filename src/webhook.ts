@@ -526,6 +526,18 @@ export interface WebhookServerOptions {
    * still never sees the marker itself.
    */
   onWorkCancel?: (ctx: WorkCancelContext) => Promise<void> | void;
+  /**
+   * A device-control session lifecycle delivery (behind salt-api's
+   * `Feature :remote_control`): the body's `type` is
+   * `device_session_request` | `device_session_active` | `device_session_ended`,
+   * carrying the session metadata (ids, caps, budget, chat {id, readers}) the
+   * device needs to build its host. These are NOT chat messages and never reach
+   * `onMessage`; the device client (salt-device) passes them straight to its
+   * session controller. The actual command/result traffic rides the device lane
+   * as ordinary encrypted messages, which DO arrive through `onMessage`. The
+   * `type` is forwarded verbatim as the first argument. See src/device/.
+   */
+  onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -2029,6 +2041,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "mandate_revoked") return handleMandateLifecycleEvent("revoked", body as never, headerAgentId);
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
+    if (typeof body?.type === "string" && body.type.startsWith("device_session")) {
+      await options.onDeviceDelivery?.(body.type, body);
+      return;
+    }
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
