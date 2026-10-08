@@ -78,17 +78,28 @@ test("an error result rejects the command with its code", async () => {
   await assert.rejects(p, (e) => e.code === "out_of_scope");
 });
 
-test("seq increments per command", async () => {
+test("seq increments per command (one in flight at a time)", async () => {
   const t = fakeTransport();
-  const c = sdk.createDeviceClient(t, { deviceId: "d" }, { commandTimeoutMs: 50 });
+  const c = sdk.createDeviceClient(t, { deviceId: "d" }, { commandTimeoutMs: 1000 });
   const opened = c.open();
   c.handleDelivery("device_session", activeDelivery());
   await opened;
-  c.type("a").catch(() => {});
-  c.type("b").catch(() => {});
+  const a = c.type("a");
+  const b = c.type("b");
   assert.equal(sdk.decodeDeviceMessage(t.posted[0].plaintext).header.seq, 1);
+  assert.equal(t.posted.length, 1); // "b" waits for "a"
+  c.handleLaneMessage(ack(t.posted[0].plaintext));
+  await a;
+  await new Promise((r) => setImmediate(r));
   assert.equal(sdk.decodeDeviceMessage(t.posted[1].plaintext).header.seq, 2);
+  c.handleLaneMessage(ack(t.posted[1].plaintext));
+  await b;
 });
+
+function ack(sentPlaintext) {
+  const h = sdk.decodeDeviceMessage(sentPlaintext).header;
+  return sdk.encodeDeviceMessage({ v: 1, id: "r" + h.id, seq: h.seq, op: "ack", session: "sess-1", re: h.id }, { ok: true });
+}
 
 test("session_ended rejects pending commands and fires ended", async () => {
   const t = fakeTransport();

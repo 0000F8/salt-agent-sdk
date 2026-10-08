@@ -29,6 +29,28 @@ export const MAX_DEVICE_PLAINTEXT_BYTES = 4 * 1024 * 1024;
 export const MAX_COMMANDS_PER_SECOND = 5;
 export const MAX_OBSERVE_PER_SECOND = 1;
 
+// ---- one command in flight (device-locking contract §5) ---------------------
+// Every constant the client and host must agree on lives here.
+
+/** A command is valid for this long after the client built it. The client sets
+ *  `exp = now + COMMAND_TTL_MS` (epoch MILLISECONDS); the host refuses a
+ *  command whose `exp` has passed with `expired`, without executing it. */
+export const COMMAND_TTL_MS = 30_000;
+
+/** The host remembers this many results per session, by command `id`; a
+ *  repeated `id` returns the stored result without executing. */
+export const RESULT_CACHE_SIZE = 64;
+
+/** Ops that change what is on the machine's screen/input state. The host
+ *  serialises these device-wide (across every session on the machine) behind
+ *  one mutex. `observe`, `list_apps` and the file ops do not take it. */
+export const MUTATING_OPS: readonly string[] = ["click", "type", "key", "scroll", "focus_app"];
+
+/** Why a session is paused (device -> Salt -> agent). `person_active` and
+ *  `secure_field` are the contract's two; `person_paused` is an explicit tray
+ *  pause or hotkey. Free-form strings are tolerated on the wire. */
+export type DevicePauseReason = "person_active" | "secure_field" | "person_paused" | (string & {});
+
 /** Commands an agent sends to a device. */
 export type DeviceOp =
   | "observe"
@@ -41,6 +63,7 @@ export type DeviceOp =
   | "read_file"
   | "write_file"
   | "stop"
+  | "cancel" // drop the not-yet-started command named by body `{id}`; consumes no seq
   | "shell"; // reserved; the server refuses device.shell in P0 and a host answers `forbidden`.
 
 /** Results a device sends back to an agent. */
@@ -64,6 +87,7 @@ export const AGENT_OPS: readonly DeviceOp[] = [
   "read_file",
   "write_file",
   "stop",
+  "cancel",
   "shell",
 ];
 
@@ -87,6 +111,8 @@ export type DeviceErrorCode =
   | "bad_args" // malformed args
   | "too_large" // payload over MAX_DEVICE_PLAINTEXT_BYTES
   | "busy" // rate limit hit
+  | "expired" // the command's `exp` passed before it started; not executed
+  | "paused" // the person (or a secure field) has the device; not executed. Body carries `reason`
   | "failed"; // the handler ran and failed
 
 export const DEVICE_ERROR_CODES: readonly DeviceErrorCode[] = [
@@ -98,6 +124,8 @@ export const DEVICE_ERROR_CODES: readonly DeviceErrorCode[] = [
   "bad_args",
   "too_large",
   "busy",
+  "expired",
+  "paused",
   "failed",
 ];
 
@@ -115,6 +143,7 @@ export const CAPABILITY_FOR_OP: Record<DeviceOp, string | null> = {
   read_file: "device.files.read",
   write_file: "device.files.write",
   stop: null,
+  cancel: null,
   shell: "device.shell",
 };
 
@@ -167,6 +196,7 @@ export function countClassForOp(op: DeviceOp): DeviceCountClass | null {
     case "list_apps":
       return "app_focus";
     case "stop":
+    case "cancel":
     case "shell":
       return null;
   }
@@ -290,6 +320,10 @@ export interface DeviceAskResult {
 export interface ErrorResult {
   code: DeviceErrorCode;
   message?: string;
+  /** `out_of_order`, `expired`, `paused`: the seq the host will accept next. */
+  expected_seq?: number;
+  /** `paused`: why. */
+  reason?: DevicePauseReason;
 }
 export interface EndedResult {
   reason: string;
@@ -304,6 +338,8 @@ export interface DeviceHeader {
   op: string;
   session: string;
   re?: string;
+  /** Expiry, epoch milliseconds. Commands only; absent = never expires. */
+  exp?: number;
 }
 
 export interface DeviceMessage {
@@ -326,6 +362,7 @@ export function encodeDeviceMessage(header: DeviceHeader, body?: unknown): strin
     `session=${header.session}`,
   ];
   if (header.re !== undefined) parts.push(`re=${header.re}`);
+  if (header.exp !== undefined) parts.push(`exp=${header.exp}`);
   const marker = `[[SALT-DEVICE ${parts.join(" ")}]]`;
   if (body === undefined) return marker;
   return `${marker}\n${JSON.stringify(body)}`;
@@ -368,6 +405,11 @@ export function decodeDeviceMessage(plaintext: string): DeviceMessage | null {
     session: fields.session,
   };
   if (fields.re !== undefined) header.re = fields.re;
+  if (fields.exp !== undefined) {
+    const exp = Number(fields.exp);
+    if (!Number.isFinite(exp)) throw new DeviceProtocolError("bad_args", "exp must be a number");
+    header.exp = exp;
+  }
 
   const rest = m[2];
   let body: unknown;

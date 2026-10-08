@@ -10,9 +10,9 @@
 
 import { encryptFor } from "../crypto.js";
 import type { SaltId } from "../ids.js";
-import type { DeviceClientTransport, DeviceSessionMeta, LaneReaders } from "./client.js";
+import { DeviceSessionLiveError, type DeviceClientTransport, type DeviceSessionMeta, type LaneReaders } from "./client.js";
 import { DeviceBeatOverError, type DeviceHostTransport } from "./host.js";
-import type { DeviceCountClass } from "./protocol.js";
+import type { DeviceCountClass, DevicePauseReason } from "./protocol.js";
 
 export interface DeviceHttpOptions {
   host: string;
@@ -48,9 +48,37 @@ async function call<T>(
 export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientTransport {
   return {
     async openSession(deviceId: SaltId): Promise<DeviceSessionMeta> {
-      const { status, data } = await call<DeviceSessionMeta>(opts, "POST", `/api/v1/devices/${deviceId}/sessions`);
+      const { status, data } = await call<{ session?: DeviceSessionMeta; code?: string; session_id?: SaltId } & DeviceSessionMeta>(
+        opts,
+        "POST",
+        `/api/v1/devices/${deviceId}/sessions`
+      );
+      // 409 {code:"session_live", session_id}: this agent already controls the device.
+      if (status === 409 && data?.code === "session_live" && data.session_id !== undefined) {
+        throw new DeviceSessionLiveError(data.session_id);
+      }
       if (status >= 400) throw new Error(`openSession failed: ${status}`);
+      // 201 -> the session; 202 -> {session: {status: "queued", position}}.
+      const meta = (data?.session ?? data) as DeviceSessionMeta;
+      return meta;
+    },
+    async reattachSession(sessionId: SaltId): Promise<{ session: DeviceSessionMeta; last_seq: number }> {
+      const { status, data } = await call<{ session: DeviceSessionMeta; last_seq: number }>(
+        opts,
+        "POST",
+        `/api/v1/device_sessions/${sessionId}/reattach`
+      );
+      if (status >= 400) throw new Error(`reattachSession failed: ${status}`);
       return data;
+    },
+    async fetchSession(sessionId: SaltId): Promise<DeviceSessionMeta> {
+      const { status, data } = await call<{ session?: DeviceSessionMeta } & DeviceSessionMeta>(
+        opts,
+        "GET",
+        `/api/v1/device_sessions/${sessionId}`
+      );
+      if (status >= 400) throw new Error(`fetchSession failed: ${status}`);
+      return (data?.session ?? data) as DeviceSessionMeta;
     },
     async stopSession(sessionId: SaltId): Promise<void> {
       await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`);
@@ -89,6 +117,16 @@ export function httpDeviceHostTransport(opts: DeviceHttpOptions): DeviceHostTran
     },
     async stop(sessionId: SaltId, reason: string): Promise<void> {
       await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`, { reason });
+    },
+    // The ONLY place the pause/resume endpoint shapes live (contract §3):
+    // POST /device_sessions/:id/pause {reason} and /resume, by the device's key.
+    async pause(sessionId: SaltId, reason: DevicePauseReason): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/pause`, { reason });
+      if (status >= 400) throw new Error(`pause failed: ${status}`);
+    },
+    async resume(sessionId: SaltId): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/resume`);
+      if (status >= 400) throw new Error(`resume failed: ${status}`);
     },
   };
 }
