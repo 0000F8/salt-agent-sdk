@@ -15,3 +15,4 @@ export * from "./ask";
 export * from "./socket";
 export * from "./actions";
 export * from "./config";
+export * from "./device/index.js";

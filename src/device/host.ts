@@ -1,0 +1,485 @@
+// The DEVICE side of device control: createDeviceHost.
+//
+// It runs ON the controlled machine, inside the signed desktop app. It takes a
+// decrypted command off the lane, decides whether it is allowed, and -- only
+// if it is -- calls the matching HANDLER. It then encrypts the result for the
+// lane readers and posts it, beats while the session is live, and reports
+// per-class counts (never content) to the server.
+//
+// ============================================================================
+// THE TWO SEAMS (deliberately NOT implemented here).
+// ============================================================================
+// This module performs NO screen capture and NO input injection. Those are the
+// `DeviceHostHandlers` the desktop app injects:
+//   - observe()                      -> screen / window capture  (OS: Electron
+//                                        desktopCapturer + screen)
+//   - click/type/key/scroll()        -> input injection          (OS: a
+//                                        maintained prebuilt native module)
+//   - focusApp/listApps/readFile/writeFile() -> app + filesystem access
+// The host decides IF a handler may run (capability, scope, approval mode,
+// never-allowed floor, budget, rate limit, ordering) and what the device tells
+// the server about it afterwards (counts only). The handler decides HOW, using
+// the OS. Everything in THIS file is policy and plumbing; the capability lives
+// entirely in the injected handlers. That split is what keeps the capture +
+// input code -- the part a safety review scrutinises -- in one small, signed,
+// locally-installed place, and keeps the authority model reviewable on its own.
+// ============================================================================
+
+import {
+  CAPABILITY_FOR_OP,
+  countClassForOp,
+  decodeDeviceMessage,
+  DeviceProtocolError,
+  DEVICE_PROTOCOL_VERSION,
+  deviceMessageId,
+  encodeDeviceMessage,
+  MAX_COMMANDS_PER_SECOND,
+  MAX_DEVICE_PLAINTEXT_BYTES,
+  MAX_OBSERVE_PER_SECOND,
+  type AppsResult,
+  type ClickArgs,
+  type DeviceCountClass,
+  type DeviceErrorCode,
+  type DeviceHeader,
+  type DeviceOp,
+  type FileResult,
+  type KeyArgs,
+  type ObservationResult,
+  type ObserveArgs,
+  type ScrollArgs,
+} from "./protocol.js";
+import type { LaneReaders } from "./client.js";
+import { sameId, type SaltId } from "../ids.js";
+
+/** The seams. The desktop app implements every method; the host calls one only
+ *  after it has passed every gate below. A handler may throw -- the host turns
+ *  a throw into an `error { code: "failed" }` and counts it as an error. */
+export interface DeviceHostHandlers {
+  observe(args: ObserveArgs): Promise<ObservationResult>;
+  click(args: ClickArgs): Promise<void>;
+  type(args: { text: string }): Promise<void>;
+  key(args: KeyArgs): Promise<void>;
+  scroll(args: ScrollArgs): Promise<void>;
+  focusApp(args: { app: string }): Promise<void>;
+  listApps(): Promise<AppsResult>;
+  readFile(args: { path: string }): Promise<FileResult>;
+  writeFile(args: { path: string; content_b64: string }): Promise<void>;
+}
+
+/** What the server told the device about this session in the
+ *  `device_session_request` delivery. The device trusts this snapshot and
+ *  re-checks it on EVERY command; it never widens it (only the person, locally,
+ *  can widen a mandate, and that produces a new snapshot). */
+export interface DeviceCapsSnapshot {
+  sessionId: SaltId;
+  agentId: SaltId;
+  /** Armored public keys of every lane reader; results are encrypted for all. */
+  readers: LaneReaders;
+  /** The capabilities granted, keyed by `device.*`. A command whose op maps to
+   *  a capability not present here is `out_of_scope`. */
+  caps: Partial<Record<string, DeviceCapRule>>;
+  budget?: { maxActions?: number; maxDurationS?: number };
+  /** ISO8601; past it, the session ends `mandate_expired`. */
+  expiresAt?: string;
+}
+
+export interface DeviceCapRule {
+  /** auto = run; ask = ask the person at the machine first; notify = run and
+   *  tell them. The device holds this decision, never the server. */
+  mode: "auto" | "ask" | "notify";
+  /** For device.apps: the only bundle ids / exe names in scope (empty/omitted
+   *  = any app the floor allows). */
+  apps?: string[];
+  /** For device.files.*: the only path prefixes in scope. A file op outside
+   *  every root is `out_of_scope`. */
+  fileRoots?: string[];
+}
+
+export interface DeviceHostTransport {
+  /** Encrypt `plaintext` for the lane readers and POST it as one lane message. */
+  postResult(plaintext: string, readers: LaneReaders): Promise<void>;
+  /** POST /device_sessions/:sid/beat. A 409 means the session is over: the
+   *  transport should throw a DeviceBeatOverError so the host stops at once. */
+  beat(sessionId: SaltId): Promise<void>;
+  /** PATCH /device_sessions/:sid/counts with whole-number per-class counts. */
+  reportCounts(sessionId: SaltId, counts: Partial<Record<DeviceCountClass, number>>): Promise<void>;
+  /** POST /device_sessions/:sid/stop with an end reason (subtract-only). */
+  stop(sessionId: SaltId, reason: string): Promise<void>;
+}
+
+export class DeviceBeatOverError extends Error {}
+
+export interface DeviceHostCallbacks {
+  /** The LOCAL approval prompt for an `ask`-mode command. Resolves true if the
+   *  person at the machine approved. The host shows `needs_approval` until it
+   *  does. The DESKTOP APP owns this UI; absent, every ask-mode op is refused. */
+  requestLocalApproval?(op: DeviceOp, args: unknown): Promise<boolean>;
+  /** Told after a `notify`-mode command runs, so the app can surface it. */
+  onNotify?(op: DeviceOp, args: unknown): void;
+  /** Told when the host ends the session itself (budget, duration, lost beat,
+   *  a stop command). The app updates its indicator and writes its audit line. */
+  onEnded?(reason: string): void;
+  /** Every gate decision, for the app's append-only on-disk audit log. Content
+   *  is the caller's to redact; the host passes op + decision + reason only. */
+  onAudit?(entry: DeviceAuditEntry): void;
+}
+
+export interface DeviceAuditEntry {
+  at: number;
+  commandId: string;
+  op: string;
+  decision: "ran" | "refused" | "needs_approval" | "ended";
+  code?: DeviceErrorCode;
+  reason?: string;
+}
+
+/** Apps the floor never allows a command to target, whatever a mandate says:
+ *  password managers and keychains. The desktop app extends this with its own
+ *  Salt windows (which it also blanks in the capture handler). Browsers are
+ *  deliberately NOT here (owner: browsers full, no deny-list). */
+export const NEVER_ALLOWED_APPS: readonly string[] = [
+  "com.1password.1password",
+  "com.agilebits.onepassword7",
+  "com.apple.keychainaccess",
+  "com.bitwarden.desktop",
+  "com.dashlane.dashlane",
+  "org.keepassxc.keepassxc",
+  "1password",
+  "bitwarden",
+  "keepassxc",
+  "keychain access",
+  "dashlane",
+];
+
+export interface DeviceHost {
+  /** Feed a decrypted lane message in. Non-device lines and results from
+   *  elsewhere return false and are ignored. A command is answered (ack /
+   *  observation / error / ...) via the transport. */
+  handleCommand(plaintext: string): Promise<boolean>;
+  /** Start the live heartbeat + budget/duration watch. The desktop app calls
+   *  this once the session is active. */
+  start(): void;
+  /** End the session locally (subtract-only) and tell the server. */
+  stop(reason?: string): Promise<void>;
+  /** The spent count of budgeted actions, for the indicator. */
+  actionsSpent(): number;
+}
+
+export function createDeviceHost(
+  snapshot: DeviceCapsSnapshot,
+  handlers: DeviceHostHandlers,
+  transport: DeviceHostTransport,
+  callbacks: DeviceHostCallbacks = {},
+  options: { beatIntervalMs?: number; neverAllowedApps?: readonly string[] } = {}
+): DeviceHost {
+  const beatIntervalMs = options.beatIntervalMs ?? 5_000;
+  const neverAllowed = (options.neverAllowedApps ?? NEVER_ALLOWED_APPS).map((s) => s.toLowerCase());
+
+  let lastSeq = 0;
+  let spent = 0; // budgeted actions used
+  let ended = false;
+  const startedAt = Date.now();
+  let beatTimer: ReturnType<typeof setInterval> | null = null;
+  let durationTimer: ReturnType<typeof setTimeout> | null = null;
+  // Rate windows: timestamps of recent commands / observes.
+  const cmdTimes: number[] = [];
+  const obsTimes: number[] = [];
+  // Pending counts to flush to the server, coalesced.
+  const pendingCounts: Partial<Record<DeviceCountClass, number>> = {};
+  let countsFlushQueued = false;
+
+  function audit(entry: Omit<DeviceAuditEntry, "at">): void {
+    callbacks.onAudit?.({ at: Date.now(), ...entry });
+  }
+
+  function bump(cls: DeviceCountClass): void {
+    pendingCounts[cls] = (pendingCounts[cls] ?? 0) + 1;
+    if (countsFlushQueued || ended) return;
+    countsFlushQueued = true;
+    // Flush on the next tick so a burst of commands coalesces into one PATCH.
+    queueMicrotask(async () => {
+      countsFlushQueued = false;
+      const batch = { ...pendingCounts };
+      for (const k of Object.keys(pendingCounts) as DeviceCountClass[]) delete pendingCounts[k];
+      if (Object.keys(batch).length === 0) return;
+      try {
+        await transport.reportCounts(snapshot.sessionId, batch);
+      } catch {
+        /* counts are metadata; a failed PATCH never stops control */
+      }
+    });
+  }
+
+  function withinRate(op: DeviceOp, now: number): boolean {
+    while (cmdTimes.length && now - cmdTimes[0] >= 1000) cmdTimes.shift();
+    while (obsTimes.length && now - obsTimes[0] >= 1000) obsTimes.shift();
+    if (cmdTimes.length >= MAX_COMMANDS_PER_SECOND) return false;
+    if (op === "observe" && obsTimes.length >= MAX_OBSERVE_PER_SECOND) return false;
+    cmdTimes.push(now);
+    if (op === "observe") obsTimes.push(now);
+    return true;
+  }
+
+  async function reply(header: DeviceHeader, op: string, body?: unknown): Promise<void> {
+    const id = deviceMessageId();
+    const plaintext = encodeDeviceMessage(
+      { v: DEVICE_PROTOCOL_VERSION, id, seq: nextOutSeq(), op, session: snapshot.sessionId, re: header.id },
+      body
+    );
+    if (Buffer.byteLength(plaintext, "utf8") > MAX_DEVICE_PLAINTEXT_BYTES) {
+      // The result itself is too big (a huge screenshot or file). Answer the
+      // small error instead; never post an over-cap message.
+      const small = encodeDeviceMessage(
+        { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: nextOutSeq(), op: "error", session: snapshot.sessionId, re: header.id },
+        { code: "too_large", message: "result exceeds the per-message limit" }
+      );
+      await transport.postResult(small, snapshot.readers);
+      bump("error");
+      return;
+    }
+    await transport.postResult(plaintext, snapshot.readers);
+  }
+
+  let outSeq = 0;
+  function nextOutSeq(): number {
+    outSeq += 1;
+    return outSeq;
+  }
+
+  async function refuse(header: DeviceHeader, code: DeviceErrorCode, message?: string): Promise<void> {
+    audit({ commandId: header.id, op: header.op, decision: code === "needs_approval" ? "needs_approval" : "refused", code, reason: message });
+    if (code !== "needs_approval") bump("error");
+    await reply(header, "error", { code, message });
+  }
+
+  function fileInScope(rule: DeviceCapRule | undefined, path: string): boolean {
+    if (!rule) return false;
+    if (!rule.fileRoots || rule.fileRoots.length === 0) return false; // files need an explicit root
+    return rule.fileRoots.some((root) => path === root || path.startsWith(root.endsWith("/") ? root : root + "/"));
+  }
+
+  function appInScope(rule: DeviceCapRule | undefined, app: string): boolean {
+    if (neverAllowed.includes(app.toLowerCase())) return false;
+    if (!rule) return false;
+    if (!rule.apps || rule.apps.length === 0) return true; // any app the floor allows
+    return rule.apps.some((a) => a.toLowerCase() === app.toLowerCase());
+  }
+
+  async function handleCommand(plaintext: string): Promise<boolean> {
+    if (ended) return false;
+    let decoded;
+    try {
+      decoded = decodeDeviceMessage(plaintext);
+    } catch (e) {
+      // A line that looked like a device message but is malformed: we cannot
+      // trust its id to answer, so drop it. (A well-formed bad_args is answered
+      // below, once we have a header to reply to.)
+      void e;
+      return false;
+    }
+    if (!decoded) return false;
+    const { header, body } = decoded;
+
+    // Only our active session; anything else is dropped silently.
+    if (!sameId(header.session, snapshot.sessionId)) return false;
+
+    if (header.v !== DEVICE_PROTOCOL_VERSION) {
+      await refuse(header, "unsupported", `protocol v=${header.v}`);
+      return true;
+    }
+
+    // Ordering: strictly increasing seq per sender. A repeat is a dedupe no-op;
+    // a forward gap is out_of_order (the agent must not skip).
+    if (header.seq <= lastSeq) return true; // already processed or a replay
+    if (header.seq !== lastSeq + 1) {
+      await refuse(header, "out_of_order", `expected seq ${lastSeq + 1}, got ${header.seq}`);
+      return true;
+    }
+    lastSeq = header.seq;
+
+    const op = header.op as DeviceOp;
+    if (!AGENT_OP_SET.has(op)) {
+      await refuse(header, "unsupported", `op ${header.op}`);
+      return true;
+    }
+
+    if (op === "stop") {
+      await reply(header, "ended", { reason: "stopped_by_agent" });
+      await stop("stopped_by_agent");
+      return true;
+    }
+
+    if (op === "shell") {
+      await refuse(header, "forbidden", "shell is not available");
+      return true;
+    }
+
+    // Expiry / duration.
+    if (snapshot.expiresAt && Date.now() >= Date.parse(snapshot.expiresAt)) {
+      await refuse(header, "out_of_scope", "mandate expired");
+      await stop("mandate_expired");
+      return true;
+    }
+
+    // Capability present?
+    const capName = CAPABILITY_FOR_OP[op];
+    const rule = capName ? snapshot.caps[capName] : undefined;
+    if (capName && !rule) {
+      await refuse(header, "out_of_scope", `no ${capName} in this mandate`);
+      return true;
+    }
+
+    // Selector scope: apps and file roots.
+    if ((op === "focus_app") && !appInScope(rule, (body as { app?: string })?.app ?? "")) {
+      const app = (body as { app?: string })?.app ?? "";
+      await refuse(header, neverAllowed.includes(app.toLowerCase()) ? "forbidden" : "out_of_scope", `app not in scope: ${app}`);
+      return true;
+    }
+    if (op === "read_file" || op === "write_file") {
+      const path = (body as { path?: string })?.path ?? "";
+      if (!fileInScope(rule, path)) {
+        await refuse(header, "out_of_scope", `path not in scope: ${path}`);
+        return true;
+      }
+    }
+    if (op === "write_file") {
+      const content = (body as { content_b64?: string })?.content_b64 ?? "";
+      if (content.length > MAX_DEVICE_PLAINTEXT_BYTES) {
+        await refuse(header, "too_large", "file exceeds the per-message limit");
+        return true;
+      }
+    }
+
+    // Rate limit.
+    const now = Date.now();
+    if (!withinRate(op, now)) {
+      await refuse(header, "busy", "rate limit");
+      return true;
+    }
+
+    // Approval mode.
+    const mode = rule?.mode ?? "auto";
+    if (mode === "ask") {
+      const approved = callbacks.requestLocalApproval
+        ? await callbacks.requestLocalApproval(op, body).catch(() => false)
+        : false;
+      if (!approved) {
+        await refuse(header, "needs_approval", "waiting for the person at the machine");
+        return true;
+      }
+    }
+
+    // Budget: a budgeted action is any counted op. Check BEFORE running so a
+    // spent budget never runs one more.
+    const cls = countClassForOp(op);
+    const budgeted = cls !== null && cls !== "error";
+    if (budgeted && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
+      await refuse(header, "out_of_scope", "action budget spent");
+      await stop("budget_exhausted");
+      return true;
+    }
+
+    // Run the handler (the seam).
+    try {
+      const result = await dispatch(op, body);
+      if (budgeted) spent += 1;
+      if (cls) bump(cls);
+      audit({ commandId: header.id, op: header.op, decision: "ran" });
+      if (mode === "notify") callbacks.onNotify?.(op, body);
+      await reply(header, result.op, result.body);
+    } catch (e) {
+      const code: DeviceErrorCode = e instanceof DeviceProtocolError ? e.code : "failed";
+      await refuse(header, code, e instanceof Error ? e.message : String(e));
+      return true;
+    }
+
+    // End the session the moment the last budgeted action is spent.
+    if (budgeted && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
+      await stop("budget_exhausted");
+    }
+    return true;
+  }
+
+  async function dispatch(op: DeviceOp, body: unknown): Promise<{ op: string; body?: unknown }> {
+    switch (op) {
+      case "observe":
+        return { op: "observation", body: await handlers.observe((body as ObserveArgs) ?? { target: "screen" }) };
+      case "click":
+        await handlers.click(body as ClickArgs);
+        return { op: "ack", body: { ok: true } };
+      case "type":
+        await handlers.type(body as { text: string });
+        return { op: "ack", body: { ok: true } };
+      case "key":
+        await handlers.key(body as KeyArgs);
+        return { op: "ack", body: { ok: true } };
+      case "scroll":
+        await handlers.scroll(body as ScrollArgs);
+        return { op: "ack", body: { ok: true } };
+      case "focus_app":
+        await handlers.focusApp(body as { app: string });
+        return { op: "ack", body: { ok: true } };
+      case "list_apps":
+        return { op: "apps", body: await handlers.listApps() };
+      case "read_file":
+        return { op: "file", body: await handlers.readFile(body as { path: string }) };
+      case "write_file":
+        await handlers.writeFile(body as { path: string; content_b64: string });
+        return { op: "ack", body: { ok: true } };
+      default:
+        throw new DeviceProtocolError("unsupported", op);
+    }
+  }
+
+  function start(): void {
+    if (ended || beatTimer) return;
+    beatTimer = setInterval(async () => {
+      try {
+        await transport.beat(snapshot.sessionId);
+      } catch (e) {
+        if (e instanceof DeviceBeatOverError) {
+          await stop("lost_contact");
+        }
+        // any other beat error: keep trying until the dead-man sweep ends us.
+      }
+    }, beatIntervalMs);
+    if (typeof (beatTimer as { unref?: () => void }).unref === "function") (beatTimer as { unref: () => void }).unref();
+
+    if (snapshot.budget?.maxDurationS !== undefined) {
+      const ms = Math.max(0, snapshot.budget.maxDurationS * 1000 - (Date.now() - startedAt));
+      durationTimer = setTimeout(() => void stop("duration_limit"), ms);
+      if (typeof (durationTimer as { unref?: () => void }).unref === "function") (durationTimer as { unref: () => void }).unref();
+    }
+  }
+
+  async function stop(reason = "stopped_by_device"): Promise<void> {
+    if (ended) return;
+    ended = true;
+    if (beatTimer) clearInterval(beatTimer);
+    if (durationTimer) clearTimeout(durationTimer);
+    beatTimer = durationTimer = null;
+    audit({ commandId: "-", op: "stop", decision: "ended", reason });
+    callbacks.onEnded?.(reason);
+    try {
+      await transport.stop(snapshot.sessionId, reason);
+    } catch {
+      /* subtract-only + idempotent; a failed stop still ends us locally */
+    }
+  }
+
+  return { handleCommand, start, stop, actionsSpent: () => spent };
+}
+
+const AGENT_OP_SET = new Set<DeviceOp>([
+  "observe",
+  "click",
+  "type",
+  "key",
+  "scroll",
+  "focus_app",
+  "list_apps",
+  "read_file",
+  "write_file",
+  "stop",
+  "shell",
+]);
