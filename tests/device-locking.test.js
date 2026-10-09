@@ -65,7 +65,7 @@ function host(h, t, extra = {}, session = "sess-1", options = {}) {
 
 function cmd(seq, op, body, o = {}) {
   return sdk.encodeDeviceMessage(
-    { v: 1, id: o.id ?? `c${seq}`, seq, op, session: o.session ?? "sess-1", ...(o.exp !== undefined ? { exp: o.exp } : {}) },
+    { v: 1, id: o.id ?? `c${seq}`, seq, op, session: o.session ?? "sess-1", exp: o.exp !== undefined ? o.exp : Date.now() + 30000 },
     body
   );
 }

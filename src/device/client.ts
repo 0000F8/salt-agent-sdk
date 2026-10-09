@@ -200,6 +200,7 @@ export function createDeviceClient(
   // Single flight: commands run one at a time, in call order.
   let tail: Promise<unknown> = Promise.resolve();
   let inFlight = 0;
+  const earlyEnded = new Map<string, string>();
 
   function emit(event: string, ...args: unknown[]): void {
     for (const cb of listeners[event] ?? []) {
@@ -311,6 +312,13 @@ export function createDeviceClient(
       throw e;
     }
     seq = 0;
+    const early = earlyEnded.get(String(created.id));
+    earlyEnded.clear();
+    if (early !== undefined) {
+      meta = created;
+      handleDelivery("device_session_ended", { session_id: created.id, end_reason: early });
+      throw new DeviceProtocolError("failed", `session ended: ${early}`);
+    }
     // If a delivery already moved us on while the POST was in flight, its
     // fields (status, chat) win; otherwise take the POST's view.
     meta = meta ? { ...created, ...meta } : created;
@@ -503,6 +511,9 @@ export function createDeviceClient(
       delete (sess as unknown as Record<string, unknown>).session_id;
     }
     const sid = (sess?.id ?? b.session_id) as SaltId | undefined;
+    // A delivery about another computer is not ours (an agent can hold sessions on several).
+    const dev = (sess?.device_id ?? b.device_id) as SaltId | undefined;
+    if (dev !== undefined && !sameId(dev, params.deviceId)) return;
     if (meta && sid !== undefined && !sameId(sid, meta.id)) return;
     const status = (b.status ?? sess?.status) as DeviceSessionStatus | undefined;
 
@@ -545,6 +556,12 @@ export function createDeviceClient(
         break;
       }
       case "ended": {
+        // Before the session is known, an `ended` may be about an OLDER session of
+        // this agent: hold it, apply it only if it turns out to be ours.
+        if (!meta) {
+          if (sid !== undefined) earlyEnded.set(String(sid), (b.end_reason as string) ?? "ended");
+          return;
+        }
         const reason = (b.end_reason as string) ?? "ended";
         if (meta) meta.status = "ended";
         pausedReason = null;

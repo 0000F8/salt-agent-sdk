@@ -33,6 +33,7 @@
 
 import {
   CAPABILITY_FOR_OP,
+  COMMAND_TTL_MS,
   countClassForOp,
   decodeDeviceMessage,
   DeviceProtocolError,
@@ -179,7 +180,7 @@ export interface DeviceHostCallbacks {
   /** The LOCAL approval prompt for an `ask`-mode command. Resolves true if the
    *  person at the machine approved. The host shows `needs_approval` until it
    *  does. The DESKTOP APP owns this UI; absent, every ask-mode op is refused. */
-  requestLocalApproval?(op: DeviceOp, args: unknown): Promise<boolean>;
+  requestLocalApproval?(op: DeviceOp, args: unknown, opts?: { timeoutMs: number }): Promise<boolean>;
   /** Told after a `notify`-mode command runs, so the app can surface it. */
   onNotify?(op: DeviceOp, args: unknown): void;
   /** Told when the host ends the session itself (budget, duration, lost beat,
@@ -270,7 +271,14 @@ export function createDeviceHost(
   let tail: Promise<unknown> = Promise.resolve();
   // Ids received and not yet started / ids a `cancel` asked us to drop.
   const queuedIds = new Map<string, number>();
+  // Ids a `cancel` named (even before the command arrived). Bounded: oldest dropped.
   const cancelledIds = new Set<string>();
+  const CANCELLED_CAP = 256;
+  // What Salt has been told about our pause state (null = running).
+  let reportedPause: DevicePauseReason | null = null;
+  let pauseSync: Promise<void> = Promise.resolve();
+  // A device whose clock runs ahead of the sender's may see an `exp` this far in the future.
+  const EXP_SKEW_MS = 5_000;
   // The last RESULT_CACHE_SIZE results by command id (insertion order = age).
   const resultCache = new Map<string, { op: string; body?: unknown }>();
   let spent = 0; // budgeted actions used
@@ -300,7 +308,10 @@ export function createDeviceHost(
       for (const k of Object.keys(pendingCounts) as DeviceCountClass[]) delete pendingCounts[k];
       if (Object.keys(batch).length === 0) return;
       try {
-        await transport.reportCounts(snapshot.sessionId, batch, lastRanSeq !== null ? { last_seq: lastRanSeq } : undefined);
+        // last_seq only rides with real work: a batch of nothing but handler
+        // failures must not look like progress (Salt extends the lease on it).
+        const work = (Object.keys(batch) as DeviceCountClass[]).some((k) => k !== "error");
+        await transport.reportCounts(snapshot.sessionId, batch, work && lastRanSeq !== null ? { last_seq: lastRanSeq } : undefined);
       } catch {
         /* counts are metadata; a failed PATCH never stops control */
       }
@@ -331,7 +342,6 @@ export function createDeviceHost(
         { code: "too_large", message: "result exceeds the per-message limit" }
       );
       await transport.postResult(small, snapshot.readers);
-      bump("error");
       return { op: "error", body: { code: "too_large", message: "result exceeds the per-message limit" } };
     }
     await transport.postResult(plaintext, snapshot.readers);
@@ -359,7 +369,8 @@ export function createDeviceHost(
     extra: { expected_seq?: number; reason?: DevicePauseReason } = {}
   ): Promise<{ op: string; body?: unknown }> {
     audit({ commandId: header.id, op: header.op, decision: code === "needs_approval" ? "needs_approval" : "refused", code, reason: message });
-    if (code !== "needs_approval") bump("error");
+    // Refusals are not actions and are not reported as counts (they would
+    // otherwise extend the lease and spend the budget server-side).
     return reply(header, "error", { code, message, ...extra });
   }
 
@@ -400,25 +411,31 @@ export function createDeviceHost(
     if (header.op === "cancel" && header.v === DEVICE_PROTOCOL_VERSION) {
       // Out of band: never queued, consumes no seq. Drops a command that has
       // not started; a started or finished one keeps its stored result.
+      // Remembered even when the command has not arrived yet (messages can
+      // reorder); processed on arrival, so a long action never delays it.
       const id = (body as { id?: unknown } | undefined)?.id;
-      if (typeof id === "string" && (queuedIds.get(id) ?? 0) > 0) cancelledIds.add(id);
+      if (typeof id === "string" && id.length <= 64) {
+        cancelledIds.delete(id);
+        cancelledIds.add(id);
+        while (cancelledIds.size > CANCELLED_CAP) cancelledIds.delete(cancelledIds.values().next().value as string);
+      }
+      audit({ commandId: typeof id === "string" ? id : "-", op: "cancel", decision: "ran" });
       return true;
     }
 
     queuedIds.set(header.id, (queuedIds.get(header.id) ?? 0) + 1);
-    const run = tail.then(() => processCommand(header, body));
+    // The deadline runs on THIS device's clock from arrival: the sender's `exp`
+    // can only shorten it, never extend it.
+    const receivedAt = clock();
+    const run = tail.then(() => processCommand(header, body, receivedAt));
     tail = run.catch(() => undefined);
     return run;
   }
 
-  async function processCommand(header: DeviceHeader, body: unknown): Promise<boolean> {
+  async function processCommand(header: DeviceHeader, body: unknown, receivedAt: number): Promise<boolean> {
     const left = (queuedIds.get(header.id) ?? 1) - 1;
     if (left > 0) queuedIds.set(header.id, left);
     else queuedIds.delete(header.id);
-    if (cancelledIds.delete(header.id)) {
-      audit({ commandId: header.id, op: header.op, decision: "refused", reason: "cancelled before start" });
-      return true;
-    }
     if (ended) return true;
 
     if (header.v !== DEVICE_PROTOCOL_VERSION) {
@@ -433,8 +450,24 @@ export function createDeviceHost(
       return true;
     }
 
-    // Expiry: not executed, consumes no seq.
-    if (header.exp !== undefined && clock() >= header.exp) {
+    if (cancelledIds.delete(header.id)) {
+      audit({ commandId: header.id, op: header.op, decision: "refused", reason: "cancelled before start" });
+      return true;
+    }
+
+    // Expiry: `exp` is required, and the deadline is the device's own: the
+    // sooner of the sender's `exp` and arrival + the TTL. Not executed,
+    // consumes no seq.
+    if (header.exp === undefined) {
+      await refuse(header, "bad_args", "exp is required", { expected_seq: lastSeq + 1 });
+      return true;
+    }
+    if (header.exp > receivedAt + COMMAND_TTL_MS + EXP_SKEW_MS) {
+      await refuse(header, "bad_args", "exp is further ahead than a command may live", { expected_seq: lastSeq + 1 });
+      return true;
+    }
+    const deadline = Math.min(header.exp, receivedAt + COMMAND_TTL_MS);
+    if (clock() >= deadline) {
       await refuse(header, "expired", "command expired before it started", { expected_seq: lastSeq + 1 });
       return true;
     }
@@ -518,9 +551,21 @@ export function createDeviceHost(
     // Approval mode.
     const mode = rule?.mode ?? "auto";
     if (mode === "ask") {
-      const approved = callbacks.requestLocalApproval
-        ? await callbacks.requestLocalApproval(op, body).catch(() => false)
-        : false;
+      // Never wait past the command's own deadline.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - clock()));
+      });
+      const asked: Promise<boolean> = callbacks.requestLocalApproval
+        ? callbacks.requestLocalApproval(op, body, { timeoutMs: Math.max(0, deadline - clock()) }).catch(() => false)
+        : Promise.resolve(false);
+      const outcome = await Promise.race([asked, timedOut]);
+      if (timer) clearTimeout(timer);
+      if (outcome === "timeout") {
+        await refuse(header, "expired", "command expired while waiting for approval", { expected_seq: lastSeq + 1 });
+        return true;
+      }
+      const approved = outcome;
       if (!approved) {
         await refuse(header, "needs_approval", "waiting for the person at the machine");
         return true;
@@ -540,9 +585,23 @@ export function createDeviceHost(
     // Run the handler (the seam). Mutating ops hold the device-wide mutex so
     // two sessions on one machine never interleave input.
     try {
-      const result = MUTATING_OPS.includes(op)
-        ? await deviceLock.run(() => dispatch(op, body))
-        : await dispatch(op, body);
+      // Everything that waited (approval, the device lock, other sessions'
+      // actions) can have changed the world: re-check the session, the pause,
+      // the mandate and the deadline at the last moment, INSIDE the lock.
+      const checked = async (): Promise<{ op: string; body?: unknown } | Gate> => {
+        const gate = lastChance(header, deadline);
+        if (gate) return gate;
+        return dispatch(op, body);
+      };
+      const out = MUTATING_OPS.includes(op) ? await deviceLock.run(checked) : await checked();
+      if (isGate(out)) {
+        // Not executed: give the seq back so the sender can resend this command.
+        lastSeq = header.seq - 1;
+        if (out.silent) return true;
+        await refuse(header, out.code, out.message, { expected_seq: header.seq, reason: out.reason });
+        return true;
+      }
+      const result = out;
       if (budgeted) spent += 1;
       lastRanAt = new Date(clock()).toISOString();
       lastRanSeq = header.seq;
@@ -554,8 +613,20 @@ export function createDeviceHost(
     } catch (e) {
       const code: DeviceErrorCode = e instanceof DeviceProtocolError ? e.code : "failed";
       const message = e instanceof Error ? e.message : String(e);
+      // The person guard (paused / busy) refused INSIDE the handler: nothing
+      // ran, so report it as what it is, do not cache it and give the seq back.
+      const duck = e as { code?: unknown; reason?: unknown };
+      if (!(e instanceof DeviceProtocolError) && (duck?.code === "paused" || duck?.code === "busy")) {
+        lastSeq = header.seq - 1;
+        await refuse(header, duck.code, message, {
+          expected_seq: header.seq,
+          reason: typeof duck.reason === "string" ? (duck.reason as DevicePauseReason) : undefined,
+        });
+        return true;
+      }
       // The handler ran (or tried to): a retry by id must not run it again.
       remember(header.id, { op: "error", body: { code, message } });
+      bump("error");
       await refuse(header, code, message);
       return true;
     }
@@ -565,6 +636,30 @@ export function createDeviceHost(
       await stop("budget_exhausted");
     }
     return true;
+  }
+
+  type Gate = { gate: true; code: DeviceErrorCode; message: string; reason?: DevicePauseReason; silent?: boolean };
+  function isGate(x: unknown): x is Gate {
+    return typeof x === "object" && x !== null && (x as Gate).gate === true;
+  }
+
+  /** The last look before a handler runs. */
+  function lastChance(header: DeviceHeader, deadline: number): Gate | null {
+    if (ended) return { gate: true, code: "forbidden", message: "session ended", silent: true };
+    if (cancelledIds.delete(header.id)) {
+      audit({ commandId: header.id, op: header.op, decision: "refused", reason: "cancelled before start" });
+      return { gate: true, code: "forbidden", message: "cancelled", silent: true };
+    }
+    if (pausedReason !== null) {
+      return { gate: true, code: "paused", message: `paused: ${pausedReason}`, reason: pausedReason };
+    }
+    if (snapshot.expiresAt && clock() >= Date.parse(snapshot.expiresAt)) {
+      return { gate: true, code: "out_of_scope", message: "mandate expired" };
+    }
+    if (clock() >= deadline) {
+      return { gate: true, code: "expired", message: "command expired before it could run" };
+    }
+    return null;
   }
 
   async function dispatch(op: DeviceOp, body: unknown): Promise<{ op: string; body?: unknown }> {
@@ -601,6 +696,7 @@ export function createDeviceHost(
   function start(): void {
     if (ended || beatTimer) return;
     beatTimer = setInterval(async () => {
+      void syncPause(); // retry a pause/resume report that failed
       try {
         // Beats keep running while paused: Salt ends a paused session that stops
         // beating after 15 s. After a command has run, every beat says so.
@@ -639,28 +735,44 @@ export function createDeviceHost(
     }
   }
 
+  /** Make Salt's picture of our pause state match ours. Salt only accepts a
+   *  pause from `active`, so a reason CHANGE is resume-then-pause. A failed
+   *  report is retried on the next beat (the local pause stands meanwhile). */
+  function syncPause(): Promise<void> {
+    pauseSync = pauseSync.then(async () => {
+      if (ended) return;
+      const want = pausedReason;
+      if (reportedPause === want) return;
+      try {
+        if (reportedPause !== null) {
+          await transport.resume?.(snapshot.sessionId);
+          reportedPause = null;
+        }
+        if (want !== null) {
+          await transport.pause?.(snapshot.sessionId, want);
+          reportedPause = want;
+        }
+      } catch {
+        /* retried on the next beat */
+      }
+    });
+    return pauseSync;
+  }
+
   async function pause(reason: DevicePauseReason): Promise<void> {
     if (ended) return;
     const changed = pausedReason !== reason;
     pausedReason = reason;
     audit({ commandId: "-", op: "pause", decision: "refused", reason });
     if (!changed) return;
-    try {
-      await transport.pause?.(snapshot.sessionId, reason);
-    } catch {
-      /* the local pause stands; Salt learns on the next report */
-    }
+    await syncPause();
   }
 
   async function resume(): Promise<void> {
     if (ended || pausedReason === null) return;
     pausedReason = null;
     audit({ commandId: "-", op: "resume", decision: "ran" });
-    try {
-      await transport.resume?.(snapshot.sessionId);
-    } catch {
-      /* see pause() */
-    }
+    await syncPause();
   }
 
   return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason };

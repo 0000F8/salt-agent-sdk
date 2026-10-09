@@ -15,7 +15,7 @@ function mk() {
   const dh = sdk.createDeviceHost({ sessionId: "s", agentId: "a", readers: READERS, caps: CAPS }, H, t, {}, { beatIntervalMs: 10, deviceLock: new sdk.DeviceLock() });
   return { t, dh };
 }
-const cmd = (seq, op, body) => sdk.encodeDeviceMessage({ v: 1, id: `c${seq}`, seq, op, session: "s" }, body);
+const cmd = (seq, op, body) => sdk.encodeDeviceMessage({ v: 1, id: `c${seq}`, seq, op, session: "s", exp: Date.now() + 30000 }, body);
 
 test("host: beats carry last_command_at/last_seq only after a command ran; counts carry last_seq", async () => {
   const { t, dh } = mk();
