@@ -83,6 +83,8 @@ export interface SendAttachmentParams {
    *  chatbox.jsx sendOneAttachment uses, so a captionless attachment reads
    *  identically whether it came from a person or an agent. */
   caption?: string;
+  /** A message in this chat to link as the one being answered (`reply_to_message_id`). Not defaulted here. */
+  replyTo?: SaltId;
 }
 
 /**
@@ -850,9 +852,14 @@ export function createSaltClient(options: SaltClientOptions) {
       // `quiet` (salt-api 0.55.0): no push for this message. Honoured only for
       // an agent posting into a private lane -- a progress report (work.ts) --
       // and silently dropped anywhere else.
-      opts?: { quiet?: boolean }
+      // `replyTo`: the id of a message in THIS chat to link as the one being
+      // answered (`reply_to_message_id`; salt-api drops an id from another
+      // chat). A primitive: nothing defaults it here. `ctx.reply` supplies the
+      // incoming message's id by default (webhook.ts).
+      opts?: { quiet?: boolean; replyTo?: SaltId }
     ): Promise<unknown> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
+      if (opts?.replyTo !== undefined && opts.replyTo !== null) body.reply_to_message_id = opts.replyTo;
       if (delegations && delegations.length > 0) body.delegations = delegations;
       if (mentions && mentions.length > 0) body.mentions = mentions;
       if (opts?.quiet) body.quiet = true;
@@ -916,6 +923,7 @@ export function createSaltClient(options: SaltClientOptions) {
         message: encryptedCaption,
         attachment: ciphertext.toString("base64"),
         attachment_encrypted_key: encryptedMeta,
+        ...(params.replyTo !== undefined && params.replyTo !== null ? { reply_to_message_id: params.replyTo } : {}),
       });
     },
 
@@ -930,8 +938,10 @@ export function createSaltClient(options: SaltClientOptions) {
      * which hands the body straight through as ctx.text (ctx.encrypted
      * false) instead of attempting PGP decrypt.
      */
-    async postPlainMessage(apiKey: string, chatId: SaltId, text: string): Promise<unknown> {
-      return request("POST", "/api/v1/messages", apiKey, { chat_id: chatId, message: text });
+    async postPlainMessage(apiKey: string, chatId: SaltId, text: string, opts?: { replyTo?: SaltId }): Promise<unknown> {
+      const body: Record<string, unknown> = { chat_id: chatId, message: text };
+      if (opts?.replyTo !== undefined && opts.replyTo !== null) body.reply_to_message_id = opts.replyTo;
+      return request("POST", "/api/v1/messages", apiKey, body);
     },
 
     /**

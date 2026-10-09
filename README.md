@@ -75,6 +75,8 @@ const socket = createSocketClient({
   pgpPassphrase: process.env.PGP_PASSPHRASE, // the passphrase from step 1
   async onMessage(ctx) {
     await ctx.reply(`You said: ${ctx.text}`);
+    // The reply is linked to the message it answers. Opt out with
+    // ctx.reply(text, { replyTo: null }), or link another message with { replyTo: id }.
   },
 });
 socket.start(); // keep this running: it is what receives the answer in step 3
