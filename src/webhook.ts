@@ -65,6 +65,17 @@ export interface RawChatMeta {
   [key: string]: unknown;
 }
 
+/** What `onDeviceLaneMessage` receives. */
+export interface DeviceLaneMessage {
+  identity: AgentIdentity;
+  chatId: SaltId;
+  senderId: SaltId;
+  sender: RawSender;
+  /** The decrypted lane message (a device-protocol line). */
+  text: string;
+  chatMeta?: RawChatMeta;
+}
+
 export interface RawSender {
   id: SaltId;
   display_name?: string;
@@ -538,6 +549,20 @@ export interface WebhookServerOptions {
    * `type` is forwarded verbatim as the first argument. See src/device/.
    */
   onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
+  /**
+   * A message on a device-control lane (`chat.lane_kind === "device"`) -- the
+   * wire protocol between a controlling agent and a device. Set by the DEVICE
+   * (salt-device's sidecar): such a message is routed here right after the
+   * own-message check, BEFORE the mention gate, the agent-to-agent reply
+   * cap and session persistence (a command carries no mention, and a device
+   * lane would otherwise stop after two commands), and never reaches
+   * `onMessage`. Not awaited: a long action must not hold up the next
+   * delivery (the device host orders commands itself and must read `cancel`
+   * while one runs). The hook is the gate for WHO may command: check the
+   * sender against the session's agent. Unset, a device lane is handled like
+   * any other chat (the controlling AGENT reads results through `onMessage`).
+   */
+  onDeviceLaneMessage?: (ctx: DeviceLaneMessage) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -1172,7 +1197,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         return false;
       }
     }
-    return members.some((m) => m.account_type !== "Agent" && !(m as { observer?: boolean }).observer);
+    return members.some((m) => m.account_type !== "Agent" && m.account_type !== "Device" && !(m as { observer?: boolean }).observer);
   }
 
   // Runs `options.onIdentityAsk` for an incoming SALT-IDENTITY-ASK and
@@ -1375,6 +1400,19 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // delivered back to us as a webhook) -- this is what prevents an
     // infinite loop.
     if (sameId(senderId, identity.saltAppId)) return;
+
+    // A device lane is wire protocol, not conversation: hand it to the device
+    // hook before any conversational gate can drop it (see onDeviceLaneMessage).
+    if (chatMeta?.lane_kind === "device" && options.onDeviceLaneMessage) {
+      try {
+        Promise.resolve(options.onDeviceLaneMessage({ identity, chatId, senderId, sender: senderRaw, text: caption, chatMeta })).catch((err) => {
+          logger.error(`[chat ${chatId}] onDeviceLaneMessage failed: ${(err as Error).message}`);
+        });
+      } catch (err) {
+        logger.error(`[chat ${chatId}] onDeviceLaneMessage failed: ${(err as Error).message}`);
+      }
+      return;
+    }
 
     // request_floor (actions.ts): the consulted agent is asking to be
     // brought into the room directly instead of relaying further through

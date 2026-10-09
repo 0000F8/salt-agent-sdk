@@ -58,6 +58,7 @@ import {
   type ObserveArgs,
   type ScrollArgs,
 } from "./protocol.js";
+import pathMod from "node:path";
 import type { LaneReaders } from "./client.js";
 import { sameId, type SaltId } from "../ids.js";
 
@@ -208,6 +209,7 @@ export const NEVER_ALLOWED_APPS: readonly string[] = [
   "com.1password.1password",
   "com.agilebits.onepassword7",
   "com.apple.keychainaccess",
+  "com.apple.passwords",
   "com.bitwarden.desktop",
   "com.dashlane.dashlane",
   "org.keepassxc.keepassxc",
@@ -215,6 +217,7 @@ export const NEVER_ALLOWED_APPS: readonly string[] = [
   "bitwarden",
   "keepassxc",
   "keychain access",
+  "passwords",
   "dashlane",
 ];
 
@@ -366,7 +369,7 @@ export function createDeviceHost(
     header: DeviceHeader,
     code: DeviceErrorCode,
     message?: string,
-    extra: { expected_seq?: number; reason?: DevicePauseReason } = {}
+    extra: { expected_seq?: number; reason?: DevicePauseReason; now?: number } = {}
   ): Promise<{ op: string; body?: unknown }> {
     audit({ commandId: header.id, op: header.op, decision: code === "needs_approval" ? "needs_approval" : "refused", code, reason: message });
     // Refusals are not actions and are not reported as counts (they would
@@ -374,10 +377,21 @@ export function createDeviceHost(
     return reply(header, "error", { code, message, ...extra });
   }
 
-  function fileInScope(rule: DeviceCapRule | undefined, path: string): boolean {
-    if (!rule) return false;
-    if (!rule.fileRoots || rule.fileRoots.length === 0) return false; // files need an explicit root
-    return rule.fileRoots.some((root) => path === root || path.startsWith(root.endsWith("/") ? root : root + "/"));
+  /** Why a path is refused, or null when it is inside a root. Only absolute,
+   *  already-normalised paths are accepted (`..`, `.`, doubled or trailing
+   *  slashes are refused, never resolved), compared to the resolved roots on
+   *  segment boundaries. The device re-checks against the real filesystem
+   *  (symlinks) at I/O time. */
+  function fileScopeProblem(rule: DeviceCapRule | undefined, p: string): string | null {
+    if (!rule) return "no files capability";
+    if (!rule.fileRoots || rule.fileRoots.length === 0) return "files need an explicit root";
+    if (typeof p !== "string" || p.length === 0 || p.includes("\0")) return "path must be a non-empty string";
+    if (!pathMod.isAbsolute(p) || pathMod.resolve(p) !== p) return "path must be absolute and normalised";
+    const inside = rule.fileRoots.some((root) => {
+      const r = pathMod.resolve(root);
+      return p === r || p.startsWith(r.endsWith(pathMod.sep) ? r : r + pathMod.sep);
+    });
+    return inside ? null : "path is outside the allowed roots";
   }
 
   /** The floor: an app named by id OR by a longer name that contains a never-allowed one
@@ -470,12 +484,14 @@ export function createDeviceHost(
       return true;
     }
     if (header.exp > receivedAt + COMMAND_TTL_MS + EXP_SKEW_MS) {
-      await refuse(header, "bad_args", "exp is further ahead than a command may live", { expected_seq: lastSeq + 1 });
+      // Distinct from bad_args: the sender's clock is behind ours. Carries our
+      // `now` so the client can correct its offset and resend the same id.
+      await refuse(header, "clock_skew", "exp is further ahead than a command may live", { expected_seq: lastSeq + 1, now: clock() });
       return true;
     }
     const deadline = Math.min(header.exp, receivedAt + COMMAND_TTL_MS);
     if (clock() >= deadline) {
-      await refuse(header, "expired", "command expired before it started", { expected_seq: lastSeq + 1 });
+      await refuse(header, "expired", "command expired before it started", { expected_seq: lastSeq + 1, now: clock() });
       return true;
     }
 
@@ -543,8 +559,10 @@ export function createDeviceHost(
     }
     if (op === "read_file" || op === "write_file") {
       const path = (body as { path?: string })?.path ?? "";
-      if (!fileInScope(rule, path)) {
-        await refuse(header, "out_of_scope", `path not in scope: ${path}`);
+      const problem = fileScopeProblem(rule, path);
+      if (problem) {
+        const malformed = problem.startsWith("path must be");
+        await refuse(header, malformed ? "forbidden" : "out_of_scope", `path not in scope: ${problem}`);
         return true;
       }
     }

@@ -201,6 +201,8 @@ export function createDeviceClient(
   let tail: Promise<unknown> = Promise.resolve();
   let inFlight = 0;
   const earlyEnded = new Map<string, string>();
+  // The device's clock minus ours, learned from `clock_skew` / `expired` replies.
+  let clockOffsetMs = 0;
 
   function emit(event: string, ...args: unknown[]): void {
     for (const cb of listeners[event] ?? []) {
@@ -288,9 +290,19 @@ export function createDeviceClient(
       .then(finish);
   }
 
+  function resetSession(): void {
+    meta = null;
+    readers = null;
+    pausedReason = null;
+    seq = 0;
+    clockOffsetMs = 0;
+  }
+
   async function open(o: { wait?: boolean } = {}): Promise<DeviceSessionMeta> {
     const wait = o.wait !== false;
     if (meta && (meta.status === "active" || meta.status === "paused")) return meta;
+    // A previous session's leftovers must never leak into this one.
+    resetSession();
     // Register the waiter SYNCHRONOUSLY, before the POST's await yields: the
     // device's `device_session_active` delivery can race ahead of the POST
     // response, and it must find a resolver already in place.
@@ -417,15 +429,22 @@ export function createDeviceClient(
     seq += 1;
     let resynced = false;
     let refreshed = false;
+    let skewed = false;
     for (;;) {
       const plaintext = encodeDeviceMessage(
-        { v: DEVICE_PROTOCOL_VERSION, id, seq, op, session: m.id, exp: Date.now() + commandTtlMs },
+        { v: DEVICE_PROTOCOL_VERSION, id, seq, op, session: m.id, exp: Date.now() + clockOffsetMs + commandTtlMs },
         args
       );
       const res = await sendAndWait(id, plaintext, r, m, op);
       if (res.op !== "error") return res;
       const b = (res.body ?? {}) as ErrorResult;
       const expected = typeof b.expected_seq === "number" ? b.expected_seq : undefined;
+      if (typeof b.now === "number" && Number.isFinite(b.now)) clockOffsetMs = b.now - Date.now();
+      if (b.code === "clock_skew" && !skewed) {
+        skewed = true;
+        if (expected !== undefined) seq = expected;
+        continue; // same id and seq, exp corrected to the device's clock
+      }
       if (b.code === "out_of_order" && expected !== undefined && !resynced) {
         resynced = true;
         seq = expected; // resend with the SAME id so it cannot run twice
@@ -565,6 +584,7 @@ export function createDeviceClient(
         const reason = (b.end_reason as string) ?? "ended";
         if (meta) meta.status = "ended";
         pausedReason = null;
+        readers = null;
         clearOpenTimer();
         const err = new DeviceProtocolError("failed", `session ended: ${reason}`);
         const rej = openReject;
@@ -617,6 +637,7 @@ export function createDeviceClient(
         await transport.stopSession(id);
       } finally {
         if (meta) meta.status = "ended";
+        readers = null;
         failAll(new DeviceProtocolError("failed", "session stopped"));
       }
     },
