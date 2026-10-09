@@ -183,3 +183,21 @@ test("M7: client ignores deliveries for another device and an `ended` for anothe
   c.handleDelivery("device_session", { type: "device_session_ended", session_id: "s-old", device_id: "dev-1", end_reason: "agent_idle" });
   assert.equal(c.session().status, "active");
 });
+
+test("H2: observing or focusing a never-allowed app (even by a longer name) is forbidden; nothing runs", async () => {
+  const h = handlers(), t = transport();
+  const host = sdk.createDeviceHost(
+    snap({ "device.observe": { mode: "auto" }, "device.apps": { mode: "auto" } }), h, t, {},
+    { neverAllowedApps: [...sdk.NEVER_ALLOWED_APPS, "systems.salt.device", "salt device"] }
+  );
+  const observed = [];
+  h.observe = async (a) => { observed.push(a); return { obs: "o" }; };
+  await host.handleCommand(cmd(1, "observe", { target: "window", app: "1Password 7 - Password Manager" }));
+  assert.equal(t.results.at(-1).body.code, "forbidden");
+  await host.handleCommand(cmd(2, "focus_app", { app: "Salt Device" }));
+  assert.equal(t.results.at(-1).body.code, "forbidden");
+  await host.handleCommand(cmd(3, "observe", { target: "window", app: "Safari" }));
+  assert.equal(t.results.at(-1).header.op, "observation");
+  assert.equal(observed.length, 1);
+  assert.equal(h.calls.length, 0);
+});
