@@ -90,3 +90,30 @@ test("client: API-shaped flat deliveries drive promotion, pause (top-level pause
   assert.deepEqual(states.map((s) => s.state), ["queued", "queued", "requested", "active", "paused", "resumed", "ended"]);
   assert.equal(states[6].reason, "agent_idle");
 });
+
+test("intent: open({intent}) sends it on POST /devices/:id/sessions; absent means no body; the server's 422 sentence is the error", async () => {
+  const calls = [];
+  const q = [
+    { status: 201, body: { id: "s", status: "requested", intent: "Pay the invoice" } },
+    { status: 201, body: { id: "s2", status: "requested" } },
+    { status: 422, body: { error: "Say what you are doing in 140 characters or fewer.", code: "intent_too_long", max: 140 } },
+  ];
+  const fetchImpl = async (url, init) => { calls.push({ url, body: init.body }); const r = q.shift(); return { status: r.status, text: async () => JSON.stringify(r.body) }; };
+  const t = sdk.httpDeviceAgentTransport({ host: "https://x", apiKey: "k", fetchImpl });
+  assert.equal((await t.openSession("d", { intent: "Pay the invoice" })).intent, "Pay the invoice");
+  assert.equal(calls[0].url, "https://x/api/v1/devices/d/sessions");
+  assert.deepEqual(JSON.parse(calls[0].body), { intent: "Pay the invoice" });
+  await t.openSession("d");
+  assert.equal(calls[1].body, undefined);
+  await assert.rejects(t.openSession("d", { intent: "x".repeat(200) }), /140 characters/);
+});
+
+test("intent: device.open({intent}) hands the intent to the transport", async () => {
+  const seen = [];
+  const t = { async openSession(d, o) { seen.push(o); return { id: "s", device_id: d, agent_id: "a", mandate_id: "m", status: "queued", position: 1 }; }, async stopSession() {}, async postCommand() {} };
+  const dc = sdk.createDeviceClient(t, { deviceId: "d" });
+  await dc.open({ wait: false, intent: "Book the 9:40 train" });
+  await dc.open({ wait: false }).catch(() => {});
+  assert.deepEqual(seen[0], { intent: "Book the 9:40 train" });
+  assert.equal(seen[1], undefined);
+});

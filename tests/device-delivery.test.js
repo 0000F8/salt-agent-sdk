@@ -48,3 +48,11 @@ test("a device_queue delivery (the device's own rail) reaches onDeviceDelivery t
   await d.dispatch({ type: "device_queue", device_id: "d", controller: null, queue: [] }, "dev-1");
   assert.deepEqual(seen.map((s) => s[0]), ["device_queue"]);
 });
+
+test("grant and owner signals (identity-free) reach onDeviceDelivery", async () => {
+  const seen = [];
+  const d = dispatcherWith((type, body) => void seen.push([type, body]));
+  await d.dispatch({ type: "device_grants_changed", device_id: "d" }, "dev-1");
+  await d.dispatch({ type: "device_owner_changed", device_id: "d" }, "dev-1");
+  assert.deepEqual(seen.map((s) => s[0]), ["device_grants_changed", "device_owner_changed"]);
+});

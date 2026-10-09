@@ -58,6 +58,8 @@ export interface DeviceSessionMeta {
   /** `paused` only. */
   pause_reason?: DevicePauseReason;
   chat?: { id: SaltId; readers: string[] };
+  /** What the agent said it is doing when it opened (its own words, untrusted; null/absent when it gave none). */
+  intent?: string | null;
 }
 
 /** Thrown by a transport's openSession on `409 {code:"session_live", session_id}`:
@@ -98,7 +100,7 @@ export interface DeviceClientTransport {
    *  `requested` (device must approve locally), `active`, or `queued` (202,
    *  another agent controls the device). Throws DeviceSessionLiveError on a 409
    *  `session_live`. */
-  openSession(deviceId: SaltId): Promise<DeviceSessionMeta>;
+  openSession(deviceId: SaltId, opts?: { intent?: string }): Promise<DeviceSessionMeta>;
   /** POST /api/v1/device_sessions/:sid/reattach -> {session, last_seq}. */
   reattachSession?(sessionId: SaltId): Promise<{ session: DeviceSessionMeta; last_seq: number }>;
   /** GET /api/v1/device_sessions/:sid; used only to learn the lane readers when
@@ -149,7 +151,7 @@ export interface DeviceClient {
    *  (e.g. `queued` with `position`); watch onState for the rest. If this
    *  agent already has a live session on the device (409 session_live) it
    *  reattaches and continues at last_seq + 1. */
-  open(opts?: { wait?: boolean }): Promise<DeviceSessionMeta>;
+  open(opts?: { wait?: boolean; intent?: string }): Promise<DeviceSessionMeta>;
   observe(args?: ObserveArgs): Promise<ObservationResult>;
   click(args: ClickArgs): Promise<void>;
   type(text: string): Promise<void>;
@@ -288,7 +290,7 @@ export function createDeviceClient(
       .then(finish);
   }
 
-  async function open(o: { wait?: boolean } = {}): Promise<DeviceSessionMeta> {
+  async function open(o: { wait?: boolean; intent?: string } = {}): Promise<DeviceSessionMeta> {
     const wait = o.wait !== false;
     if (meta && (meta.status === "active" || meta.status === "paused")) return meta;
     // Register the waiter SYNCHRONOUSLY, before the POST's await yields: the
@@ -304,7 +306,7 @@ export function createDeviceClient(
     }
     let created: DeviceSessionMeta;
     try {
-      created = await transport.openSession(params.deviceId);
+      created = await transport.openSession(params.deviceId, o.intent !== undefined ? { intent: o.intent } : undefined);
     } catch (e) {
       if (e instanceof DeviceSessionLiveError) return reattach(e.sessionId, waiter);
       clearOpenTimer();
