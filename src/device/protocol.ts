@@ -44,7 +44,7 @@ export const RESULT_CACHE_SIZE = 64;
 /** Ops that change what is on the machine's screen/input state. The host
  *  serialises these device-wide (across every session on the machine) behind
  *  one mutex. `observe`, `list_apps` and the file ops do not take it. */
-export const MUTATING_OPS: readonly string[] = ["click", "type", "key", "scroll", "focus_app"];
+export const MUTATING_OPS: readonly string[] = ["click", "type", "key", "scroll", "submit", "focus_app"];
 
 /** Why a session is paused (device -> Salt -> agent). `person_active` and
  *  `secure_field` are the contract's two; `person_paused` is an explicit tray
@@ -58,6 +58,7 @@ export type DeviceOp =
   | "type"
   | "key"
   | "scroll"
+  | "submit" // accessibility confirm of a named element; never a keystroke
   | "focus_app"
   | "list_apps"
   | "read_file"
@@ -82,6 +83,7 @@ export const AGENT_OPS: readonly DeviceOp[] = [
   "type",
   "key",
   "scroll",
+  "submit",
   "focus_app",
   "list_apps",
   "read_file",
@@ -140,6 +142,7 @@ export const CAPABILITY_FOR_OP: Record<DeviceOp, string | null> = {
   type: "device.act",
   key: "device.act",
   scroll: "device.act",
+  submit: "device.act",
   focus_app: "device.apps",
   list_apps: "device.apps",
   read_file: "device.files.read",
@@ -190,6 +193,8 @@ export function countClassForOp(op: DeviceOp): DeviceCountClass | null {
       return "key";
     case "scroll":
       return "scroll";
+    case "submit": // a confirm is a press of a control: counted with clicks
+      return "click";
     case "read_file":
       return "file_read";
     case "write_file":
@@ -244,6 +249,10 @@ export interface TypeArgs {
   /** When present, set the value of / type into this named field via the
    *  accessibility layer, rather than typing at whatever currently has focus. */
   into?: ElementRef;
+}
+export interface SubmitArgs {
+  /** The named field (or form control) to confirm through the accessibility layer. */
+  element: ElementRef;
 }
 export interface KeyArgs {
   keys: string[];

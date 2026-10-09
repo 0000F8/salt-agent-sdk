@@ -34,6 +34,8 @@ import {
   type ObservationResult,
   type ObserveArgs,
   type ScrollArgs,
+  type SubmitArgs,
+  type ElementRef,
   type AppsResult,
 } from "./protocol.js";
 import { sameId, type SaltId } from "../ids.js";
@@ -157,6 +159,8 @@ export interface DeviceClient {
   type(text: string): Promise<void>;
   key(keys: string[]): Promise<void>;
   scroll(args: ScrollArgs): Promise<void>;
+  /** Confirm a named field/form through the accessibility layer (never a keystroke). */
+  submit(element: ElementRef): Promise<void>;
   focusApp(app: string): Promise<void>;
   listApps(): Promise<AppsResult>;
   readFile(path: string): Promise<FileResult>;
@@ -506,6 +510,7 @@ export function createDeviceClient(
   const doType = expect("type", "ack");
   const doKey = expect("key", "ack");
   const doScroll = expect("scroll", "ack");
+  const doSubmit = expect("submit", "ack");
   const doFocus = expect("focus_app", "ack");
   const doListApps = expect("list_apps", "apps");
   const doReadFile = expect("read_file", "file");
@@ -628,6 +633,7 @@ export function createDeviceClient(
     type: (text: string) => doType({ text }).then(() => undefined),
     key: (keys: string[]) => doKey({ keys } satisfies KeyArgs).then(() => undefined),
     scroll: (args: ScrollArgs) => doScroll(args).then(() => undefined),
+    submit: (element: ElementRef) => doSubmit({ element } satisfies SubmitArgs).then(() => undefined),
     focusApp: (app: string) => doFocus({ app }).then(() => undefined),
     listApps: () => doListApps() as Promise<AppsResult>,
     readFile: (path: string) => doReadFile({ path }) as Promise<FileResult>,

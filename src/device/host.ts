@@ -57,6 +57,7 @@ import {
   type ObservationResult,
   type ObserveArgs,
   type ScrollArgs,
+  type SubmitArgs,
 } from "./protocol.js";
 import pathMod from "node:path";
 import type { LaneReaders } from "./client.js";
@@ -71,6 +72,7 @@ export interface DeviceHostHandlers {
   type(args: { text: string }): Promise<void>;
   key(args: KeyArgs): Promise<void>;
   scroll(args: ScrollArgs): Promise<void>;
+  submit(args: SubmitArgs): Promise<void>;
   focusApp(args: { app: string }): Promise<void>;
   listApps(): Promise<AppsResult>;
   readFile(args: { path: string }): Promise<FileResult>;
@@ -711,6 +713,9 @@ export function createDeviceHost(
       case "scroll":
         await handlers.scroll(body as ScrollArgs);
         return { op: "ack", body: { ok: true } };
+      case "submit":
+        await handlers.submit(body as SubmitArgs);
+        return { op: "ack", body: { ok: true } };
       case "focus_app":
         await handlers.focusApp(body as { app: string });
         return { op: "ack", body: { ok: true } };
@@ -817,6 +822,7 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "type",
   "key",
   "scroll",
+  "submit",
   "focus_app",
   "list_apps",
   "read_file",
