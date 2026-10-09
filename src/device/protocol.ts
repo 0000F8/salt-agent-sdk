@@ -111,6 +111,7 @@ export type DeviceErrorCode =
   | "bad_args" // malformed args
   | "too_large" // payload over MAX_DEVICE_PLAINTEXT_BYTES
   | "busy" // rate limit hit
+  | "clock_skew" // `exp` is further ahead than a command may live: the sender's clock is behind. Body carries the device's `now`
   | "expired" // the command's `exp` passed before it started; not executed
   | "paused" // the person (or a secure field) has the device; not executed. Body carries `reason`
   | "failed"; // the handler ran and failed
@@ -125,6 +126,7 @@ export const DEVICE_ERROR_CODES: readonly DeviceErrorCode[] = [
   "too_large",
   "busy",
   "expired",
+  "clock_skew",
   "paused",
   "failed",
 ];
@@ -324,6 +326,8 @@ export interface ErrorResult {
   expected_seq?: number;
   /** `paused`: why. */
   reason?: DevicePauseReason;
+  /** `clock_skew`, `expired`: the device's clock (ms since epoch). */
+  now?: number;
 }
 export interface EndedResult {
   reason: string;
