@@ -40,7 +40,7 @@ test("M8: exp is required; one far ahead of the TTL is refused", async () => {
   await host.handleCommand(cmd(1, "click", { x: 1, y: 1 }, { noExp: true }));
   assert.equal(t.results.at(-1).body.code, "bad_args");
   await host.handleCommand(cmd(1, "click", { x: 1, y: 1 }, { id: "far", exp: Date.now() + 3600_000 }));
-  assert.equal(t.results.at(-1).body.code, "bad_args");
+  assert.equal(t.results.at(-1).body.code, "clock_skew");
   assert.equal(h.calls.length, 0);
 });
 
