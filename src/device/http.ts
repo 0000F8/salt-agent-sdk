@@ -48,17 +48,19 @@ async function call<T>(
 /** Agent-side transport. `apiKey` is the ACTING AGENT's key. */
 export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientTransport {
   return {
-    async openSession(deviceId: SaltId): Promise<DeviceSessionMeta> {
-      const { status, data } = await call<{ session?: DeviceSessionMeta; code?: string; session_id?: SaltId } & DeviceSessionMeta>(
+    async openSession(deviceId: SaltId, o?: { intent?: string }): Promise<DeviceSessionMeta> {
+      const { status, data } = await call<{ session?: DeviceSessionMeta; code?: string; session_id?: SaltId; error?: string } & DeviceSessionMeta>(
         opts,
         "POST",
-        `/api/v1/devices/${deviceId}/sessions`
+        `/api/v1/devices/${deviceId}/sessions`,
+        o?.intent !== undefined ? { intent: o.intent } : undefined
       );
       // 409 {code:"session_live", session_id}: this agent already controls the device.
       if (status === 409 && data?.code === "session_live" && data.session_id !== undefined) {
         throw new DeviceSessionLiveError(data.session_id);
       }
-      if (status >= 400) throw new Error(`openSession failed: ${status}`);
+      // The server's own sentence (e.g. 422 "intent_too_long": the 140-character limit) is the error.
+      if (status >= 400) throw new Error(typeof data?.error === "string" && data.error ? data.error : `openSession failed: ${status}`);
       // 201 -> the session; 202 -> {session: {status: "queued", position}}.
       const meta = (data?.session ?? data) as DeviceSessionMeta;
       return meta;

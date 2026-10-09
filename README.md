@@ -1041,9 +1041,16 @@ const device = createDeviceClient(httpDeviceAgentTransport({ host, apiKey }), { 
 device.onState((s) => console.log(s)); // queued(position) | requested | active | paused(reason) | resumed | ended(reason)
 await device.open();                    // waits through queued/requested on deliveries, never polls
 await device.open({ wait: false });     // or: return at once with the queued state
+await device.open({ intent: "Download the three invoices and save them to Documents" }); // see Intent
 await device.click({ x: 10, y: 20 });   // one command at a time, however many callers
 ```
 
+- **Intent.** `open({ intent })` says in one line what you are about to do (at most 140
+  characters after the server cleans control characters and whitespace). Salt stores it on the
+  session and the person sees it as your own words in the Salt Device panel, beside who is
+  asking; it is never checked and never changes what you may do. Longer is refused with a 422
+  and the server's sentence is the thrown error (`code: "intent_too_long"`). Optional: omit it
+  and the panel shows no line.
 - **Queue.** `open()` against a device another agent controls is answered 202 `queued`;
   it resolves when a `device_session` delivery (`promoted`, then approval) makes the
   session `active`. Feed deliveries in with `device.handleDelivery("device_session", body)`
