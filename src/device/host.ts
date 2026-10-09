@@ -380,8 +380,15 @@ export function createDeviceHost(
     return rule.fileRoots.some((root) => path === root || path.startsWith(root.endsWith("/") ? root : root + "/"));
   }
 
+  /** The floor: an app named by id OR by a longer name that contains a never-allowed one
+   *  ("1Password 7 - Password Manager") is refused whatever the mandate says. */
+  function isNeverAllowed(app: string): boolean {
+    const a = app.toLowerCase();
+    return neverAllowed.some((n) => a === n || a.includes(n));
+  }
+
   function appInScope(rule: DeviceCapRule | undefined, app: string): boolean {
-    if (neverAllowed.includes(app.toLowerCase())) return false;
+    if (isNeverAllowed(app)) return false;
     if (!rule) return false;
     if (!rule.apps || rule.apps.length === 0) return true; // any app the floor allows
     return rule.apps.some((a) => a.toLowerCase() === app.toLowerCase());
@@ -523,8 +530,16 @@ export function createDeviceHost(
     // Selector scope: apps and file roots.
     if ((op === "focus_app") && !appInScope(rule, (body as { app?: string })?.app ?? "")) {
       const app = (body as { app?: string })?.app ?? "";
-      await refuse(header, neverAllowed.includes(app.toLowerCase()) ? "forbidden" : "out_of_scope", `app not in scope: ${app}`);
+      await refuse(header, isNeverAllowed(app) ? "forbidden" : "out_of_scope", `app not in scope: ${app}`);
       return true;
+    }
+    // Observing a named app is looking at it: the same floor applies.
+    if (op === "observe") {
+      const app = (body as { app?: string } | undefined)?.app;
+      if (typeof app === "string" && isNeverAllowed(app)) {
+        await refuse(header, "forbidden", `app not in scope: ${app}`);
+        return true;
+      }
     }
     if (op === "read_file" || op === "write_file") {
       const path = (body as { path?: string })?.path ?? "";
