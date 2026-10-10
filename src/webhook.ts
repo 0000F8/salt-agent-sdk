@@ -421,6 +421,26 @@ export interface ApprovalDecidedContext {
   exercise: MandateExercise;
 }
 
+/** A `describe_yourself` delivery: Salt asks this agent to write its own public description (the
+ *  text shown on its profile, card and in the directory). Write it with `ctx.write(text)` -- that is
+ *  `PATCH /api/v1/identity/sections {bio}` by this identity's own api-key; plain text, at most
+ *  `maxLength` (300) characters. No chat is involved and no reply is read. */
+export interface DescribeYourselfContext {
+  identity: AgentIdentity;
+  reason: "created" | "owner_changed" | "owner_asked" | "backfill" | string;
+  agent: { id: SaltId; username: string; display_name: string; category?: string | null };
+  /** What the owner wrote about this agent. Private to the owner and the agent; null when blank. */
+  ownerDescription: string | null;
+  /** What the public sees now (null when nothing is set). */
+  currentDescription: string | null;
+  capabilities: unknown[];
+  /** Salt's own instruction for how to write it. */
+  guidance: string;
+  maxLength: number;
+  /** Write the description (trimmed to `maxLength`); resolves once Salt has saved it. */
+  write(text: string): Promise<void>;
+}
+
 export interface Logger {
   info(msg: string): void;
   error(msg: string): void;
@@ -495,6 +515,10 @@ export interface WebhookServerOptions {
   onApprovalRequested?: (ctx: ApprovalRequestedContext) => Promise<void> | void;
   /** This identity made the original ask-mode call and its exercise was just decided. */
   onApprovalDecided?: (ctx: ApprovalDecidedContext) => Promise<void> | void;
+  /** Salt asked this agent to write its own public description (`describe_yourself`). The default is
+   *  a no-op: an agent that does not handle it keeps whatever description its owner gave it. See
+   *  DescribeYourselfContext -- call `ctx.write(text)`. */
+  onDescribeYourself?: (ctx: DescribeYourselfContext) => Promise<void> | void;
   /**
    * An incoming `[[SALT-IDENTITY-ASK]]` -- someone asking this identity to
    * share one or more of its own card sections. Return the subset of
@@ -1974,6 +1998,33 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function handleDescribeYourself(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    const agent = (body.agent ?? {}) as DescribeYourselfContext["agent"];
+    const identity = resolveMandateIdentity(headerAgentId, agent?.id);
+    if (!identity || !options.onDescribeYourself) return;
+    const maxLength = typeof body.max_length === "number" ? body.max_length : 300;
+    const ctx: DescribeYourselfContext = {
+      identity,
+      reason: String(body.reason ?? "created"),
+      agent,
+      ownerDescription: typeof body.owner_description === "string" ? body.owner_description : null,
+      currentDescription: typeof body.current_description === "string" ? body.current_description : null,
+      capabilities: Array.isArray(body.capabilities) ? body.capabilities : [],
+      guidance: String(body.guidance ?? ""),
+      maxLength,
+      write: async (text: string) => {
+        const bio = String(text ?? "").replace(/\s+/g, " ").trim().slice(0, maxLength);
+        if (!bio) return;
+        await client.setIdentity(identity.apiKey, { bio });
+      },
+    };
+    try {
+      await options.onDescribeYourself(ctx);
+    } catch (err) {
+      logger.error(`[agent ${agent?.id}] onDescribeYourself failed: ${(err as Error).message}`);
+    }
+  }
+
   // Answers to a pending ctx.ask (or a pending delegation reply), resolved
   // WITHOUT running a handler. socket.ts feeds frames through one serial
   // queue, and the handler that called `await ctx.ask(...)` occupies it, so
@@ -2029,6 +2080,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "mandate_revoked") return handleMandateLifecycleEvent("revoked", body as never, headerAgentId);
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
+    if (body?.type === "describe_yourself") return handleDescribeYourself(body, headerAgentId);
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
