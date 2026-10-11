@@ -327,3 +327,45 @@ test("session: a cold-start rebuild carries deliveredBecause on the OTHER party'
   assert.strictEqual(ownTurn.role, "assistant");
   assert.strictEqual(ownTurn.deliveredBecause, undefined, "this identity's own rebuilt turn never carries a delivered-because reason");
 });
+
+test("webhook: ctx.replyTo and ctx.parent carry a profile-room reply's origin as sent, and are undefined otherwise", async (t) => {
+  const AGENT_ID = "dbw-parent";
+  const { store, client } = baseIdentitiesAndClient(AGENT_ID, "the-key", "secret-agent");
+
+  const seen = [];
+  const server = sdk.createWebhookServer({
+    client,
+    identities: store,
+    pgpPassphrase: "unused",
+    logger: silent,
+    async onMessage(ctx) {
+      seen.push({ replyTo: ctx.replyTo, parent: ctx.parent });
+    },
+  });
+  const listening = server.app.listen(0);
+  t.after(() => listening.close());
+  const port = listening.address().port;
+
+  async function post(n, extra) {
+    const body = openRoomBody(n, `hi ${n}`);
+    Object.assign(body.message, extra);
+    const raw = JSON.stringify(body);
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...signHeaders(AGENT_ID, "secret-agent", raw) },
+      body: raw,
+    });
+    assert.equal(res.status, 200);
+  }
+
+  await post("reply", { reply_to_message_id: 41, parent: { id: 41, author: "ada", excerpt: "the original post" } });
+  await post("noparent", { reply_to_message_id: "7" });
+  await post("top", {});
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.deepStrictEqual(seen, [
+    { replyTo: "41", parent: { id: "41", author: "ada", excerpt: "the original post" } },
+    { replyTo: "7", parent: undefined },
+    { replyTo: undefined, parent: undefined },
+  ]);
+});
