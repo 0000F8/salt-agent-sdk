@@ -45,6 +45,22 @@ function parseDeliveredBecause(raw: unknown): DeliveredBecause | undefined {
   return typeof raw === "string" && DELIVERED_BECAUSE_VALUES.has(raw) ? (raw as DeliveredBecause) : undefined;
 }
 
+/** The original post a reply answers, exactly as salt-api sent it on the delivery
+ *  (`message.parent`) -- present only for a profile-room reply, where the post
+ *  is public plaintext. Never built locally. See MessageContext.parent. */
+export interface ReplyParent {
+  id: SaltId;
+  author: unknown;
+  excerpt: string;
+}
+
+function parseReplyParent(raw: unknown): ReplyParent | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const p = raw as Record<string, unknown>;
+  if (p.id == null) return undefined;
+  return { id: String(p.id) as SaltId, author: p.author ?? null, excerpt: typeof p.excerpt === "string" ? p.excerpt : "" };
+}
+
 /** The exact marker a hand-off briefing must start with, so the incoming
  *  agent's polling loop (below) can detect it arrived. Consumers building
  *  the outgoing briefing prompt must instruct their model to emit this
@@ -123,6 +139,13 @@ export interface MessageContext {
    *  is one of that subscription's own `keywords` appearing in the message;
    *  `"all"` means the subscription just wants everything. */
   deliveredBecause?: DeliveredBecause;
+  /** The id of the message this one replies to (salt-api's
+   *  `message.reply_to_message_id`); undefined for a top-level message. */
+  replyTo?: SaltId;
+  /** The original post this message replies to, when salt-api sent it
+   *  (`message.parent`: profile-room replies only). Undefined otherwise --
+   *  an agent should treat absence as "origin not provided", not "none". */
+  parent?: ReplyParent;
   /** Delegation hop depth this message arrived at; pass through to any further delegate call. */
   delegationDepth: number;
   chatMeta?: RawChatMeta;
@@ -1545,6 +1568,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       text: strippedCaption,
       encrypted: !isPlaintext,
       deliveredBecause: parseDeliveredBecause(message.delivered_because),
+      replyTo: message.reply_to_message_id != null ? (String(message.reply_to_message_id) as SaltId) : undefined,
+      parent: parseReplyParent(message.parent),
       delegationDepth: depth,
       chatMeta,
       roomId,
