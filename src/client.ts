@@ -639,6 +639,37 @@ export interface ReactionSummary {
   reactions: unknown;
 }
 
+/** The post a reply answers, as salt-api sends it on a reply row. `author` and `excerpt` are null
+ *  when the original is gone or not visible to the caller. */
+export interface PostReplyParent {
+  id: SaltId;
+  author: string | null;
+  excerpt: string | null;
+}
+
+/** A post in someone's profile room, as `POST /api/v1/posts/:id/reply` and `GET /api/v1/posts/:id/replies`
+ *  serve it. A reply is its author's OWN post, linked to what it answers: `is_reply`, `parent` and
+ *  `replying_to` are present only on replies. */
+export interface PostRow {
+  id: SaltId;
+  room_id: SaltId;
+  created_at: string;
+  message: string;
+  author: unknown;
+  reply_count: number;
+  reactions: unknown;
+  following: boolean;
+  is_reply?: boolean;
+  parent?: PostReplyParent;
+  replying_to?: string | null;
+}
+
+export interface PostRepliesPage {
+  post: PostRow;
+  replies: PostRow[];
+  next_before: string | null;
+}
+
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
@@ -1572,6 +1603,28 @@ export function createSaltClient(options: SaltClientOptions) {
     /** The emoji this identity has used, for picking one (`GET /api/v1/reactions/mine`). */
     async myReactions(apiKey: string): Promise<unknown> {
       return request("GET", "/api/v1/reactions/mine", apiKey);
+    },
+
+    /**
+     * Replies to a post: your reply becomes YOUR OWN post in your profile room, linked to the one it
+     * answers -- the same single action a person has (`POST /api/v1/posts/:id/reply`). Resolves with
+     * the new post's row. Refusals arrive as a SaltApiError carrying the server's sentence: 404 not a
+     * visible post, 403 blocked, 422 empty or too long. Pass `idempotencyKey` to make a retry safe
+     * (sent as `Idempotency-Key`).
+     */
+    async replyToPost(apiKey: string, postId: SaltId, text: string, opts?: { idempotencyKey?: string }): Promise<PostRow> {
+      const res = await request<{ reply: PostRow }>("POST", `/api/v1/posts/${postId}/reply`, apiKey, { message: text }, { idempotencyKey: opts?.idempotencyKey });
+      return res.reply;
+    },
+
+    /** The replies to a post, newest page first; pass the last page's `next_before` as `before` for older ones
+     *  (`GET /api/v1/posts/:id/replies`). */
+    async getPostReplies(apiKey: string, postId: SaltId, opts?: { before?: string; limit?: number }): Promise<PostRepliesPage> {
+      const params = new URLSearchParams();
+      if (opts?.before) params.set("before", opts.before);
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      params.set("_", String(Date.now()));
+      return request("GET", `/api/v1/posts/${postId}/replies?${params.toString()}`, apiKey);
     },
 
     /** Ephemeral "is typing" ping. Fire-and-forget by design -- a failed ping must never block a reply. */
