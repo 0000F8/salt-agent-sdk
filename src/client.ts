@@ -211,6 +211,49 @@ export interface AppVersionRef {
   actions?: AppQuickAction[];
 }
 
+/** One agent's recipe inside a team template. Never a key, memory, credential, grant, wallet or chat -- see `teams` below. */
+export interface TeamAgentRecipe {
+  name: string;
+  purpose: string;
+  /** The agent's voice text. */
+  persona: string;
+  directives: string[];
+  skills: string[];
+  /** Connector provider NAMES the agent was given; never a credential. */
+  services: string[];
+  /** Sanitised drawn look, when the agent has one. */
+  look?: { svg: string; description?: string };
+}
+
+/** A shared agent team: a recipe each installer makes their own copies from. */
+export interface TeamTemplate {
+  id: SaltId;
+  /** Short id used in share links; accepted wherever an id is. */
+  slug: string;
+  name: string;
+  description: string | null;
+  listed: boolean;
+  install_count: number;
+  agent_count: number;
+  needs: string[];
+  coordinator_note: string | null;
+  author: { id: SaltId; username: string; display_name: string; avatar_url: string | null; account_type: string };
+  /** Absent from list responses. */
+  agents?: TeamAgentRecipe[];
+  [key: string]: unknown;
+}
+
+export interface ShareTeamParams {
+  /** One of the caller's own agent groups. Only the agents the caller owns are shared. */
+  groupId: SaltId;
+  name?: string;
+  description?: string;
+  /** Listed on the Teams shelf; default is unlisted (reachable by its link only). */
+  listed?: boolean;
+  /** Plain text each installed agent gets as a directive about who hands off to whom (at most 200 characters). */
+  coordinatorNote?: string;
+}
+
 /** An app's metadata -- `GET /api/v1/apps/:id`, the App Store listing, and `/mine`. */
 export interface AppSummary {
   id: SaltId;
@@ -1778,6 +1821,63 @@ export function createSaltClient(options: SaltClientOptions) {
        *  for an incoming `approval_requested` event. */
       async decide(apiKey: string, exerciseId: SaltId | number, decision: "approve" | "deny", note?: string): Promise<MandateExercise> {
         return request("POST", `/api/v1/mandates/exercises/${exerciseId}/decide`, apiKey, { decision, note });
+      },
+    },
+
+    // --- Share this group: team templates (2026-10-12) ---
+    // A template is a RECIPE (names, purposes, voice text, directives, skill
+    // and service names, looks), never running agents: whoever installs it
+    // makes their own agents with their own keys on their own side.
+    teams: {
+      /** The Teams shelf: listed templates, most installed first. Public. */
+      async list(apiKey: string, opts?: { q?: string; limit?: number; offset?: number }): Promise<{ teams: TeamTemplate[]; total: number }> {
+        const qs = new URLSearchParams();
+        if (opts?.q) qs.set("q", opts.q);
+        if (opts?.limit) qs.set("limit", String(opts.limit));
+        if (opts?.offset) qs.set("offset", String(opts.offset));
+        const query = qs.toString();
+        return request("GET", `/api/v1/team_templates${query ? `?${query}` : ""}`, apiKey);
+      },
+
+      /** The templates this identity shared, listed or not. */
+      async mine(apiKey: string): Promise<{ teams: TeamTemplate[] }> {
+        return request("GET", "/api/v1/team_templates/mine", apiKey);
+      },
+
+      /** A recipe preview, by id or slug. Public; an unlisted template is reachable by its link. */
+      async get(apiKey: string, idOrSlug: string): Promise<TeamTemplate> {
+        return request("GET", `/api/v1/team_templates/${encodeURIComponent(idOrSlug)}`, apiKey);
+      },
+
+      /** Shares one of the caller's own agent groups as a template. */
+      async share(apiKey: string, params: ShareTeamParams): Promise<TeamTemplate & { left_out: number }> {
+        return request("POST", "/api/v1/team_templates", apiKey, {
+          agent_group_id: params.groupId,
+          name: params.name,
+          description: params.description,
+          listed: params.listed,
+          coordinator_note: params.coordinatorNote,
+        });
+      },
+
+      /** Author only: name, description, listed or unlisted, the coordinator note. */
+      async update(apiKey: string, idOrSlug: string, changes: Partial<Pick<ShareTeamParams, "name" | "description" | "listed" | "coordinatorNote">>): Promise<TeamTemplate> {
+        return request("PATCH", `/api/v1/team_templates/${encodeURIComponent(idOrSlug)}`, apiKey, {
+          name: changes.name,
+          description: changes.description,
+          listed: changes.listed,
+          coordinator_note: changes.coordinatorNote,
+        });
+      },
+
+      /** Author only. Agents already made from it are the installers' own. */
+      async remove(apiKey: string, idOrSlug: string): Promise<void> {
+        await request("DELETE", `/api/v1/team_templates/${encodeURIComponent(idOrSlug)}`, apiKey);
+      },
+
+      /** "I made this team": counted once per installer. */
+      async installed(apiKey: string, idOrSlug: string): Promise<{ install_count: number; counted: boolean }> {
+        return request("POST", `/api/v1/team_templates/${encodeURIComponent(idOrSlug)}/installed`, apiKey, {});
       },
     },
 
