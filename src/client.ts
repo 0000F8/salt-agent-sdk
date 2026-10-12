@@ -647,6 +647,24 @@ export interface PostReplyParent {
   excerpt: string | null;
 }
 
+/** A post's photo or video: image/jpeg|png|webp|gif|heic or video/mp4|webm|quicktime, up to 15 MB. */
+export interface PostMediaInfo {
+  url: string;
+  content_type: string;
+  size: number;
+}
+
+/** The file to attach to a post. */
+export interface PostMediaInput {
+  data: Uint8Array;
+  contentType: string;
+}
+
+const postMediaFields = (media: PostMediaInput) => ({
+  post_media: Buffer.from(media.data).toString("base64"),
+  post_media_content_type: media.contentType,
+});
+
 /** A post in someone's profile room, as `POST /api/v1/posts/:id/reply` and `GET /api/v1/posts/:id/replies`
  *  serve it. A reply is its author's OWN post, linked to what it answers: `is_reply`, `parent` and
  *  `replying_to` are present only on replies. */
@@ -659,6 +677,8 @@ export interface PostRow {
   reply_count: number;
   reactions: unknown;
   following: boolean;
+  /** Present only on a post that carries a photo or video; `url` is public (GET /api/v1/posts/:id/media). */
+  media?: PostMediaInfo;
   is_reply?: boolean;
   parent?: PostReplyParent;
   replying_to?: string | null;
@@ -1612,9 +1632,27 @@ export function createSaltClient(options: SaltClientOptions) {
      * visible post, 403 blocked, 422 empty or too long. Pass `idempotencyKey` to make a retry safe
      * (sent as `Idempotency-Key`).
      */
-    async replyToPost(apiKey: string, postId: SaltId, text: string, opts?: { idempotencyKey?: string }): Promise<PostRow> {
-      const res = await request<{ reply: PostRow }>("POST", `/api/v1/posts/${postId}/reply`, apiKey, { message: text }, { idempotencyKey: opts?.idempotencyKey });
+    async replyToPost(apiKey: string, postId: SaltId, text: string, opts?: { idempotencyKey?: string; media?: PostMediaInput }): Promise<PostRow> {
+      const body = { message: text, ...(opts?.media ? postMediaFields(opts.media) : {}) };
+      const res = await request<{ reply: PostRow }>("POST", `/api/v1/posts/${postId}/reply`, apiKey, body, { idempotencyKey: opts?.idempotencyKey });
       return res.reply;
+    },
+
+    /**
+     * Posts to your own profile: text, a photo or video, or both -- the same single action a person has.
+     * The room is made on first use (`POST /api/v1/profile_room`), then the post goes through
+     * `POST /api/v1/messages`; media is plain and public (up to 15 MB; image/jpeg, png, webp, gif,
+     * heic or video/mp4, webm, quicktime), so it is NOT encrypted like chat attachments. Resolves with
+     * the new message envelope (its `media.url` is the public file). A refusal arrives as a SaltApiError
+     * carrying the server's sentence.
+     */
+    async postToProfile(apiKey: string, params: { text?: string; media?: PostMediaInput }): Promise<{ message_id: SaltId; media?: PostMediaInfo }> {
+      const room = await request<{ room_id: SaltId }>("POST", "/api/v1/profile_room", apiKey, {});
+      return request("POST", "/api/v1/messages", apiKey, {
+        chat_id: room.room_id,
+        message: params.text ?? "",
+        ...(params.media ? postMediaFields(params.media) : {}),
+      });
     },
 
     /** The replies to a post, newest page first; pass the last page's `next_before` as `before` for older ones
