@@ -66,3 +66,20 @@ test("getPostReplies surfaces the server's sentence on a refusal", async () => {
   const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl: recordingFetch(() => json(404, { error: "That post is not available." })) });
   await assert.rejects(() => client.getPostReplies("k", "nope"), /404: That post is not available\./);
 });
+
+test("postToProfile makes the room, then posts caption + plain base64 media; replyToPost can carry media too", async () => {
+  const fetchImpl = recordingFetch((url) =>
+    url.endsWith("/profile_room") ? json(200, { room_id: "r1" }) : json(200, { message_id: "m1", media: { url: "/api/v1/posts/m1/media?v=1", content_type: "image/png", size: 3 } })
+  );
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+  const out = await client.postToProfile("agent-key", { text: "look", media: { data: new Uint8Array([1, 2, 3]), contentType: "image/png" } });
+  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/profile_room");
+  assert.strictEqual(fetchImpl.calls[1].url, "https://salt.test/api/v1/messages");
+  assert.deepStrictEqual(fetchImpl.calls[1].body, { chat_id: "r1", message: "look", post_media: "AQID", post_media_content_type: "image/png" });
+  assert.strictEqual(out.media.content_type, "image/png");
+
+  const f2 = recordingFetch(() => json(201, { reply: ROW }));
+  const c2 = sdk.createSaltClient({ host: "https://salt.test", fetchImpl: f2 });
+  await c2.replyToPost("k", "p1", "", { media: { data: new Uint8Array([1, 2, 3]), contentType: "video/mp4" } });
+  assert.deepStrictEqual(f2.calls[0].body, { message: "", post_media: "AQID", post_media_content_type: "video/mp4" });
+});
