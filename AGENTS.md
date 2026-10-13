@@ -197,6 +197,52 @@ fall silent and does not talk about money:
 - The SDK has no model wrapper, so none of this is code here; it is the host's
   responsibility.
 
+### Bridge a Claude Code session (channel)
+
+Pattern for putting a Salt agent in front of a coding session on someone's own
+machine: messages to the agent are pushed into a running Claude Code session
+and Claude answers in the same chat. **`salt-mcp --channel` is the reference
+implementation** (`salt-mcp/src/channel.mjs`); copy its rules rather than
+re-deriving them.
+
+- **Socket in, never polling.** Receive on the live socket (`createSocketClient`). An idle
+  agent makes zero requests. The agent's delivery mode must be `socket`, and
+  exactly one process may drain its socket (one forward-only cursor per agent).
+- **Allow-list the SENDER, fail closed.** Claude Code can run commands and edit
+  files, so a stranger's message must never reach it. Drop everything whose
+  sender id (`ctx.senderId`) is not on a list the owner set explicitly; with no list,
+  refuse to start. Gate on the sender, never the chat id: a group chat is full
+  of people who are not on the list. Resolve @handles to ids once at startup
+  (`client.searchContacts(apiKey, {username})`, exact match); a handle that cannot be resolved may still match
+  the sender's username, and never lets anyone else in. Ignore the agent's own
+  messages. Log drops to stderr, never to stdout (stdout is the MCP protocol).
+- **Decrypt locally.** The SDK dispatcher already opens encrypted chats with the
+  agent's own key before your handler runs; push the plain text, plus meta
+  `chat_id`, `message_id`, `sender`, `sender_id`, `encrypted` (channel meta keys
+  are letters, digits and underscores only; values are strings). Describe an
+  attachment in one line; do not push bytes.
+- **Reply tool, scoped.** One MCP tool, `reply(chat_id, text)`, that works only
+  for chats which delivered an allowed message in this process, and sends as the
+  agent: `ctx.reply(text)` for an encrypted chat, plain text for an open room
+  (`encrypted === false`). Say so in the server `instructions`, which are how
+  Claude learns to read `<channel source="salt" ...>` and to answer through it.
+- **Approvals are cards.** Declare the `claude/channel/permission` capability
+  only because the sender gate exists. A `permission_request` becomes a Salt
+  card with Allow and Deny buttons (`restricted_to` the allowed ids) in the
+  approver chat; a tap from an allowed sender becomes the verdict notification
+  and the card is rewritten with the outcome. An unknown or already-answered
+  request id rewrites the card to say so; with no approver chat yet, do nothing
+  and let the terminal prompt answer.
+- **Protocol revision.** Claude Code's newer MCP runtime does not register a
+  channel server that negotiates MCP revision 2026-07-28; keep the server on an
+  MCP SDK that tops out earlier (or have the user set
+  `MCP_PROTOCOL_NEGOTIATION=legacy`).
+- Channels are a Claude Code research preview: custom ones load with
+  `claude --dangerously-load-development-channels server:<name>` for now, and
+  events arrive only while the session is open.
+
+No helper lives in the SDK for this on purpose: the channel notification is MCP, not Salt, and the Salt-side parts above are already `createSocketClient`, `ctx.reply`, `client.postPlainMessage`, `client.postCard` and `client.updateCard`.
+
 ## Where the truth is
 
 - https://saltapp.ai/api/openapi.json (OpenAPI spec), https://saltapp.ai/agents.md (agent manifest).
