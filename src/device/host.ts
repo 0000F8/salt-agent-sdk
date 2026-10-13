@@ -44,7 +44,13 @@ import {
   MAX_DEVICE_PLAINTEXT_BYTES,
   MAX_OBSERVE_PER_SECOND,
   MUTATING_OPS,
+  normalizeProgress,
+  normalizeTaskResult,
+  newTaskId,
+  parseTaskArgs,
+  PROGRESS_MIN_INTERVAL_MS,
   RESULT_CACHE_SIZE,
+  TASK_DEVICE_GRACE_MS,
   type AppsResult,
   type ClickArgs,
   type DeviceCountClass,
@@ -56,8 +62,11 @@ import {
   type KeyArgs,
   type ObservationResult,
   type ObserveArgs,
+  type Progress,
   type ScrollArgs,
   type SubmitArgs,
+  type TaskArgs,
+  type TaskResult,
 } from "./protocol.js";
 import pathMod from "node:path";
 import type { LaneReaders } from "./client.js";
@@ -77,6 +86,63 @@ export interface DeviceHostHandlers {
   listApps(): Promise<AppsResult>;
   readFile(args: { path: string }): Promise<FileResult>;
   writeFile(args: { path: string; content_b64: string }): Promise<HandlerResult>;
+  /** Do ONE whole task (op `task`, capability `device.task`). Optional: a host without it
+   *  answers `unsupported`. The host holds the device lock for the whole run. What comes back
+   *  is allow-listed field by field into a `TaskResult` (see `normalizeTaskResult`), so an
+   *  extra field never reaches the agent. Let a `DeviceBudgetSpentError` from `ctx.spend`
+   *  bubble: it ends the task and the session. */
+  task?(args: TaskArgs, ctx: DeviceTaskContext): Promise<TaskResult>;
+}
+
+/** What `ctx.spend` counts a task step as. `act` is counted as a `click` (the closest of the
+ *  existing classes: a press of a control) and `apps` as `app_focus`. */
+export type TaskSpendClass = "command" | "look" | "act" | "observe" | "apps";
+
+const SPEND_COUNT: Record<TaskSpendClass, DeviceCountClass> = {
+  command: "command",
+  look: "look",
+  act: "click",
+  observe: "observe",
+  apps: "app_focus",
+};
+
+/** What a `task` handler is given besides its arguments. */
+export interface DeviceTaskContext {
+  /** Aborts when the agent cancels the task (`reason` "cancelled"), when `timeout_s` runs out
+   *  ("timeout") and when the session ends ("session_ended"). A handler that ignores it is cut
+   *  off 15 s after `timeout_s` with a `timeout` result and the device lock is released. */
+  signal: AbortSignal;
+  /** Tell the agent (and keep the session alive) with one plain line. The host allow-lists the
+   *  fields, cuts `line` to 140 and sends at most one every 2 s (the newest waiting one goes
+   *  out when the gap is over). Never throws. Call it at least once a minute on a long task:
+   *  Salt ends a session that has run nothing for 2 minutes (5 when a person supervises). */
+  progress(p: Progress): void;
+  /** Count one step toward the grant's budget and the metadata counts, and keep the session
+   *  alive. Throws `DeviceBudgetSpentError` when `max_actions` is already spent: let it bubble. */
+  spend(cls: TaskSpendClass): void;
+  /** Why the session is paused (the person has the computer), or null. A task must not act
+   *  while this is non-null. */
+  paused(): DevicePauseReason | null;
+  /** Resolves `running` at once when not paused, or when the pause ends; `paused_out` when the
+   *  task's own time runs out first (finish with status `paused_out`); `stopped` when the task
+   *  is cancelled or the session ends. */
+  waitWhilePaused(): Promise<"running" | "paused_out" | "stopped">;
+  /** The `device.task` rule's mode: `ask` means every command asks the person first (Limited
+   *  grant), `auto` runs it, `notify` runs it and tells them. The host does not ask for the
+   *  task as a whole; the handler asks per command. */
+  mode: DeviceCapRule["mode"];
+  /** The grant's other rules (`device.observe`, `device.act`, `device.apps`, ...), read-only. */
+  caps: Readonly<Partial<Record<string, DeviceCapRule>>>;
+}
+
+/** `ctx.spend` when the grant's `max_actions` is already spent. A `DeviceProtocolError` with
+ *  code `out_of_scope`, so a handler that lets it bubble answers the agent "action budget
+ *  spent" and the host ends the session `budget_exhausted`. */
+export class DeviceBudgetSpentError extends DeviceProtocolError {
+  constructor() {
+    super("out_of_scope", "action budget spent");
+    this.name = "DeviceBudgetSpentError";
+  }
 }
 
 /** What a mutating handler may hand back: nothing, or a record about how the action went
@@ -284,11 +350,17 @@ export function createDeviceHost(
     deviceLock?: DeviceLock;
     /** Clock, for tests. */
     now?: () => number;
+    /** Least gap between two `progress` lines of a task (default PROGRESS_MIN_INTERVAL_MS). */
+    progressMinIntervalMs?: number;
+    /** How long past `timeout_s` a task handler may run before it is cut off (default 15 s). */
+    taskGraceMs?: number;
   } = {}
 ): DeviceHost {
   const deviceLock = options.deviceLock ?? sharedDeviceLock;
   const clock = options.now ?? Date.now;
   const beatIntervalMs = options.beatIntervalMs ?? 5_000;
+  const progressMinIntervalMs = options.progressMinIntervalMs ?? PROGRESS_MIN_INTERVAL_MS;
+  const taskGraceMs = options.taskGraceMs ?? TASK_DEVICE_GRACE_MS;
   const neverAllowed = (options.neverAllowedApps ?? NEVER_ALLOWED_APPS).map((s) => s.toLowerCase());
 
   let lastSeq = 0;
@@ -321,6 +393,10 @@ export function createDeviceHost(
   // Pending counts to flush to the server, coalesced.
   const pendingCounts: Partial<Record<DeviceCountClass, number>> = {};
   let countsFlushQueued = false;
+  // Tasks being run right now, by command id: `cancel` and the end of the session abort them.
+  const runningTasks = new Map<string, AbortController>();
+  // Callers of ctx.waitWhilePaused(), released by resume().
+  const resumeWaiters = new Set<() => void>();
 
   function audit(entry: Omit<DeviceAuditEntry, "at">): void {
     callbacks.onAudit?.({ at: Date.now(), ...entry });
@@ -460,14 +536,25 @@ export function createDeviceHost(
       // not started; a started or finished one keeps its stored result.
       // Remembered even when the command has not arrived yet (messages can
       // reorder); processed on arrival, so a long action never delays it.
-      const id = (body as { id?: unknown } | undefined)?.id;
-      if (typeof id === "string" && id.length <= 64) {
+      // The target is body `{id}` (a command) or the header's `re` (a task); a running task is
+      // aborted, which ends it `stopped`.
+      const bodyId = (body as { id?: unknown } | undefined)?.id;
+      const id = typeof bodyId === "string" ? bodyId : header.re;
+      const running = typeof id === "string" ? runningTasks.get(id) : undefined;
+      if (running) running.abort("cancelled");
+      else if (typeof id === "string" && id.length <= 64) {
         cancelledIds.delete(id);
         cancelledIds.add(id);
         while (cancelledIds.size > CANCELLED_CAP) cancelledIds.delete(cancelledIds.values().next().value as string);
       }
       audit({ commandId: typeof id === "string" ? id : "-", op: "cancel", decision: "ran" });
       return true;
+    }
+
+    // `stop` waits its turn like any command, but a running task must not make it wait up to
+    // `timeout_s`: tell the task now, so the stop is reached as soon as it unwinds.
+    if (header.op === "stop" && header.v === DEVICE_PROTOCOL_VERSION) {
+      for (const ac of runningTasks.values()) ac.abort("session_ended");
     }
 
     queuedIds.set(header.id, (queuedIds.get(header.id) ?? 0) + 1);
@@ -569,6 +656,22 @@ export function createDeviceHost(
       return true;
     }
 
+    // A task needs a handler, and arguments the device would run: checked here so a task that
+    // cannot run never takes the approval, the budget or the lock.
+    let taskArgs: ReturnType<typeof parseTaskArgs> | undefined;
+    if (op === "task") {
+      if (!handlers.task) {
+        await refuse(header, "unsupported", "this computer cannot run whole tasks");
+        return true;
+      }
+      try {
+        taskArgs = parseTaskArgs(body);
+      } catch (e) {
+        await refuse(header, "bad_args", e instanceof Error ? e.message : "bad task arguments");
+        return true;
+      }
+    }
+
     // Selector scope: apps and file roots.
     if ((op === "focus_app") && !appInScope(rule, (body as { app?: string })?.app ?? "")) {
       const app = (body as { app?: string })?.app ?? "";
@@ -608,8 +711,9 @@ export function createDeviceHost(
     }
 
     // Approval mode.
+    // A task is not asked about as a whole: the handler asks before each command (ctx.mode).
     const mode = rule?.mode ?? "auto";
-    if (mode === "ask") {
+    if (mode === "ask" && op !== "task") {
       // Never wait past the command's own deadline.
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timedOut = new Promise<"timeout">((resolve) => {
@@ -634,8 +738,10 @@ export function createDeviceHost(
     // Budget: a budgeted action is any counted op. Check BEFORE running so a
     // spent budget never runs one more.
     const cls = countClassForOp(op);
-    const budgeted = cls !== null && cls !== "error";
-    if (budgeted && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
+    // A task is not itself an action: its steps are (ctx.spend), so it is counted but not charged.
+    const budgeted = cls !== null && cls !== "error" && op !== "task";
+    const checksBudget = budgeted || op === "task";
+    if (checksBudget && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
       await refuse(header, "out_of_scope", "action budget spent");
       await stop("budget_exhausted");
       return true;
@@ -650,7 +756,7 @@ export function createDeviceHost(
       const checked = async (): Promise<{ op: string; body?: unknown } | Gate> => {
         const gate = lastChance(header, deadline);
         if (gate) return gate;
-        return dispatch(op, body);
+        return dispatch(op, body, header, taskArgs, rule);
       };
       const out = MUTATING_OPS.includes(op) ? await deviceLock.run(checked) : await checked();
       if (isGate(out)) {
@@ -670,6 +776,13 @@ export function createDeviceHost(
       remember(header.id, { op: result.op, body: result.body });
       await reply(header, result.op, result.body);
     } catch (e) {
+      if (e instanceof DeviceBudgetSpentError) {
+        // A task spent the last of the budget and did not finish: nothing to count as an error.
+        remember(header.id, { op: "error", body: { code: e.code, message: e.message } });
+        await refuse(header, e.code, e.message);
+        await stop("budget_exhausted");
+        return true;
+      }
       const code: DeviceErrorCode = e instanceof DeviceProtocolError ? e.code : "failed";
       const message = e instanceof Error ? e.message : String(e);
       // The person guard (paused / busy) refused INSIDE the handler: nothing
@@ -691,7 +804,7 @@ export function createDeviceHost(
     }
 
     // End the session the moment the last budgeted action is spent.
-    if (budgeted && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
+    if (checksBudget && snapshot.budget?.maxActions !== undefined && spent >= snapshot.budget.maxActions) {
       await stop("budget_exhausted");
     }
     return true;
@@ -721,7 +834,13 @@ export function createDeviceHost(
     return null;
   }
 
-  async function dispatch(op: DeviceOp, body: unknown): Promise<{ op: string; body?: unknown }> {
+  async function dispatch(
+    op: DeviceOp,
+    body: unknown,
+    header: DeviceHeader,
+    taskArgs: ReturnType<typeof parseTaskArgs> | undefined,
+    rule: DeviceCapRule | undefined
+  ): Promise<{ op: string; body?: unknown }> {
     switch (op) {
       case "observe":
         return { op: "observation", body: await handlers.observe((body as ObserveArgs) ?? { target: "screen" }) };
@@ -743,9 +862,146 @@ export function createDeviceHost(
         return { op: "file", body: await handlers.readFile(body as { path: string }) };
       case "write_file":
         return { op: "ack", body: ackBody(await handlers.writeFile(body as { path: string; content_b64: string })) };
+      case "task":
+        return { op: "task_result", body: await runTask(header, taskArgs as ReturnType<typeof parseTaskArgs>, rule) };
       default:
         throw new DeviceProtocolError("unsupported", op);
     }
+  }
+
+  /** Note that something ran just now, so the next beat carries it and Salt moves the lease. */
+  function touchLease(header: DeviceHeader): void {
+    lastRanAt = new Date(clock()).toISOString();
+    lastRanSeq = header.seq;
+  }
+
+  /** Run a task handler under the device lock the caller already holds. Progress goes out as
+   *  non-final results with the task's `re`, always before the final one. */
+  async function runTask(header: DeviceHeader, args: ReturnType<typeof parseTaskArgs>, rule: DeviceCapRule | undefined): Promise<TaskResult> {
+    const handler = handlers.task as NonNullable<DeviceHostHandlers["task"]>;
+    const ac = new AbortController();
+    runningTasks.set(header.id, ac);
+    const startedAt = clock();
+    const timeoutMs = args.timeout_s * 1000;
+    let over = false;
+    let lastProgressAt = Number.NEGATIVE_INFINITY;
+    let pendingProgress: Progress | null = null;
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let postChain: Promise<void> = Promise.resolve();
+
+    const sendProgress = (p: Progress): void => {
+      lastProgressAt = clock();
+      touchLease(header);
+      postChain = postChain
+        .then(() => reply(header, "progress", p))
+        .then(() => undefined)
+        .catch(() => undefined); // a failed progress line never stops the task
+    };
+
+    const ctx: DeviceTaskContext = {
+      signal: ac.signal,
+      progress(p) {
+        if (over || ended) return;
+        const n = normalizeProgress(p);
+        if (!n) return;
+        const wait = progressMinIntervalMs - (clock() - lastProgressAt);
+        if (wait <= 0) {
+          if (progressTimer) clearTimeout(progressTimer);
+          progressTimer = undefined;
+          pendingProgress = null;
+          sendProgress(n);
+          return;
+        }
+        // Too soon: keep only the newest and send it when the gap is over.
+        pendingProgress = n;
+        if (!progressTimer) {
+          progressTimer = setTimeout(() => {
+            progressTimer = undefined;
+            const q = pendingProgress;
+            pendingProgress = null;
+            if (q && !over && !ended) sendProgress(q);
+          }, wait);
+        }
+      },
+      spend(cls) {
+        if (over) throw new Error("the task is over");
+        if (ended) throw new DeviceProtocolError("failed", "session ended");
+        const counted = SPEND_COUNT[cls];
+        if (!counted) throw new DeviceProtocolError("bad_args", `unknown step class ${String(cls)}`);
+        const max = snapshot.budget?.maxActions;
+        if (max !== undefined && spent >= max) throw new DeviceBudgetSpentError();
+        spent += 1;
+        touchLease(header);
+        bump(counted);
+      },
+      paused: () => pausedReason,
+      waitWhilePaused() {
+        if (pausedReason === null) return Promise.resolve("running");
+        const outcome = (): "paused_out" | "stopped" => (ac.signal.reason === "timeout" ? "paused_out" : "stopped");
+        if (ac.signal.aborted) return Promise.resolve(outcome());
+        return new Promise((resolve) => {
+          const done = (v: "running" | "paused_out" | "stopped"): void => {
+            resumeWaiters.delete(onResume);
+            ac.signal.removeEventListener("abort", onAbort);
+            resolve(v);
+          };
+          const onResume = (): void => done("running");
+          const onAbort = (): void => done(outcome());
+          resumeWaiters.add(onResume);
+          ac.signal.addEventListener("abort", onAbort, { once: true });
+        });
+      },
+      mode: rule?.mode ?? "auto",
+      caps: Object.freeze({ ...snapshot.caps }),
+    };
+
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    timers.push(setTimeout(() => ac.abort("timeout"), timeoutMs));
+    if (snapshot.expiresAt) {
+      const until = Date.parse(snapshot.expiresAt) - clock();
+      if (until < timeoutMs) timers.push(setTimeout(() => ac.abort("session_ended"), Math.max(0, until)));
+    }
+    let hardTimer: ReturnType<typeof setTimeout> | undefined;
+    type Outcome = { kind: "ok"; value: unknown } | { kind: "err"; error: unknown } | { kind: "hard" };
+    let outcome: Outcome;
+    try {
+      const ran: Promise<Outcome> = (async () => handler(args, ctx))().then(
+        (value): Outcome => ({ kind: "ok", value }),
+        (error): Outcome => ({ kind: "err", error })
+      );
+      const hard = new Promise<Outcome>((resolve) => {
+        hardTimer = setTimeout(() => resolve({ kind: "hard" }), timeoutMs + taskGraceMs);
+      });
+      outcome = await Promise.race([ran, hard]);
+    } finally {
+      for (const t of timers) clearTimeout(t);
+      if (hardTimer) clearTimeout(hardTimer);
+    }
+    over = true;
+    if (progressTimer) clearTimeout(progressTimer);
+    pendingProgress = null;
+    runningTasks.delete(header.id);
+    if (outcome.kind === "hard") ac.abort("timeout"); // a handler that ignored the signal is let go
+    await postChain; // every progress line goes out before the final result
+
+    const elapsed = Math.max(0, clock() - startedAt);
+    const cut = (status: TaskResult["status"], summary: string): TaskResult => ({
+      task_id: newTaskId(),
+      status,
+      summary,
+      checked: null,
+      steps: [],
+      commands: 0,
+      duration_ms: elapsed,
+    });
+    if (outcome.kind === "ok") return normalizeTaskResult(outcome.value, { duration_ms: elapsed });
+    if (outcome.kind === "hard") return cut("timeout", "The task ran out of time.");
+    if (outcome.error instanceof DeviceBudgetSpentError) throw outcome.error;
+    if (ac.signal.aborted) {
+      // The handler gave up because it was told to: that is a stop or a timeout, not a failure.
+      return ac.signal.reason === "timeout" ? cut("timeout", "The task ran out of time.") : cut("stopped", "The task was stopped.");
+    }
+    throw outcome.error;
   }
 
   function start(): void {
@@ -781,6 +1037,7 @@ export function createDeviceHost(
     if (beatTimer) clearInterval(beatTimer);
     if (durationTimer) clearTimeout(durationTimer);
     beatTimer = durationTimer = null;
+    for (const ac of runningTasks.values()) ac.abort("session_ended");
     audit({ commandId: "-", op: "stop", decision: "ended", reason });
     callbacks.onEnded?.(reason);
     try {
@@ -827,6 +1084,7 @@ export function createDeviceHost(
     if (ended || pausedReason === null) return;
     pausedReason = null;
     audit({ commandId: "-", op: "resume", decision: "ran" });
+    for (const release of [...resumeWaiters]) release();
     await syncPause();
   }
 
@@ -844,6 +1102,7 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "list_apps",
   "read_file",
   "write_file",
+  "task",
   "stop",
   "cancel",
   "shell",

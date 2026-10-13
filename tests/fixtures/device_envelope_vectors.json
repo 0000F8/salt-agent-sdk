@@ -1,0 +1,2078 @@
+{
+  "generated_by": "scripts/generate_device_vectors.cjs (saltapp-python), from salt-agent-sdk src/device/protocol.ts",
+  "note": "Committed identically in salt-agent-sdk and saltapp-python. Do not edit by hand: regenerate.",
+  "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+  "envelopes": [
+    {
+      "name": "observe: marker alone, no body",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 1,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "observe",
+        "exp": 1760000030000
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K0000000000000000 seq=1 op=observe session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 1,
+        "op": "observe",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "exp": 1760000030000
+      }
+    },
+    {
+      "name": "click: a body and an exp",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 4,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "click",
+        "exp": 1760000030000
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K0000000000000000 seq=4 op=click session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]\n{\"x\":10,\"y\":20,\"button\":\"left\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 4,
+        "op": "click",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "exp": 1760000030000
+      },
+      "body": {
+        "x": 10,
+        "y": 20,
+        "button": "left"
+      },
+      "decoded_body": {
+        "x": 10,
+        "y": 20,
+        "button": "left"
+      }
+    },
+    {
+      "name": "task: every argument",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 2,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "task",
+        "exp": 1760000030000
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K0000000000000000 seq=2 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]\n{\"goal\":\"Open saltapp.ai in Firefox\",\"done_when\":\"the page title says saltapp.ai\",\"max_steps\":20,\"timeout_s\":120}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 2,
+        "op": "task",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "exp": 1760000030000
+      },
+      "body": {
+        "goal": "Open saltapp.ai in Firefox",
+        "done_when": "the page title says saltapp.ai",
+        "max_steps": 20,
+        "timeout_s": 120
+      },
+      "decoded_body": {
+        "goal": "Open saltapp.ai in Firefox",
+        "done_when": "the page title says saltapp.ai",
+        "max_steps": 20,
+        "timeout_s": 120
+      }
+    },
+    {
+      "name": "task: goal only",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 3,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "task",
+        "exp": 1760000030000
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K0000000000000000 seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]\n{\"goal\":\"Empty the Downloads folder\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 3,
+        "op": "task",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "exp": 1760000030000
+      },
+      "body": {
+        "goal": "Empty the Downloads folder"
+      },
+      "decoded_body": {
+        "goal": "Empty the Downloads folder"
+      }
+    },
+    {
+      "name": "cancel: names a running task in re and in the body",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K1111111111111111",
+        "seq": 3,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "cancel",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K1111111111111111 seq=3 op=cancel session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b re=01J9ZQ3M8K0000000000000000]]\n{\"id\":\"01J9ZQ3M8K0000000000000000\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K1111111111111111",
+        "seq": 3,
+        "op": "cancel",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "body": {
+        "id": "01J9ZQ3M8K0000000000000000"
+      },
+      "decoded_body": {
+        "id": "01J9ZQ3M8K0000000000000000"
+      }
+    },
+    {
+      "name": "progress: a non-final result with the task's re",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K2222222222222222",
+        "seq": 7,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "progress",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K2222222222222222 seq=7 op=progress session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b re=01J9ZQ3M8K0000000000000000]]\n{\"step\":2,\"of\":5,\"line\":\"Opening Firefox\",\"waiting\":false}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K2222222222222222",
+        "seq": 7,
+        "op": "progress",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "body": {
+        "step": 2,
+        "of": 5,
+        "line": "Opening Firefox",
+        "waiting": false
+      },
+      "decoded_body": {
+        "step": 2,
+        "of": 5,
+        "line": "Opening Firefox",
+        "waiting": false
+      }
+    },
+    {
+      "name": "task_result: a checked receipt",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K3333333333333333",
+        "seq": 9,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "task_result",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K3333333333333333 seq=9 op=task_result session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b re=01J9ZQ3M8K0000000000000000]]\n{\"task_id\":\"t_0a1b2c3d4e5f\",\"status\":\"done\",\"summary\":\"Done. Results for saltapp.ai are open in Firefox.\",\"checked\":{\"ok\":true,\"what\":\"the page title says saltapp.ai\"},\"steps\":[{\"n\":1,\"kind\":\"apps\",\"line\":\"Focus Firefox\",\"ok\":true},{\"n\":2,\"kind\":\"command\",\"line\":\"open https://saltapp.ai\",\"ok\":true},{\"n\":3,\"kind\":\"check\",\"line\":\"Read the page title\",\"ok\":true}],\"commands\":1,\"duration_ms\":8420}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K3333333333333333",
+        "seq": 9,
+        "op": "task_result",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "body": {
+        "task_id": "t_0a1b2c3d4e5f",
+        "status": "done",
+        "summary": "Done. Results for saltapp.ai are open in Firefox.",
+        "checked": {
+          "ok": true,
+          "what": "the page title says saltapp.ai"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "apps",
+            "line": "Focus Firefox",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "command",
+            "line": "open https://saltapp.ai",
+            "ok": true
+          },
+          {
+            "n": 3,
+            "kind": "check",
+            "line": "Read the page title",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 8420
+      },
+      "decoded_body": {
+        "task_id": "t_0a1b2c3d4e5f",
+        "status": "done",
+        "summary": "Done. Results for saltapp.ai are open in Firefox.",
+        "checked": {
+          "ok": true,
+          "what": "the page title says saltapp.ai"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "apps",
+            "line": "Focus Firefox",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "command",
+            "line": "open https://saltapp.ai",
+            "ok": true
+          },
+          {
+            "n": 3,
+            "kind": "check",
+            "line": "Read the page title",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 8420
+      }
+    },
+    {
+      "name": "error: refusal with a reason",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K4444444444444444",
+        "seq": 5,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "error",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K4444444444444444 seq=5 op=error session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b re=01J9ZQ3M8K0000000000000000]]\n{\"code\":\"out_of_scope\",\"message\":\"action budget spent\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K4444444444444444",
+        "seq": 5,
+        "op": "error",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "re": "01J9ZQ3M8K0000000000000000"
+      },
+      "body": {
+        "code": "out_of_scope",
+        "message": "action budget spent"
+      },
+      "decoded_body": {
+        "code": "out_of_scope",
+        "message": "action budget spent"
+      }
+    },
+    {
+      "name": "ended: the session is over",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K5555555555555555",
+        "seq": 11,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "ended"
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K5555555555555555 seq=11 op=ended session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]\n{\"reason\":\"stopped_by_agent\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K5555555555555555",
+        "seq": 11,
+        "op": "ended",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b"
+      },
+      "body": {
+        "reason": "stopped_by_agent"
+      },
+      "decoded_body": {
+        "reason": "stopped_by_agent"
+      }
+    },
+    {
+      "name": "body: escapes, quotes, non-ASCII and an emoji survive byte for byte",
+      "header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 6,
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "op": "task",
+        "exp": 1760000030000
+      },
+      "text": "[[SALT-DEVICE v=1 id=01J9ZQ3M8K0000000000000000 seq=6 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]\n{\"goal\":\"Say \\\"hi\\\" to Zoë — it’s a “test”\\nline two\\ttab \\\\ backslash \\u0001 control 😀 end\",\"done_when\":\"ok\"}",
+      "decoded_header": {
+        "v": 1,
+        "id": "01J9ZQ3M8K0000000000000000",
+        "seq": 6,
+        "op": "task",
+        "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+        "exp": 1760000030000
+      },
+      "body": {
+        "goal": "Say \"hi\" to Zoë — it’s a “test”\nline two\ttab \\ backslash \u0001 control 😀 end",
+        "done_when": "ok"
+      },
+      "decoded_body": {
+        "goal": "Say \"hi\" to Zoë — it’s a “test”\nline two\ttab \\ backslash \u0001 control 😀 end",
+        "done_when": "ok"
+      }
+    }
+  ],
+  "decode_only": [
+    {
+      "name": "leading whitespace and a trailing newline are tolerated",
+      "text": "  \n[[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=1760000030000]]\n{\"goal\":\"x\"}\n",
+      "expect": {
+        "header": {
+          "v": 1,
+          "id": "abc",
+          "seq": 3,
+          "op": "task",
+          "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+          "exp": 1760000030000
+        },
+        "body": {
+          "goal": "x"
+        }
+      }
+    },
+    {
+      "name": "blank lines between the marker and the body",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]\n\n\n{\"goal\":\"x\"}",
+      "expect": {
+        "header": {
+          "v": 1,
+          "id": "abc",
+          "seq": 3,
+          "op": "task",
+          "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b"
+        },
+        "body": {
+          "goal": "x"
+        }
+      }
+    },
+    {
+      "name": "not a device message at all",
+      "text": "hello, how are you?",
+      "expect": null
+    },
+    {
+      "name": "a marker that is not at the start is chat text",
+      "text": "see [[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect": null
+    },
+    {
+      "name": "unknown op passes through (the host answers unsupported)",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=1 op=teleport session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect": {
+        "header": {
+          "v": 1,
+          "id": "abc",
+          "seq": 1,
+          "op": "teleport",
+          "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b"
+        }
+      }
+    },
+    {
+      "name": "another protocol version still decodes (the host answers unsupported)",
+      "text": "[[SALT-DEVICE v=2 id=abc seq=1 op=observe session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect": {
+        "header": {
+          "v": 2,
+          "id": "abc",
+          "seq": 1,
+          "op": "observe",
+          "session": "0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b"
+        }
+      }
+    },
+    {
+      "name": "no closing brackets",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "missing a required field",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=1 session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "seq 0 is refused",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=0 op=observe session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "seq must be a number",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=x op=observe session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "exp must be a number",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b exp=soon]]",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "a body that is not JSON",
+      "text": "[[SALT-DEVICE v=1 id=abc seq=3 op=task session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]\n{goal: x}",
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "two spaces between fields do not match the grammar",
+      "text": "[[SALT-DEVICE v=1  id=abc seq=1 op=observe session=0b6c2a3e-4f5d-4e7a-9a11-2c3d4e5f6a7b]]",
+      "expect_error": "bad_args"
+    }
+  ],
+  "task_args": [
+    {
+      "name": "goal only gets the defaults",
+      "input": {
+        "goal": "Open the page"
+      },
+      "expect": {
+        "goal": "Open the page",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "unknown keys are dropped",
+      "input": {
+        "goal": "g",
+        "extra": 1,
+        "shell": "rm -rf /"
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "numbers are clamped into range",
+      "input": {
+        "goal": "g",
+        "done_when": "it is open",
+        "max_steps": 500,
+        "timeout_s": 1
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 60,
+        "timeout_s": 10,
+        "done_when": "it is open"
+      }
+    },
+    {
+      "name": "numbers clamped from below and above",
+      "input": {
+        "goal": "g",
+        "max_steps": 0,
+        "timeout_s": 9999
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 1,
+        "timeout_s": 600
+      }
+    },
+    {
+      "name": "an empty done_when is no done_when",
+      "input": {
+        "goal": "g",
+        "done_when": ""
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "null optional fields are absent",
+      "input": {
+        "goal": "g",
+        "done_when": null,
+        "max_steps": null,
+        "timeout_s": null
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "a goal of exactly 2000 characters",
+      "input": {
+        "goal": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expect": {
+        "goal": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "2000 emoji are 2000 characters, not 4000",
+      "input": {
+        "goal": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "expect": {
+        "goal": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "max_steps": 30,
+        "timeout_s": 180
+      }
+    },
+    {
+      "name": "2001 emoji are over",
+      "input": {
+        "goal": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "2001 characters are over",
+      "input": {
+        "goal": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "done_when of exactly 500",
+      "input": {
+        "goal": "g",
+        "done_when": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      },
+      "expect": {
+        "goal": "g",
+        "max_steps": 30,
+        "timeout_s": 180,
+        "done_when": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      }
+    },
+    {
+      "name": "done_when over 500",
+      "input": {
+        "goal": "g",
+        "done_when": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "no goal",
+      "input": {},
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "empty goal",
+      "input": {
+        "goal": ""
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "blank goal",
+      "input": {
+        "goal": "  \n "
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "goal not a string",
+      "input": {
+        "goal": 5
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "done_when not a string",
+      "input": {
+        "goal": "g",
+        "done_when": 4
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "max_steps not whole",
+      "input": {
+        "goal": "g",
+        "max_steps": 1.5
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "timeout_s a string",
+      "input": {
+        "goal": "g",
+        "timeout_s": "30"
+      },
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "body is a list",
+      "input": [
+        "goal"
+      ],
+      "expect_error": "bad_args"
+    },
+    {
+      "name": "body is a string",
+      "input": "goal",
+      "expect_error": "bad_args"
+    }
+  ],
+  "progress": [
+    {
+      "name": "every field",
+      "input": {
+        "step": 2,
+        "of": 5,
+        "line": "Opening Firefox",
+        "waiting": true
+      },
+      "expect": {
+        "step": 2,
+        "line": "Opening Firefox",
+        "of": 5,
+        "waiting": true
+      }
+    },
+    {
+      "name": "only what is allowed gets through",
+      "input": {
+        "step": 1,
+        "line": "x",
+        "secret": "no",
+        "of": 3
+      },
+      "expect": {
+        "step": 1,
+        "line": "x",
+        "of": 3
+      }
+    },
+    {
+      "name": "a long line is cut to 140 characters",
+      "input": {
+        "step": 1,
+        "line": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      },
+      "expect": {
+        "step": 1,
+        "line": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+      }
+    },
+    {
+      "name": "a long line of emoji is cut by characters",
+      "input": {
+        "step": 1,
+        "line": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "expect": {
+        "step": 1,
+        "line": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      }
+    },
+    {
+      "name": "of below 1 is dropped, waiting must be a boolean",
+      "input": {
+        "step": 0,
+        "line": "start",
+        "of": 0,
+        "waiting": "yes"
+      },
+      "expect": {
+        "step": 0,
+        "line": "start"
+      }
+    },
+    {
+      "name": "step is not a number",
+      "input": {
+        "step": "1",
+        "line": "a"
+      },
+      "expect": null
+    },
+    {
+      "name": "step is not whole",
+      "input": {
+        "step": 1.5,
+        "line": "a"
+      },
+      "expect": null
+    },
+    {
+      "name": "step is negative",
+      "input": {
+        "step": -1,
+        "line": "a"
+      },
+      "expect": null
+    },
+    {
+      "name": "no line",
+      "input": {
+        "step": 1
+      },
+      "expect": null
+    },
+    {
+      "name": "no step",
+      "input": {
+        "line": "a"
+      },
+      "expect": null
+    },
+    {
+      "name": "not an object",
+      "input": "progress",
+      "expect": null
+    },
+    {
+      "name": "null",
+      "input": null,
+      "expect": null
+    }
+  ],
+  "task_result": [
+    {
+      "name": "a clean result passes through unchanged",
+      "input": {
+        "task_id": "t_000000000001",
+        "status": "done",
+        "summary": "Done.",
+        "checked": {
+          "ok": true,
+          "what": "title ok"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "check",
+            "line": "Read the title",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 1200
+      },
+      "expect": {
+        "task_id": "t_000000000001",
+        "status": "done",
+        "summary": "Done.",
+        "checked": {
+          "ok": true,
+          "what": "title ok"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "check",
+            "line": "Read the title",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 1200
+      }
+    },
+    {
+      "name": "extra fields never travel (output, screenshots, anything else)",
+      "input": {
+        "task_id": "t_000000000002",
+        "status": "failed",
+        "summary": "Could not.",
+        "checked": {
+          "ok": false,
+          "what": "no",
+          "screenshot_b64": "AAAA"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "ls",
+            "ok": false,
+            "output": "SECRET OUTPUT"
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 5,
+        "output": "rm -rf",
+        "image_b64": "AAAA"
+      },
+      "expect": {
+        "task_id": "t_000000000002",
+        "status": "failed",
+        "summary": "Could not.",
+        "checked": {
+          "ok": false,
+          "what": "no"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "ls",
+            "ok": false
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 5
+      }
+    },
+    {
+      "name": "summary 500, what 200, task_id 64 are the caps",
+      "input": {
+        "task_id": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "status": "done",
+        "summary": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "checked": {
+          "ok": true,
+          "what": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+        },
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      },
+      "expect": {
+        "task_id": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+        "status": "done",
+        "summary": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "checked": {
+          "ok": true,
+          "what": "wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww"
+        },
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "caps count characters: emoji are cut by code point",
+      "input": {
+        "task_id": "t_000000000003",
+        "status": "done",
+        "summary": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "checked": {
+          "ok": true,
+          "what": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "look",
+            "line": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "ok": true
+          }
+        ],
+        "commands": 0,
+        "duration_ms": 0
+      },
+      "expect": {
+        "task_id": "t_000000000003",
+        "status": "done",
+        "summary": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+        "checked": {
+          "ok": true,
+          "what": "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"
+        },
+        "steps": [
+          {
+            "n": 1,
+            "kind": "look",
+            "line": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+            "ok": true
+          }
+        ],
+        "commands": 0,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "80 steps keep the first 60",
+      "input": {
+        "task_id": "t_000000000004",
+        "status": "done",
+        "summary": "many",
+        "checked": null,
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "step 1",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "command",
+            "line": "step 2",
+            "ok": false
+          },
+          {
+            "n": 3,
+            "kind": "command",
+            "line": "step 3",
+            "ok": true
+          },
+          {
+            "n": 4,
+            "kind": "command",
+            "line": "step 4",
+            "ok": false
+          },
+          {
+            "n": 5,
+            "kind": "command",
+            "line": "step 5",
+            "ok": true
+          },
+          {
+            "n": 6,
+            "kind": "command",
+            "line": "step 6",
+            "ok": false
+          },
+          {
+            "n": 7,
+            "kind": "command",
+            "line": "step 7",
+            "ok": true
+          },
+          {
+            "n": 8,
+            "kind": "command",
+            "line": "step 8",
+            "ok": false
+          },
+          {
+            "n": 9,
+            "kind": "command",
+            "line": "step 9",
+            "ok": true
+          },
+          {
+            "n": 10,
+            "kind": "command",
+            "line": "step 10",
+            "ok": false
+          },
+          {
+            "n": 11,
+            "kind": "command",
+            "line": "step 11",
+            "ok": true
+          },
+          {
+            "n": 12,
+            "kind": "command",
+            "line": "step 12",
+            "ok": false
+          },
+          {
+            "n": 13,
+            "kind": "command",
+            "line": "step 13",
+            "ok": true
+          },
+          {
+            "n": 14,
+            "kind": "command",
+            "line": "step 14",
+            "ok": false
+          },
+          {
+            "n": 15,
+            "kind": "command",
+            "line": "step 15",
+            "ok": true
+          },
+          {
+            "n": 16,
+            "kind": "command",
+            "line": "step 16",
+            "ok": false
+          },
+          {
+            "n": 17,
+            "kind": "command",
+            "line": "step 17",
+            "ok": true
+          },
+          {
+            "n": 18,
+            "kind": "command",
+            "line": "step 18",
+            "ok": false
+          },
+          {
+            "n": 19,
+            "kind": "command",
+            "line": "step 19",
+            "ok": true
+          },
+          {
+            "n": 20,
+            "kind": "command",
+            "line": "step 20",
+            "ok": false
+          },
+          {
+            "n": 21,
+            "kind": "command",
+            "line": "step 21",
+            "ok": true
+          },
+          {
+            "n": 22,
+            "kind": "command",
+            "line": "step 22",
+            "ok": false
+          },
+          {
+            "n": 23,
+            "kind": "command",
+            "line": "step 23",
+            "ok": true
+          },
+          {
+            "n": 24,
+            "kind": "command",
+            "line": "step 24",
+            "ok": false
+          },
+          {
+            "n": 25,
+            "kind": "command",
+            "line": "step 25",
+            "ok": true
+          },
+          {
+            "n": 26,
+            "kind": "command",
+            "line": "step 26",
+            "ok": false
+          },
+          {
+            "n": 27,
+            "kind": "command",
+            "line": "step 27",
+            "ok": true
+          },
+          {
+            "n": 28,
+            "kind": "command",
+            "line": "step 28",
+            "ok": false
+          },
+          {
+            "n": 29,
+            "kind": "command",
+            "line": "step 29",
+            "ok": true
+          },
+          {
+            "n": 30,
+            "kind": "command",
+            "line": "step 30",
+            "ok": false
+          },
+          {
+            "n": 31,
+            "kind": "command",
+            "line": "step 31",
+            "ok": true
+          },
+          {
+            "n": 32,
+            "kind": "command",
+            "line": "step 32",
+            "ok": false
+          },
+          {
+            "n": 33,
+            "kind": "command",
+            "line": "step 33",
+            "ok": true
+          },
+          {
+            "n": 34,
+            "kind": "command",
+            "line": "step 34",
+            "ok": false
+          },
+          {
+            "n": 35,
+            "kind": "command",
+            "line": "step 35",
+            "ok": true
+          },
+          {
+            "n": 36,
+            "kind": "command",
+            "line": "step 36",
+            "ok": false
+          },
+          {
+            "n": 37,
+            "kind": "command",
+            "line": "step 37",
+            "ok": true
+          },
+          {
+            "n": 38,
+            "kind": "command",
+            "line": "step 38",
+            "ok": false
+          },
+          {
+            "n": 39,
+            "kind": "command",
+            "line": "step 39",
+            "ok": true
+          },
+          {
+            "n": 40,
+            "kind": "command",
+            "line": "step 40",
+            "ok": false
+          },
+          {
+            "n": 41,
+            "kind": "command",
+            "line": "step 41",
+            "ok": true
+          },
+          {
+            "n": 42,
+            "kind": "command",
+            "line": "step 42",
+            "ok": false
+          },
+          {
+            "n": 43,
+            "kind": "command",
+            "line": "step 43",
+            "ok": true
+          },
+          {
+            "n": 44,
+            "kind": "command",
+            "line": "step 44",
+            "ok": false
+          },
+          {
+            "n": 45,
+            "kind": "command",
+            "line": "step 45",
+            "ok": true
+          },
+          {
+            "n": 46,
+            "kind": "command",
+            "line": "step 46",
+            "ok": false
+          },
+          {
+            "n": 47,
+            "kind": "command",
+            "line": "step 47",
+            "ok": true
+          },
+          {
+            "n": 48,
+            "kind": "command",
+            "line": "step 48",
+            "ok": false
+          },
+          {
+            "n": 49,
+            "kind": "command",
+            "line": "step 49",
+            "ok": true
+          },
+          {
+            "n": 50,
+            "kind": "command",
+            "line": "step 50",
+            "ok": false
+          },
+          {
+            "n": 51,
+            "kind": "command",
+            "line": "step 51",
+            "ok": true
+          },
+          {
+            "n": 52,
+            "kind": "command",
+            "line": "step 52",
+            "ok": false
+          },
+          {
+            "n": 53,
+            "kind": "command",
+            "line": "step 53",
+            "ok": true
+          },
+          {
+            "n": 54,
+            "kind": "command",
+            "line": "step 54",
+            "ok": false
+          },
+          {
+            "n": 55,
+            "kind": "command",
+            "line": "step 55",
+            "ok": true
+          },
+          {
+            "n": 56,
+            "kind": "command",
+            "line": "step 56",
+            "ok": false
+          },
+          {
+            "n": 57,
+            "kind": "command",
+            "line": "step 57",
+            "ok": true
+          },
+          {
+            "n": 58,
+            "kind": "command",
+            "line": "step 58",
+            "ok": false
+          },
+          {
+            "n": 59,
+            "kind": "command",
+            "line": "step 59",
+            "ok": true
+          },
+          {
+            "n": 60,
+            "kind": "command",
+            "line": "step 60",
+            "ok": false
+          },
+          {
+            "n": 61,
+            "kind": "command",
+            "line": "step 61",
+            "ok": true
+          },
+          {
+            "n": 62,
+            "kind": "command",
+            "line": "step 62",
+            "ok": false
+          },
+          {
+            "n": 63,
+            "kind": "command",
+            "line": "step 63",
+            "ok": true
+          },
+          {
+            "n": 64,
+            "kind": "command",
+            "line": "step 64",
+            "ok": false
+          },
+          {
+            "n": 65,
+            "kind": "command",
+            "line": "step 65",
+            "ok": true
+          },
+          {
+            "n": 66,
+            "kind": "command",
+            "line": "step 66",
+            "ok": false
+          },
+          {
+            "n": 67,
+            "kind": "command",
+            "line": "step 67",
+            "ok": true
+          },
+          {
+            "n": 68,
+            "kind": "command",
+            "line": "step 68",
+            "ok": false
+          },
+          {
+            "n": 69,
+            "kind": "command",
+            "line": "step 69",
+            "ok": true
+          },
+          {
+            "n": 70,
+            "kind": "command",
+            "line": "step 70",
+            "ok": false
+          },
+          {
+            "n": 71,
+            "kind": "command",
+            "line": "step 71",
+            "ok": true
+          },
+          {
+            "n": 72,
+            "kind": "command",
+            "line": "step 72",
+            "ok": false
+          },
+          {
+            "n": 73,
+            "kind": "command",
+            "line": "step 73",
+            "ok": true
+          },
+          {
+            "n": 74,
+            "kind": "command",
+            "line": "step 74",
+            "ok": false
+          },
+          {
+            "n": 75,
+            "kind": "command",
+            "line": "step 75",
+            "ok": true
+          },
+          {
+            "n": 76,
+            "kind": "command",
+            "line": "step 76",
+            "ok": false
+          },
+          {
+            "n": 77,
+            "kind": "command",
+            "line": "step 77",
+            "ok": true
+          },
+          {
+            "n": 78,
+            "kind": "command",
+            "line": "step 78",
+            "ok": false
+          },
+          {
+            "n": 79,
+            "kind": "command",
+            "line": "step 79",
+            "ok": true
+          },
+          {
+            "n": 80,
+            "kind": "command",
+            "line": "step 80",
+            "ok": false
+          }
+        ],
+        "commands": 80,
+        "duration_ms": 9
+      },
+      "expect": {
+        "task_id": "t_000000000004",
+        "status": "done",
+        "summary": "many",
+        "checked": null,
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "step 1",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "command",
+            "line": "step 2",
+            "ok": false
+          },
+          {
+            "n": 3,
+            "kind": "command",
+            "line": "step 3",
+            "ok": true
+          },
+          {
+            "n": 4,
+            "kind": "command",
+            "line": "step 4",
+            "ok": false
+          },
+          {
+            "n": 5,
+            "kind": "command",
+            "line": "step 5",
+            "ok": true
+          },
+          {
+            "n": 6,
+            "kind": "command",
+            "line": "step 6",
+            "ok": false
+          },
+          {
+            "n": 7,
+            "kind": "command",
+            "line": "step 7",
+            "ok": true
+          },
+          {
+            "n": 8,
+            "kind": "command",
+            "line": "step 8",
+            "ok": false
+          },
+          {
+            "n": 9,
+            "kind": "command",
+            "line": "step 9",
+            "ok": true
+          },
+          {
+            "n": 10,
+            "kind": "command",
+            "line": "step 10",
+            "ok": false
+          },
+          {
+            "n": 11,
+            "kind": "command",
+            "line": "step 11",
+            "ok": true
+          },
+          {
+            "n": 12,
+            "kind": "command",
+            "line": "step 12",
+            "ok": false
+          },
+          {
+            "n": 13,
+            "kind": "command",
+            "line": "step 13",
+            "ok": true
+          },
+          {
+            "n": 14,
+            "kind": "command",
+            "line": "step 14",
+            "ok": false
+          },
+          {
+            "n": 15,
+            "kind": "command",
+            "line": "step 15",
+            "ok": true
+          },
+          {
+            "n": 16,
+            "kind": "command",
+            "line": "step 16",
+            "ok": false
+          },
+          {
+            "n": 17,
+            "kind": "command",
+            "line": "step 17",
+            "ok": true
+          },
+          {
+            "n": 18,
+            "kind": "command",
+            "line": "step 18",
+            "ok": false
+          },
+          {
+            "n": 19,
+            "kind": "command",
+            "line": "step 19",
+            "ok": true
+          },
+          {
+            "n": 20,
+            "kind": "command",
+            "line": "step 20",
+            "ok": false
+          },
+          {
+            "n": 21,
+            "kind": "command",
+            "line": "step 21",
+            "ok": true
+          },
+          {
+            "n": 22,
+            "kind": "command",
+            "line": "step 22",
+            "ok": false
+          },
+          {
+            "n": 23,
+            "kind": "command",
+            "line": "step 23",
+            "ok": true
+          },
+          {
+            "n": 24,
+            "kind": "command",
+            "line": "step 24",
+            "ok": false
+          },
+          {
+            "n": 25,
+            "kind": "command",
+            "line": "step 25",
+            "ok": true
+          },
+          {
+            "n": 26,
+            "kind": "command",
+            "line": "step 26",
+            "ok": false
+          },
+          {
+            "n": 27,
+            "kind": "command",
+            "line": "step 27",
+            "ok": true
+          },
+          {
+            "n": 28,
+            "kind": "command",
+            "line": "step 28",
+            "ok": false
+          },
+          {
+            "n": 29,
+            "kind": "command",
+            "line": "step 29",
+            "ok": true
+          },
+          {
+            "n": 30,
+            "kind": "command",
+            "line": "step 30",
+            "ok": false
+          },
+          {
+            "n": 31,
+            "kind": "command",
+            "line": "step 31",
+            "ok": true
+          },
+          {
+            "n": 32,
+            "kind": "command",
+            "line": "step 32",
+            "ok": false
+          },
+          {
+            "n": 33,
+            "kind": "command",
+            "line": "step 33",
+            "ok": true
+          },
+          {
+            "n": 34,
+            "kind": "command",
+            "line": "step 34",
+            "ok": false
+          },
+          {
+            "n": 35,
+            "kind": "command",
+            "line": "step 35",
+            "ok": true
+          },
+          {
+            "n": 36,
+            "kind": "command",
+            "line": "step 36",
+            "ok": false
+          },
+          {
+            "n": 37,
+            "kind": "command",
+            "line": "step 37",
+            "ok": true
+          },
+          {
+            "n": 38,
+            "kind": "command",
+            "line": "step 38",
+            "ok": false
+          },
+          {
+            "n": 39,
+            "kind": "command",
+            "line": "step 39",
+            "ok": true
+          },
+          {
+            "n": 40,
+            "kind": "command",
+            "line": "step 40",
+            "ok": false
+          },
+          {
+            "n": 41,
+            "kind": "command",
+            "line": "step 41",
+            "ok": true
+          },
+          {
+            "n": 42,
+            "kind": "command",
+            "line": "step 42",
+            "ok": false
+          },
+          {
+            "n": 43,
+            "kind": "command",
+            "line": "step 43",
+            "ok": true
+          },
+          {
+            "n": 44,
+            "kind": "command",
+            "line": "step 44",
+            "ok": false
+          },
+          {
+            "n": 45,
+            "kind": "command",
+            "line": "step 45",
+            "ok": true
+          },
+          {
+            "n": 46,
+            "kind": "command",
+            "line": "step 46",
+            "ok": false
+          },
+          {
+            "n": 47,
+            "kind": "command",
+            "line": "step 47",
+            "ok": true
+          },
+          {
+            "n": 48,
+            "kind": "command",
+            "line": "step 48",
+            "ok": false
+          },
+          {
+            "n": 49,
+            "kind": "command",
+            "line": "step 49",
+            "ok": true
+          },
+          {
+            "n": 50,
+            "kind": "command",
+            "line": "step 50",
+            "ok": false
+          },
+          {
+            "n": 51,
+            "kind": "command",
+            "line": "step 51",
+            "ok": true
+          },
+          {
+            "n": 52,
+            "kind": "command",
+            "line": "step 52",
+            "ok": false
+          },
+          {
+            "n": 53,
+            "kind": "command",
+            "line": "step 53",
+            "ok": true
+          },
+          {
+            "n": 54,
+            "kind": "command",
+            "line": "step 54",
+            "ok": false
+          },
+          {
+            "n": 55,
+            "kind": "command",
+            "line": "step 55",
+            "ok": true
+          },
+          {
+            "n": 56,
+            "kind": "command",
+            "line": "step 56",
+            "ok": false
+          },
+          {
+            "n": 57,
+            "kind": "command",
+            "line": "step 57",
+            "ok": true
+          },
+          {
+            "n": 58,
+            "kind": "command",
+            "line": "step 58",
+            "ok": false
+          },
+          {
+            "n": 59,
+            "kind": "command",
+            "line": "step 59",
+            "ok": true
+          },
+          {
+            "n": 60,
+            "kind": "command",
+            "line": "step 60",
+            "ok": false
+          }
+        ],
+        "commands": 80,
+        "duration_ms": 9
+      }
+    },
+    {
+      "name": "bad step rows are dropped, a missing n is its place in the list",
+      "input": {
+        "task_id": "t_000000000005",
+        "status": "done",
+        "summary": "s",
+        "checked": null,
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "ok",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "shell",
+            "line": "bad kind",
+            "ok": true
+          },
+          "not a row",
+          {
+            "n": 3,
+            "kind": "look",
+            "ok": true
+          },
+          {
+            "kind": "ask",
+            "line": "no n",
+            "ok": "yes"
+          },
+          {
+            "n": -4,
+            "kind": "act",
+            "line": "negative n",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 1
+      },
+      "expect": {
+        "task_id": "t_000000000005",
+        "status": "done",
+        "summary": "s",
+        "checked": null,
+        "steps": [
+          {
+            "n": 1,
+            "kind": "command",
+            "line": "ok",
+            "ok": true
+          },
+          {
+            "n": 2,
+            "kind": "ask",
+            "line": "no n",
+            "ok": false
+          },
+          {
+            "n": 3,
+            "kind": "act",
+            "line": "negative n",
+            "ok": true
+          }
+        ],
+        "commands": 1,
+        "duration_ms": 1
+      }
+    },
+    {
+      "name": "an unknown status reads failed",
+      "input": {
+        "task_id": "t_000000000006",
+        "status": "great",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      },
+      "expect": {
+        "task_id": "t_000000000006",
+        "status": "failed",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "every status is allowed",
+      "input": {
+        "task_id": "t_000000000007",
+        "status": "paused_out",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      },
+      "expect": {
+        "task_id": "t_000000000007",
+        "status": "paused_out",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "bad types fall back: no summary, no checked, no steps, no counts",
+      "input": {
+        "task_id": "t_000000000008",
+        "status": "done",
+        "summary": 5,
+        "checked": {
+          "ok": "yes",
+          "what": "x"
+        },
+        "steps": "no",
+        "commands": -4,
+        "duration_ms": 1.5
+      },
+      "expect": {
+        "task_id": "t_000000000008",
+        "status": "done",
+        "summary": "",
+        "checked": null,
+        "steps": [],
+        "commands": 0,
+        "duration_ms": 0
+      }
+    },
+    {
+      "name": "checked.ok must be a boolean; what may be missing",
+      "input": {
+        "task_id": "t_000000000009",
+        "status": "done",
+        "summary": "s",
+        "checked": {
+          "ok": true
+        },
+        "steps": [],
+        "commands": 3,
+        "duration_ms": 77
+      },
+      "expect": {
+        "task_id": "t_000000000009",
+        "status": "done",
+        "summary": "s",
+        "checked": {
+          "ok": true,
+          "what": ""
+        },
+        "steps": [],
+        "commands": 3,
+        "duration_ms": 77
+      }
+    },
+    {
+      "name": "whole numbers: 2.0 is whole, 2.5 is not",
+      "input": {
+        "task_id": "t_00000000000a",
+        "status": "done",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 2,
+        "duration_ms": 2.5
+      },
+      "expect": {
+        "task_id": "t_00000000000a",
+        "status": "done",
+        "summary": "s",
+        "checked": null,
+        "steps": [],
+        "commands": 2,
+        "duration_ms": 0
+      }
+    }
+  ],
+  "constants": {
+    "DEVICE_PROTOCOL_VERSION": 1,
+    "MAX_DEVICE_PLAINTEXT_BYTES": 4194304,
+    "MAX_COMMANDS_PER_SECOND": 5,
+    "MAX_OBSERVE_PER_SECOND": 1,
+    "COMMAND_TTL_MS": 30000,
+    "RESULT_CACHE_SIZE": 64,
+    "MUTATING_OPS": [
+      "click",
+      "type",
+      "key",
+      "scroll",
+      "submit",
+      "focus_app",
+      "task"
+    ],
+    "AGENT_OPS": [
+      "observe",
+      "click",
+      "type",
+      "key",
+      "scroll",
+      "submit",
+      "focus_app",
+      "list_apps",
+      "read_file",
+      "write_file",
+      "task",
+      "stop",
+      "cancel",
+      "shell"
+    ],
+    "DEVICE_RESULT_OPS": [
+      "ack",
+      "observation",
+      "apps",
+      "file",
+      "ask",
+      "error",
+      "ended",
+      "progress",
+      "task_result"
+    ],
+    "DEVICE_ERROR_CODES": [
+      "forbidden",
+      "out_of_scope",
+      "needs_approval",
+      "unsupported",
+      "out_of_order",
+      "bad_args",
+      "too_large",
+      "busy",
+      "expired",
+      "clock_skew",
+      "paused",
+      "failed"
+    ],
+    "DEVICE_COUNT_CLASSES": [
+      "observe",
+      "click",
+      "type",
+      "key",
+      "scroll",
+      "file_read",
+      "file_write",
+      "app_focus",
+      "task",
+      "command",
+      "look",
+      "error"
+    ],
+    "CAPABILITY_FOR_OP": {
+      "observe": "device.observe",
+      "click": "device.act",
+      "type": "device.act",
+      "key": "device.act",
+      "scroll": "device.act",
+      "submit": "device.act",
+      "focus_app": "device.apps",
+      "list_apps": "device.apps",
+      "read_file": "device.files.read",
+      "write_file": "device.files.write",
+      "task": "device.task",
+      "stop": null,
+      "cancel": null,
+      "shell": "device.shell"
+    },
+    "TASK_GOAL_MAX": 2000,
+    "TASK_DONE_WHEN_MAX": 500,
+    "TASK_MAX_STEPS_MIN": 1,
+    "TASK_MAX_STEPS_MAX": 60,
+    "TASK_MAX_STEPS_DEFAULT": 30,
+    "TASK_TIMEOUT_S_MIN": 10,
+    "TASK_TIMEOUT_S_MAX": 600,
+    "TASK_TIMEOUT_S_DEFAULT": 180,
+    "PROGRESS_LINE_MAX": 140,
+    "TASK_SUMMARY_MAX": 500,
+    "TASK_STEP_LINE_MAX": 140,
+    "TASK_RESULT_STEPS_MAX": 60,
+    "TASK_CHECKED_WHAT_MAX": 200,
+    "TASK_ID_MAX": 64,
+    "PROGRESS_MIN_INTERVAL_MS": 2000,
+    "TASK_DEVICE_GRACE_MS": 15000,
+    "TASK_CLIENT_GRACE_MS": 30000,
+    "TASK_STATUSES": [
+      "done",
+      "failed",
+      "stopped",
+      "denied",
+      "timeout",
+      "paused_out"
+    ],
+    "TASK_STEP_KINDS": [
+      "command",
+      "look",
+      "observe",
+      "act",
+      "apps",
+      "ask",
+      "check"
+    ]
+  }
+}

@@ -18,7 +18,7 @@ Run from the repo root. All verified directly in this repo, 2026-09-27.
   succeeds (98 packages; 3 moderate `npm audit` advisories, not addressed).
 - `npm run build` — `tsc -p tsconfig.json`, emits `dist/`. Verified: clean.
 - `npm test` — `npm run build && node --test tests/*.test.js`. Verified
-  2026-10-13: **305/305 passing, 0 failing.**
+  2026-10-13: **448/448 passing, 0 failing** (411 before `device.task`).
 - No `lint` script exists — `tsc` is the only static check. (README.md's
   closing "No test suite yet" is stale — `tests/` has ~20 files, 187 cases.)
 
@@ -265,6 +265,92 @@ re-deriving them.
   events arrive only while the session is open.
 
 No helper lives in the SDK for this on purpose: the channel notification is MCP, not Salt, and the Salt-side parts above are already `createSocketClient`, `ctx.reply`, `client.postPlainMessage`, `client.postCard` and `client.updateCard`.
+
+## Hand a whole task to a computer (`device.task`)
+
+Instead of driving a person's computer one click at a time, an agent with a
+`device.task` grant hands it ONE whole task in plain words. A local agent on the
+computer (Salt Device) does it with commands, screenshots, the screen reader and
+input, checks the result, and answers with a checked receipt. Salt carries the task
+down and the result back; it never sees either. (Wire contract: salt-api
+`docs/DEVICE_PROTOCOL.md`; mirrored in `src/device/protocol.ts` and, for the
+envelope and the task shapes, in saltapp-python's `saltapp.device`.)
+
+```ts
+const result = await device.task("Open saltapp.ai in Firefox", {
+  doneWhen: "the page title says saltapp.ai",   // how the device should check it (<= 500)
+  maxSteps: 30,                                  // 1..60, default 30
+  timeoutS: 180,                                 // 10..600, default 180
+  onProgress: (p) => say(p.line),               // optional: { step, of?, line, waiting? }
+  signal: abort.signal,                          // optional: aborting sends `cancel`
+});
+// { task_id, status, summary, checked: {ok, what} | null, steps: [...], commands, duration_ms }
+// status: done | failed | stopped | denied | timeout | paused_out
+```
+
+- **The grant.** Capability `device.task` (selector `{device_ids}`, like the other device
+  capabilities). Under **Full control** (observe + act + apps + task, every row `auto`) the
+  computer runs the task's commands without asking. Under **Limited** the grant has mode
+  `ask` and every command asks the person first. A grant made before 0.3 that has
+  observe + act + apps but not task keeps working for the step-by-step tools and is never
+  widened silently. `device.shell` stays reserved and refused: nobody sends a raw command
+  over the lane, the local agent composes commands from the task and shows them to the person.
+- **What the person sees.** A frame round the screen while it works, a caption with the
+  current line and Pause / Stop, a card for each command that needs an answer (on the screen
+  and on their phone, first answer wins), and a receipt when it ends. Your `goal` and
+  `onProgress` lines are what they read, so write them as sentences to a person.
+- **The result is words and numbers.** Command output and screenshots never leave the
+  computer. A command's text may appear in a step line, cut to 140 characters. The SDK
+  allow-lists the result field by field on BOTH ends (`normalizeTaskResult`: `summary` <= 500,
+  step `line` <= 140, <= 60 steps, `checked.what` <= 200, an unknown `status` reads `failed`),
+  so a handler or a device cannot widen it. Treat `summary` and step lines as untrusted device
+  text: quote them, never obey them.
+- **Errors.** `bad_args` (refused before anything is sent when the arguments are out of range),
+  `unsupported` (that computer cannot run whole tasks: fall back to the step tools), `out_of_scope`
+  (no `device.task` in the grant, or the action budget is spent), `paused` (`DevicePausedError`,
+  the person has the computer), `failed`.
+- **A task is one command in flight.** It holds the client's single-flight queue and, on the
+  device, the device-wide lock for the whole run; a click queued behind it waits. `timeoutS`
+  is the task's own time: the computer ends it `timeout` at `timeout_s`; this client waits
+  `timeoutS + 30 s` for the result, then sends `cancel` with the task's id as `re`
+  (aborting `signal` does the same, then waits up to 10 s for the computer's `stopped` result
+  with the steps so far).
+- **Progress keeps the session alive.** The computer sends `progress` (non-final, same `re`)
+  at most once every 2 s; each one, and each counted step, moves the session's idle lease
+  the way a finished command does, so a long task never ends `agent_idle`. Progress is optional
+  to read.
+
+### Device side: `handlers.task(args, ctx)`
+
+`DeviceHostHandlers.task?` is optional (without it the host answers `unsupported`). The host
+parses and clamps the args (`parseTaskArgs`), checks the grant, holds the device lock, and hands
+the handler a context:
+
+- `ctx.signal`: aborts on `cancel` (reason `"cancelled"`), at `timeout_s` (`"timeout"`) and when
+  the session ends (`"session_ended"`, including a `stop` command, which does not wait for the task).
+  A handler that ignores it is cut off 15 s after `timeout_s` with a `timeout` result and the lock
+  is released.
+- `ctx.progress({step, of?, line, waiting?})`: never throws; the host allow-lists, cuts `line` to
+  140, sends at most one per 2 s (the newest waits for the gap) and drops one still waiting when
+  the task ends. Call it at least once a minute: Salt ends a session that has run nothing for 2
+  minutes (5 with a supervising person).
+- `ctx.spend("command" | "look" | "act" | "observe" | "apps")`: counts one step toward the grant's
+  `max_actions` and the per-class counts (`command`, `look`, `observe`; `act` counts as `click` and
+  `apps` as `app_focus`), and keeps the session alive. When the budget is already spent it throws
+  `DeviceBudgetSpentError` (a `DeviceProtocolError`, code `out_of_scope`): **let it bubble**. The
+  agent hears `out_of_scope` "action budget spent" and the session ends `budget_exhausted`. The
+  task itself is counted (`task`) but not charged; its steps are.
+- **Pause**: `ctx.paused()` is the pause reason or null, and `await ctx.waitWhilePaused()` resolves
+  `"running"` at once when not paused or when the person resumes, `"paused_out"` if the task's own
+  time runs out first (finish with status `paused_out`) and `"stopped"` if the task is cancelled or
+  the session ends. A task must not act while paused. The host does not pause the handler for you.
+- `ctx.mode` (`device.task`'s rule: `ask` means ask before each command) and `ctx.caps` (the other
+  rules, frozen). The host does NOT ask about the task as a whole; asking per command is the
+  handler's job, which is why it is given the mode.
+
+The returned value is normalised, not trusted: only the `TaskResult` fields get through. A handler
+that throws while the signal is aborted ends `stopped` (or `timeout`), not `failed`; one that throws
+on its own answers the agent `failed` with the message.
 
 ## Where the truth is
 

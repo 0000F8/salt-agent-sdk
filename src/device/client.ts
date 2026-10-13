@@ -23,6 +23,11 @@ import {
   deviceMessageId,
   decodeDeviceMessage,
   encodeDeviceMessage,
+  normalizeProgress,
+  normalizeTaskResult,
+  taskCommandBody,
+  TASK_CLIENT_GRACE_MS,
+  TASK_TIMEOUT_S_DEFAULT,
   type ClickArgs,
   type DeviceErrorCode,
   type DeviceOp,
@@ -37,6 +42,8 @@ import {
   type SubmitArgs,
   type ElementRef,
   type AppsResult,
+  type Progress,
+  type TaskResult,
 } from "./protocol.js";
 import { sameId, type SaltId } from "../ids.js";
 
@@ -138,11 +145,26 @@ type Pending = {
   resolve: (r: DeviceResult) => void;
   reject: (e: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** A task only: gets each `progress` line, in the order the device sent them. */
+  onProgress?: (p: Progress) => void;
+  lastProgressSeq?: number;
+};
+
+/** What `task()` can ask of one request: its own timeout, a progress listener, an abort signal. */
+type RequestOptions = {
+  timeoutMs?: number;
+  onProgress?: (p: Progress) => void;
+  signal?: AbortSignal;
 };
 
 type Listener = (...args: unknown[]) => void;
 
 class CommandTimeout extends Error {}
+class CommandAborted extends Error {}
+
+/** After the agent aborts a task it asks the device to stop and waits this long for the device's
+ *  own `stopped` result (which carries the steps so far) before giving up on it. */
+const TASK_ABORT_GRACE_MS = 10_000;
 
 export interface DeviceClient {
   /** Open a session. By default resolves when it is `active`, waiting through
@@ -165,6 +187,20 @@ export interface DeviceClient {
   listApps(): Promise<AppsResult>;
   readFile(path: string): Promise<FileResult>;
   writeFile(path: string, contentB64: string): Promise<void>;
+  /** Hand the computer ONE whole task (op `task`, grant `device.task`) and wait for its checked
+   *  result. `goal` is what the person asked for, in plain words (1..2000 characters); `doneWhen`
+   *  says how the device should check it worked (<= 500). The device does the work itself: command
+   *  output and screenshots never come back, only a `TaskResult` of words and numbers. Rejects with
+   *  `bad_args` before sending when the arguments are out of range, `unsupported` when the computer
+   *  cannot run tasks, `out_of_scope` without the grant or when the budget is spent. `onProgress`
+   *  gets each non-final line in order (at most one every 2 s, newest wins). Waits
+   *  `timeoutS + 30` s (default 180 + 30); on that timeout, or when `signal` aborts, it sends
+   *  `cancel` with the task's id as `re`. After an abort it waits up to 10 s for the device's
+   *  `stopped` result and resolves with it, else rejects. */
+  task(
+    goal: string,
+    opts?: { doneWhen?: string; maxSteps?: number; timeoutS?: number; onProgress?: (p: Progress) => void; signal?: AbortSignal }
+  ): Promise<TaskResult>;
   /** End the session (subtract-only). Safe to call more than once. */
   stop(): Promise<void>;
   /** The live session metadata, or null before open() / after it ended. */
@@ -392,44 +428,77 @@ export function createDeviceClient(
   }
 
   /** Post one plaintext and wait for the result keyed to `id`. On the client
-   *  timeout, tell the device to drop it (`cancel {id}`) and fail. */
-  async function sendAndWait(id: string, plaintext: string, r: LaneReaders, m: DeviceSessionMeta, op: string): Promise<DeviceResult> {
+   *  timeout, tell the device to drop it (`cancel {id}`) and fail. A task's cancel
+   *  also names the task in `re`, and an aborted task gets a short grace to report. */
+  async function sendAndWait(
+    id: string,
+    plaintext: string,
+    r: LaneReaders,
+    m: DeviceSessionMeta,
+    op: string,
+    ropts: RequestOptions = {}
+  ): Promise<DeviceResult> {
+    const isTask = op === "task";
+    let aborted = false;
     const result = new Promise<DeviceResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id);
         reject(new CommandTimeout(`${op} timed out`));
-      }, commandTimeoutMs);
-      pending.set(id, { resolve, reject, timer });
+      }, ropts.timeoutMs ?? commandTimeoutMs);
+      pending.set(id, { resolve, reject, timer, onProgress: ropts.onProgress });
     });
     result.catch(() => undefined);
-    try {
-      await transport.postCommand(plaintext, r);
-    } catch (e) {
+    const cancelBody = () =>
+      encodeDeviceMessage(
+        { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: Math.max(seq, 1), op: "cancel", session: m.id, ...(isTask ? { re: id } : {}) },
+        { id }
+      );
+    const onAbort = (): void => {
       const p = pending.get(id);
-      if (p) {
-        clearTimeout(p.timer);
+      if (!p || aborted) return;
+      aborted = true;
+      // Ask the device to stop, then give it a moment to say how far it got.
+      void transport.postCommand(cancelBody(), r).catch(() => undefined);
+      clearTimeout(p.timer);
+      p.timer = setTimeout(() => {
         pending.delete(id);
-      }
-      throw e;
+        p.reject(new CommandAborted("task aborted"));
+      }, TASK_ABORT_GRACE_MS);
+    };
+    if (ropts.signal) {
+      if (ropts.signal.aborted) queueMicrotask(onAbort);
+      else ropts.signal.addEventListener("abort", onAbort, { once: true });
     }
     try {
-      return await result;
-    } catch (e) {
-      if (e instanceof CommandTimeout) {
-        // Out-of-band and best effort: consumes no seq. A command that already
-        // started keeps its stored result on the device for a retry by id.
-        const cancel = encodeDeviceMessage(
-          { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: Math.max(seq, 1), op: "cancel", session: m.id },
-          { id }
-        );
-        await transport.postCommand(cancel, r).catch(() => undefined);
-        throw new DeviceProtocolError("failed", e.message);
+      try {
+        await transport.postCommand(plaintext, r);
+      } catch (e) {
+        const p = pending.get(id);
+        if (p) {
+          clearTimeout(p.timer);
+          pending.delete(id);
+        }
+        throw e;
       }
-      throw e;
+      try {
+        return await result;
+      } catch (e) {
+        if (e instanceof CommandTimeout) {
+          // Out-of-band and best effort: consumes no seq. A command that already
+          // started keeps its stored result on the device for a retry by id.
+          await transport.postCommand(cancelBody(), r).catch(() => undefined);
+          throw new DeviceProtocolError("failed", e.message);
+        }
+        if (e instanceof CommandAborted) throw new DeviceProtocolError("failed", e.message);
+        throw e;
+      }
+    } finally {
+      ropts.signal?.removeEventListener("abort", onAbort);
     }
   }
 
-  async function execute(op: DeviceOp, args?: unknown): Promise<DeviceResult> {
+  async function execute(op: DeviceOp, args?: unknown, ropts?: RequestOptions): Promise<DeviceResult> {
+    if (ropts?.signal?.aborted) throw new DeviceProtocolError("failed", "task aborted");
     const { m, r } = requireActive();
     const id = deviceMessageId(); // reused by every resend of this command
     seq += 1;
@@ -441,7 +510,7 @@ export function createDeviceClient(
         { v: DEVICE_PROTOCOL_VERSION, id, seq, op, session: m.id, exp: Date.now() + clockOffsetMs + commandTtlMs },
         args
       );
-      const res = await sendAndWait(id, plaintext, r, m, op);
+      const res = await sendAndWait(id, plaintext, r, m, op, ropts);
       if (res.op !== "error") return res;
       const b = (res.body ?? {}) as ErrorResult;
       const expected = typeof b.expected_seq === "number" ? b.expected_seq : undefined;
@@ -471,9 +540,9 @@ export function createDeviceClient(
     }
   }
 
-  function request(op: DeviceOp, args?: unknown): Promise<DeviceResult> {
+  function request(op: DeviceOp, args?: unknown, ropts?: RequestOptions): Promise<DeviceResult> {
     if (pausedReason !== null) return Promise.reject(new DevicePausedError(pausedReason));
-    const run = inFlight === 0 ? execute(op, args) : tail.then(() => execute(op, args));
+    const run = inFlight === 0 ? execute(op, args, ropts) : tail.then(() => execute(op, args, ropts));
     inFlight += 1;
     tail = run.then(
       () => undefined,
@@ -486,9 +555,9 @@ export function createDeviceClient(
 
   // Typed wrappers. Each throws a DeviceProtocolError on an `error` result and
   // on an `ask` result (the person has to act at the machine first).
-  function expect(op: DeviceOp, wantOp: DeviceResultOp): (args?: unknown) => Promise<unknown> {
-    return async (args?: unknown) => {
-      const res = await request(op, args);
+  function expect(op: DeviceOp, wantOp: DeviceResultOp): (args?: unknown, ropts?: RequestOptions) => Promise<unknown> {
+    return async (args?: unknown, ropts?: RequestOptions) => {
+      const res = await request(op, args, ropts);
       if (res.op === "error") {
         const b = (res.body ?? {}) as { code?: DeviceErrorCode; message?: string };
         throw new DeviceProtocolError(b.code ?? "failed", b.message);
@@ -515,6 +584,7 @@ export function createDeviceClient(
   const doListApps = expect("list_apps", "apps");
   const doReadFile = expect("read_file", "file");
   const doWriteFile = expect("write_file", "ack");
+  const doTask = expect("task", "task_result");
 
   function handleDelivery(kind: string, body: unknown): void {
     if (!kind.startsWith("device_session")) return;
@@ -620,6 +690,20 @@ export function createDeviceClient(
     if (header.re === undefined) return false; // a result always answers a command id
     const p = pending.get(header.re);
     if (!p) return false;
+    if (header.op === "progress") {
+      // Non-final: the command stays pending. Delivered in the order the device sent them; a
+      // line that arrives after a newer one is dropped, and only the allow-listed fields get through.
+      const line = normalizeProgress(body);
+      if (p.onProgress && line && (p.lastProgressSeq === undefined || header.seq > p.lastProgressSeq)) {
+        p.lastProgressSeq = header.seq;
+        try {
+          p.onProgress(line);
+        } catch {
+          /* a callback throwing never breaks the stream */
+        }
+      }
+      return true;
+    }
     clearTimeout(p.timer);
     pending.delete(header.re);
     p.resolve({ op: header.op as DeviceResultOp, body });
@@ -638,6 +722,17 @@ export function createDeviceClient(
     listApps: () => doListApps() as Promise<AppsResult>,
     readFile: (path: string) => doReadFile({ path }) as Promise<FileResult>,
     writeFile: (path: string, contentB64: string) => doWriteFile({ path, content_b64: contentB64 }).then(() => undefined),
+    async task(goal, opts = {}) {
+      // Refuses here what the device would refuse, before anything is sent.
+      const args = taskCommandBody(goal, { doneWhen: opts.doneWhen, maxSteps: opts.maxSteps, timeoutS: opts.timeoutS });
+      const timeoutS = args.timeout_s ?? TASK_TIMEOUT_S_DEFAULT;
+      const body = await doTask(args, {
+        timeoutMs: timeoutS * 1000 + TASK_CLIENT_GRACE_MS,
+        onProgress: opts.onProgress,
+        signal: opts.signal,
+      });
+      return normalizeTaskResult(body);
+    },
     async stop() {
       const id = meta?.id;
       if (!id) return;
