@@ -81,6 +81,17 @@ export interface RawChatMeta {
   [key: string]: unknown;
 }
 
+/** What `onDeviceLaneMessage` receives. */
+export interface DeviceLaneMessage {
+  identity: AgentIdentity;
+  chatId: SaltId;
+  senderId: SaltId;
+  sender: RawSender;
+  /** The decrypted lane message (a device-protocol line). */
+  text: string;
+  chatMeta?: RawChatMeta;
+}
+
 export interface RawSender {
   id: SaltId;
   display_name?: string;
@@ -691,6 +702,32 @@ export interface WebhookServerOptions {
    * mandate is active. See DeviceBackContext.
    */
   onDeviceBack?: (ctx: DeviceBackContext) => Promise<void> | void;
+  /**
+   * A device-control session lifecycle delivery (behind salt-api's
+   * `Feature :remote_control`): the body's `type` is
+   * `device_session_request` | `device_session_active` | `device_session_ended`,
+   * carrying the session metadata (ids, caps, budget, chat {id, readers}) the
+   * device needs to build its host. These are NOT chat messages and never reach
+   * `onMessage`; the device client (salt-device) passes them straight to its
+   * session controller. The actual command/result traffic rides the device lane
+   * as ordinary encrypted messages, which DO arrive through `onMessage`. The
+   * `type` is forwarded verbatim as the first argument. See src/device/.
+   */
+  onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
+  /**
+   * A message on a device-control lane (`chat.lane_kind === "device"`) -- the
+   * wire protocol between a controlling agent and a device. Set by the DEVICE
+   * (salt-device's sidecar): such a message is routed here right after the
+   * own-message check, BEFORE the mention gate, the agent-to-agent reply
+   * cap and session persistence (a command carries no mention, and a device
+   * lane would otherwise stop after two commands), and never reaches
+   * `onMessage`. Not awaited: a long action must not hold up the next
+   * delivery (the device host orders commands itself and must read `cancel`
+   * while one runs). The hook is the gate for WHO may command: check the
+   * sender against the session's agent. Unset, a device lane is handled like
+   * any other chat (the controlling AGENT reads results through `onMessage`).
+   */
+  onDeviceLaneMessage?: (ctx: DeviceLaneMessage) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -1325,7 +1362,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         return false;
       }
     }
-    return members.some((m) => m.account_type !== "Agent" && !(m as { observer?: boolean }).observer);
+    return members.some((m) => m.account_type !== "Agent" && m.account_type !== "Device" && !(m as { observer?: boolean }).observer);
   }
 
   // Runs `options.onIdentityAsk` for an incoming SALT-IDENTITY-ASK and
@@ -1528,6 +1565,19 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // delivered back to us as a webhook) -- this is what prevents an
     // infinite loop.
     if (sameId(senderId, identity.saltAppId)) return;
+
+    // A device lane is wire protocol, not conversation: hand it to the device
+    // hook before any conversational gate can drop it (see onDeviceLaneMessage).
+    if (chatMeta?.lane_kind === "device" && options.onDeviceLaneMessage) {
+      try {
+        Promise.resolve(options.onDeviceLaneMessage({ identity, chatId, senderId, sender: senderRaw, text: caption, chatMeta })).catch((err) => {
+          logger.error(`[chat ${chatId}] onDeviceLaneMessage failed: ${(err as Error).message}`);
+        });
+      } catch (err) {
+        logger.error(`[chat ${chatId}] onDeviceLaneMessage failed: ${(err as Error).message}`);
+      }
+      return;
+    }
 
     // request_floor (actions.ts): the consulted agent is asking to be
     // brought into the room directly instead of relaying further through
@@ -2283,8 +2333,21 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
     if (body?.type === "describe_yourself") return handleDescribeYourself(body, headerAgentId);
-    if (body?.type === "device_session_ended") return handleDeviceSessionEnded(body as never, headerAgentId);
+    // device_session_ended and device_back are the AGENT's moments and must stay
+    // ahead of the device_session* catch-all below. device_session_ended also
+    // goes on to onDeviceDelivery (set only by a process that hosts a device):
+    // the session controller there needs the end too, and handleDeviceSessionEnded
+    // itself ignores the device's own copy.
+    if (body?.type === "device_session_ended") {
+      await handleDeviceSessionEnded(body as never, headerAgentId);
+      await options.onDeviceDelivery?.(body.type, body);
+      return;
+    }
     if (body?.type === "device_back") return handleDeviceBack(body as never, headerAgentId);
+    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed")) {
+      await options.onDeviceDelivery?.(body.type, body);
+      return;
+    }
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 
