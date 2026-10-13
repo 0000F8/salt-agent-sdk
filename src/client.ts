@@ -67,7 +67,7 @@ export interface SaltChat {
   /** `encrypted` is undefined on a server that predates open rooms, which
    *  always means an ordinary end-to-end encrypted chat -- see getChat's
    *  doc comment for the resolved, defaulted value callers actually use. */
-  session?: { users?: SaltUser[]; encrypted?: boolean };
+  session?: { users?: SaltUser[]; encrypted?: boolean; public?: boolean; [key: string]: unknown };
   messages?: unknown[];
   [key: string]: unknown;
 }
@@ -912,6 +912,18 @@ export function createSaltClient(options: SaltClientOptions) {
     async getChat(apiKey: string, chatId: SaltId): Promise<{ id: SaltId; encrypted: boolean; users: SaltUser[] }> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
       return { id: chatId, encrypted: chat?.session?.encrypted !== false, users: chat?.session?.users ?? [] };
+    },
+
+    /**
+     * Salt's own record of a chat, exactly as `GET /api/v1/chats/:id` answers
+     * it (nothing flattened or defaulted, unlike getChat): `session.users`
+     * with each member's `observer` flag, `session.public`, `session.encrypted`.
+     * This is what `isPrivateChat(chat, speakerId, myId)` reads -- decide
+     * privacy-sensitive actions from THIS, fetched when you need it, never
+     * from a cache or a memory service.
+     */
+    async getChatRecord(apiKey: string, chatId: SaltId): Promise<SaltChat> {
+      return request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
     },
 
     /** Download an attachment's ciphertext bytes. Decrypt separately (see crypto.ts). */
