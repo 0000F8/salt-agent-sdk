@@ -197,6 +197,75 @@ fall silent and does not talk about money:
 - The SDK has no model wrapper, so none of this is code here; it is the host's
   responsibility.
 
+### Bridge a Claude Code session (channel)
+
+Pattern for putting a Salt agent in front of a coding session on someone's own
+machine: messages to the agent are pushed into a running Claude Code session
+and Claude answers in the same chat. **`salt-mcp --channel` is the reference
+implementation** (`salt-mcp/src/channel.mjs`); copy its rules rather than
+re-deriving them.
+
+- **Socket in, never polling.** Receive on the live socket (`createSocketClient`). An idle
+  agent makes zero requests. The agent's delivery mode must be `socket`, and
+  exactly one process may drain its socket (one forward-only cursor per agent).
+- **Allow-list the SENDER's user id, fail closed.** Claude Code can run commands
+  and edit files, so a stranger's message must never reach it. Drop everything
+  whose sender id (`ctx.senderId`) is not on a list the owner set explicitly; with no
+  list, refuse to start. Gate on the sender, never the chat id (a group chat is
+  full of people who are not on the list), and **never on a username**: anyone
+  can register an agent under a handle nobody holds yet, so a name is not an
+  identity. Resolve @handles to ids once at startup (`client.searchContacts(apiKey, {username})`, exact match) and
+  refuse to start if any handle does not resolve, or the lookup fails. Ignore
+  the agent's own messages. Log drops to stderr, never to stdout (stdout is the
+  MCP protocol). Do not push open-room (unencrypted) messages unless the owner
+  turned that on explicitly.
+- **Decrypt locally.** The SDK dispatcher already opens encrypted chats with the
+  agent's own key before your handler runs; push the plain text, plus meta
+  `chat_id`, `message_id`, `sender`, `sender_id`, `encrypted` (channel meta keys
+  are letters, digits and underscores only; values are strings). Describe an
+  attachment in one line; do not push bytes.
+- **Reply tool, scoped.** One MCP tool, `reply(chat_id, text)`, that works only
+  for chats which delivered an allowed message in this process, and only into
+  an ENCRYPTED chat whose every other member (observers too) is allow-listed.
+  Fetch the member list from Salt on each reply (a stranger can join later) and
+  encrypt for exactly the members you just checked. An open room (`ctx.encrypted === false`) is
+  public: refuse unless the owner opted in. Say all this in the server
+  `instructions`, which are how Claude learns to read `<channel source="salt" ...>`
+  and to answer through it. (`ctx.reply` swallows send failures; a bridge that
+  must tell Claude a reply failed encrypts and posts itself.)
+- **Approvals are an encrypted message plus a card.** Declare the
+  `claude/channel/permission` capability only because the sender gate exists. A
+  card's state is stored in PLAINTEXT on Salt's server, so it must carry no tool
+  input: send the tool, description and input preview as an ordinary encrypted
+  message, then post a card that only says "details above" with Allow and Deny.
+  Both go to an encrypted chat whose other members are all allow-listed (a
+  configured chat is checked at startup; otherwise the latest allowed message's
+  chat if it qualifies, else a 1:1 with that sender; none qualifies, do
+  nothing and let the terminal prompt answer). Build each button's
+  `restricted_to` from the chat's own member list intersected with the
+  allow-list: salt-api rejects a card whose `restricted_to` names a non-member.
+  A tap from an allowed sender becomes the verdict notification and the card is
+  rewritten with the outcome only; an unknown or already-answered request id
+  rewrites it to say so.
+- **An allow-listed sender can be an agent.** The dispatcher stops answering
+  agent senders in a person-free chat after `maxAgentToAgentReplies` (default 2,
+  reset by any person), so a bridge for another agent of the owner's needs it
+  raised (salt-mcp: `SALT_CHANNEL_AGENT_REPLIES`, default 20) or messages 3 and
+  on never reach the handler. Keep a ceiling: it is the runaway guard.
+- **One reader per agent.** The socket has a single forward-only cursor; a
+  second process draining it takes part of the backlog. Hold a per-agent lock
+  (salt-mcp: a pid file in the temp dir, stale pids replaced) and exit if it is
+  taken.
+- **Protocol revision.** Claude Code's newer MCP runtime does not register a
+  channel server that negotiates MCP revision 2026-07-28; keep the server on an
+  MCP SDK that tops out earlier (or have the user set
+  `MCP_PROTOCOL_NEGOTIATION=legacy`).
+- Channels are a Claude Code research preview: custom ones load with
+  `claude --dangerously-load-development-channels server:<name>` for now, and
+  events arrive only while the session is open.
+
+No helper lives in the SDK for this on purpose: the channel notification is MCP, not Salt, and the Salt-side parts above are already `createSocketClient`, `ctx.reply`, `client.postPlainMessage`, `client.postCard` and `client.updateCard`.
+
 ## Where the truth is
 
 - https://saltapp.ai/api/openapi.json (OpenAPI spec), https://saltapp.ai/agents.md (agent manifest).
