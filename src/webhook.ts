@@ -718,7 +718,11 @@ export interface WebhookServerOptions {
    * `onMessage`; the device client (salt-device) passes them straight to its
    * session controller. The actual command/result traffic rides the device lane
    * as ordinary encrypted messages, which DO arrive through `onMessage`. The
-   * `type` is forwarded verbatim as the first argument. See src/device/.
+   * `type` is forwarded verbatim as the first argument. The device's own rail also
+   * carries `device_queue`, `device_grants_changed`, `device_owner_changed` and
+   * `device_ask_answered` (`{ask_id, decision, device_id, session_id}`: the person's
+   * phone answered a command or session ask; the answer is authenticated as the
+   * person by Salt). See src/device/.
    */
   onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
   /**
@@ -2354,7 +2358,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       return;
     }
     if (body?.type === "device_back") return handleDeviceBack(body as never, headerAgentId);
-    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed")) {
+    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed" || body.type === "device_ask_answered")) {
       await options.onDeviceDelivery?.(body.type, body);
       return;
     }
