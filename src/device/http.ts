@@ -1,0 +1,143 @@
+// Real transports for the device client and host, wired to a Salt deployment
+// over HTTPS. The pure logic in client.ts / host.ts takes these as injected
+// dependencies; tests pass fakes instead.
+//
+// These do the two things the pure modules deliberately leave out: the device
+// REST calls (open/stop/beat/counts) and the encrypt-and-post of a lane
+// message. They still touch NO screen and NO input -- a result's bytes
+// (a screenshot, a file) are produced by the host's injected handler and only
+// encrypted here.
+
+import { encryptFor } from "../crypto.js";
+import type { SaltId } from "../ids.js";
+import { DeviceSessionLiveError, type DeviceClientTransport, type DeviceSessionMeta, type LaneReaders } from "./client.js";
+import { DeviceBeatOverError, type DeviceBeatReport, type DeviceHostTransport } from "./host.js";
+import { DeviceProtocolError } from "./protocol.js";
+import type { DeviceCountClass, DevicePauseReason } from "./protocol.js";
+
+export interface DeviceHttpOptions {
+  host: string;
+  apiKey: string;
+  fetchImpl?: typeof fetch;
+}
+
+async function call<T>(
+  opts: DeviceHttpOptions,
+  method: string,
+  path: string,
+  body?: unknown
+): Promise<{ status: number; data: T }> {
+  const f = opts.fetchImpl ?? fetch;
+  const res = await f(`${opts.host.replace(/\/$/, "")}${path}`, {
+    method,
+    headers: { "api-key": opts.apiKey, "content-type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  let data: unknown = undefined;
+  const text = await res.text();
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  return { status: res.status, data: data as T };
+}
+
+/** Agent-side transport. `apiKey` is the ACTING AGENT's key. */
+export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientTransport {
+  return {
+    async openSession(deviceId: SaltId, o?: { intent?: string }): Promise<DeviceSessionMeta> {
+      const { status, data } = await call<{ session?: DeviceSessionMeta; code?: string; session_id?: SaltId; error?: string } & DeviceSessionMeta>(
+        opts,
+        "POST",
+        `/api/v1/devices/${deviceId}/sessions`,
+        o?.intent !== undefined ? { intent: o.intent } : undefined
+      );
+      // 409 {code:"session_live", session_id}: this agent already controls the device.
+      if (status === 409 && data?.code === "session_live" && data.session_id !== undefined) {
+        throw new DeviceSessionLiveError(data.session_id);
+      }
+      // The server's own sentence (e.g. 422 "intent_too_long": the 140-character limit) is the error.
+      if (status >= 400) throw new Error(typeof data?.error === "string" && data.error ? data.error : `openSession failed: ${status}`);
+      // 201 -> the session; 202 -> {session: {status: "queued", position}}.
+      const meta = (data?.session ?? data) as DeviceSessionMeta;
+      return meta;
+    },
+    async reattachSession(sessionId: SaltId): Promise<{ session: DeviceSessionMeta; last_seq: number }> {
+      const { status, data } = await call<{ session: DeviceSessionMeta; last_seq: number }>(
+        opts,
+        "POST",
+        `/api/v1/device_sessions/${sessionId}/reattach`
+      );
+      if (status === 409) {
+        const d = data as unknown as { code?: string; end_reason?: string } | undefined;
+        throw new DeviceProtocolError("failed", `session ended: ${d?.end_reason ?? d?.code ?? "ended"}`);
+      }
+      if (status >= 400) throw new Error(`reattachSession failed: ${status}`);
+      return data;
+    },
+    async fetchSession(sessionId: SaltId): Promise<DeviceSessionMeta> {
+      const { status, data } = await call<{ session?: DeviceSessionMeta } & DeviceSessionMeta>(
+        opts,
+        "GET",
+        `/api/v1/device_sessions/${sessionId}`
+      );
+      if (status >= 400) throw new Error(`fetchSession failed: ${status}`);
+      return (data?.session ?? data) as DeviceSessionMeta;
+    },
+    async stopSession(sessionId: SaltId): Promise<void> {
+      await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`);
+    },
+    async postCommand(plaintext: string, readers: LaneReaders): Promise<void> {
+      const ciphertext = await encryptFor(plaintext, readers.publicKeys);
+      const { status } = await call(opts, "POST", `/api/v1/messages`, {
+        chat_id: readers.chatId,
+        message: ciphertext,
+        quiet: true,
+      });
+      if (status >= 400) throw new Error(`postCommand failed: ${status}`);
+    },
+  };
+}
+
+/** Device-side transport. `apiKey` is the DEVICE's own key. */
+export function httpDeviceHostTransport(opts: DeviceHttpOptions): DeviceHostTransport {
+  return {
+    async postResult(plaintext: string, readers: LaneReaders): Promise<void> {
+      const ciphertext = await encryptFor(plaintext, readers.publicKeys);
+      const { status } = await call(opts, "POST", `/api/v1/messages`, {
+        chat_id: readers.chatId,
+        message: ciphertext,
+        quiet: true,
+      });
+      if (status >= 400) throw new Error(`postResult failed: ${status}`);
+    },
+    async beat(sessionId: SaltId, report?: DeviceBeatReport): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/beat`, report);
+      if (status === 409) throw new DeviceBeatOverError("session over");
+      if (status >= 400) throw new Error(`beat failed: ${status}`);
+    },
+    async reportCounts(
+      sessionId: SaltId,
+      counts: Partial<Record<DeviceCountClass, number>>,
+      report?: { last_seq?: number }
+    ): Promise<void> {
+      await call(opts, "PATCH", `/api/v1/device_sessions/${sessionId}/counts`, { counts, ...(report ?? {}) });
+    },
+    async stop(sessionId: SaltId, reason: string): Promise<void> {
+      await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`, { reason });
+    },
+    // The ONLY place the pause/resume endpoint shapes live (contract §3):
+    // POST /device_sessions/:id/pause {reason} and /resume, by the device's key.
+    async pause(sessionId: SaltId, reason: DevicePauseReason): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/pause`, { reason });
+      if (status >= 400) throw new Error(`pause failed: ${status}`);
+    },
+    async resume(sessionId: SaltId): Promise<void> {
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/resume`);
+      if (status >= 400) throw new Error(`resume failed: ${status}`);
+    },
+  };
+}
