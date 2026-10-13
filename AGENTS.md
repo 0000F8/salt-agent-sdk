@@ -318,7 +318,8 @@ const result = await device.task("Open saltapp.ai in Firefox", {
 - **Progress keeps the session alive.** The computer sends `progress` (non-final, same `re`)
   at most once every 2 s; each one, and each counted step, moves the session's idle lease
   the way a finished command does, so a long task never ends `agent_idle`. Progress is optional
-  to read.
+  to read. The host's beat also carries `task_running: true` while a task handler is in flight, so one
+  slow model call (up to two minutes) cannot let the idle lease lapse.
 
 ### Device side: `handlers.task(args, ctx)`
 

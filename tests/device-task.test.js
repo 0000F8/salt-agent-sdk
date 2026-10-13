@@ -326,7 +326,7 @@ test("host: each progress and each spend extends the lease (beats carry last_com
   const run = dh.handleCommand(cmd(1, "task", { goal: "g" }));
   await sleep(35);
   assert.ok(t.beats.length > 0);
-  assert.ok(t.beats.every((b) => b === undefined), "nothing has run yet, so beats carry nothing");
+  assert.ok(t.beats.every((b) => b && b.task_running === true && b.last_command_at === undefined), "nothing has run yet: the beat only says a task is running");
   gate.resolve();
   await sleep(30);
   const last = t.beats[t.beats.length - 1];
@@ -343,6 +343,28 @@ test("host: each progress and each spend extends the lease (beats carry last_com
   assert.ok(t2.beats.some((b) => b && b.last_seq === 1));
   assert.equal(t2.counts[0][1].last_seq, 1);
   await dh2.stop();
+});
+
+test("host: beats say task_running only while a task is in flight", async () => {
+  const t = transport();
+  const gate = deferred();
+  const dh = mkHost(baseHandlers(async () => (await gate.promise, ok())), t, {}, { beatIntervalMs: 10 });
+  dh.start();
+  await sleep(35);
+  assert.ok(t.beats.length > 0);
+  assert.ok(t.beats.every((b) => b === undefined), "no task, a plain beat");
+  const before = t.beats.length;
+  const run = dh.handleCommand(cmd(1, "task", { goal: "g" }));
+  await sleep(35);
+  const during = t.beats.slice(before);
+  assert.ok(during.length > 0 && during.every((b) => b && b.task_running === true), "every beat while the task runs carries it");
+  gate.resolve();
+  await run;
+  await sleep(5);
+  const after = t.beats.length;
+  await sleep(35);
+  assert.ok(t.beats.slice(after).every((b) => b && b.task_running === undefined), "gone when the task is over");
+  await dh.stop();
 });
 
 test("host: cancel with re (or body id) aborts a running task and it ends stopped", async () => {

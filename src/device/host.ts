@@ -227,6 +227,9 @@ export interface DeviceHostTransport {
 export interface DeviceBeatReport {
   last_command_at?: string;
   last_seq?: number;
+  /** True on every beat while a `task` handler is running: one model call can take two minutes, and a
+   *  plain beat does not keep the session alive past the idle lease. */
+  task_running?: true;
 }
 
 export class DeviceBeatOverError extends Error {}
@@ -1011,10 +1014,11 @@ export function createDeviceHost(
       try {
         // Beats keep running while paused: Salt ends a paused session that stops
         // beating after 15 s. After a command has run, every beat says so.
-        await transport.beat(
-          snapshot.sessionId,
-          lastRanAt !== null ? { last_command_at: lastRanAt, last_seq: lastRanSeq ?? undefined } : undefined
-        );
+        const report: DeviceBeatReport = {
+          ...(lastRanAt !== null ? { last_command_at: lastRanAt, last_seq: lastRanSeq ?? undefined } : {}),
+          ...(runningTasks.size > 0 ? { task_running: true as const } : {}),
+        };
+        await transport.beat(snapshot.sessionId, Object.keys(report).length ? report : undefined);
       } catch (e) {
         if (e instanceof DeviceBeatOverError) {
           await stop("lost_contact");
