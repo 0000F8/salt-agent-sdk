@@ -56,3 +56,13 @@ test("grant and owner signals (identity-free) reach onDeviceDelivery", async () 
   await d.dispatch({ type: "device_owner_changed", device_id: "d" }, "dev-1");
   assert.deepEqual(seen.map((s) => s[0]), ["device_grants_changed", "device_owner_changed"]);
 });
+
+test("a device_ask_answered delivery (the person's phone answered an ask) reaches onDeviceDelivery with its body", async () => {
+  const seen = [];
+  const d = dispatcherWith((type, body) => void seen.push([type, body]));
+  const body = { type: "device_ask_answered", kind: "device_ask_answered", ask_id: "a1", decision: "allow", device_id: "d", session_id: "s1" };
+  await d.dispatch(body, "dev-1");
+  assert.deepEqual(seen.map((s) => s[0]), ["device_ask_answered"]);
+  assert.equal(seen[0][1].decision, "allow");
+  assert.equal(seen[0][1].ask_id, "a1");
+});
