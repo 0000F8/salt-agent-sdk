@@ -238,3 +238,22 @@ test("device_back with chat_id null: ctx.chatId and ctx.session are null and rep
 test("DEVICE_LOST_CONTACT is exported", () => {
   assert.strictEqual(sdk.DEVICE_LOST_CONTACT, "lost_contact");
 });
+
+test("device_session_ended reaches BOTH onDeviceSessionEnded (agent) and onDeviceDelivery (device); device_back never reaches onDeviceDelivery", async () => {
+  const agent = { saltAppId: AGENT_ID, username: "helper", apiKey: "k", publicKey: "x", privateKey: "y" };
+  const ended = [];
+  const delivered = [];
+  const dispatcher = sdk.createDispatcher({
+    client: { trackEvent() {} },
+    identities: identityStore([agent]),
+    pgpPassphrase: "x",
+    logger: silent,
+    onDeviceSessionEnded: (ctx) => ended.push(ctx.sessionId),
+    onDeviceBack: () => ended.push("back"),
+    onDeviceDelivery: (type) => delivered.push(type),
+  });
+  await dispatcher.dispatch(endedBody(), AGENT_ID);
+  await dispatcher.dispatch(backBody(), AGENT_ID);
+  assert.deepStrictEqual(ended, [SESSION_ID, "back"]);
+  assert.deepStrictEqual(delivered, ["device_session_ended"]);
+});

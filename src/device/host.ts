@@ -79,23 +79,25 @@ export interface DeviceHostHandlers {
   writeFile(args: { path: string; content_b64: string }): Promise<HandlerResult>;
 }
 
-/** What a mutating handler may hand back: nothing, or a flat record about how the action went
- *  (a typed text reports `typed`, `method`, `verified`, `note`). Only string / number / boolean
- *  fields ride into the ack, so the agent learns what the computer really did and nothing else. */
+/** What a mutating handler may hand back: nothing, or a record about how the action went
+ *  (a typed text reports `typed`, `method`, `verified`, `note`). Only those four fields ride
+ *  into the ack, each with its own type, so the agent learns what the computer really did and
+ *  nothing else (never a field's text, a screen, or any other handler-supplied field). */
 export type HandlerResult = void | Record<string, unknown>;
 
 const ACK_NOTE_MAX = 300;
 
-/** The ack body: the handler's flat scalar fields, then `ok: true` (which a handler cannot override,
- *  so an old agent that only reads `ok` sees the same wire it always did). */
+/** The ack body: the allow-listed handler fields (typed: finite number, method: string,
+ *  verified: boolean, note: string capped at 300), then `ok: true` (which a handler cannot
+ *  override, so an old agent that only reads `ok` sees the same wire it always did). */
 export function ackBody(result: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (result && typeof result === "object" && !Array.isArray(result)) {
-    for (const [k, v] of Object.entries(result as Record<string, unknown>)) {
-      if (k === "ok") continue;
-      if (typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) out[k] = v;
-      else if (typeof v === "string") out[k] = v.length > ACK_NOTE_MAX ? v.slice(0, ACK_NOTE_MAX) : v;
-    }
+    const r = result as Record<string, unknown>;
+    if (typeof r.typed === "number" && Number.isFinite(r.typed)) out.typed = r.typed;
+    if (typeof r.method === "string") out.method = r.method.length > ACK_NOTE_MAX ? r.method.slice(0, ACK_NOTE_MAX) : r.method;
+    if (typeof r.verified === "boolean") out.verified = r.verified;
+    if (typeof r.note === "string") out.note = r.note.length > ACK_NOTE_MAX ? r.note.slice(0, ACK_NOTE_MAX) : r.note;
   }
   out.ok = true;
   return out;
