@@ -1152,6 +1152,11 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
 - **Paused.** While the person is using the machine or a secure field needs them, the
   session is paused: commands reject at once with `DevicePausedError` (`.reason`) and
   nothing is sent. Wait for the `resumed` state.
+- **Whole tasks.** With a `device.task` grant, `await device.task("Open saltapp.ai in
+  Firefox", { doneWhen, maxSteps, timeoutS, onProgress, signal })` hands the computer ONE job
+  and resolves a checked `TaskResult` (words and numbers only; command output and screenshots
+  never leave the computer). The host side is an optional `handlers.task(args, ctx)`. See
+  "Hand a whole task to a computer" in `AGENTS.md`.
 
 Device side:
 
