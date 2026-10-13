@@ -444,6 +444,110 @@ export interface ApprovalDecidedContext {
   exercise: MandateExercise;
 }
 
+// --- Device moments --------------------------------------------------------
+//
+// Two agent-rail deliveries (kind `device_session`) tell an agent that the
+// person's computer went quiet in the middle of its work and that it came
+// back. Plaintext metadata only -- ids, the computer's name, timestamps --
+// delivered like card_interaction/invoice_paid, never a chat message. Source
+// of truth: salt-api docs/DEVICE_PROTOCOL.md.
+
+/** The `end_reason` of a device session. `lost_contact` is the one this SDK names: the computer stopped answering for 15 s mid-session. Any other value is passed through verbatim. */
+export const DEVICE_LOST_CONTACT = "lost_contact";
+
+/** Who a device-lane message must be encrypted for: `{ids}` (account ids, sorted, the caller excluded) or `{open: true}`. */
+export interface DeviceChatBlock {
+  id: SaltId;
+  readers: { ids?: SaltId[]; open?: boolean };
+}
+
+/** The body of a `device_session_ended` delivery: the session row plus `type`/`event`/`session_id`. Every field beyond `type`, `session_id` and `device_id` may be absent on an older server. */
+export interface DeviceSessionEndedBody {
+  type: "device_session_ended";
+  event?: "ended";
+  session_id: SaltId;
+  id?: SaltId;
+  agent_id?: SaltId;
+  device_id: SaltId;
+  mandate_id?: SaltId | null;
+  /** The device LANE (where commands and results travelled), not the person's 1:1. */
+  chat_id?: SaltId | null;
+  status?: string;
+  intent?: string | null;
+  end_reason?: string | null;
+  requested_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  chat?: DeviceChatBlock;
+  [key: string]: unknown;
+}
+
+/** The body of a `device_back` delivery: sent once per session that ended `lost_contact`, within 24 h, while the mandate is still active, the first time the computer is seen alive again. */
+export interface DeviceBackBody {
+  type: "device_back";
+  device_id: SaltId;
+  device_name: string;
+  previous_session_id: SaltId;
+  /** When Salt ended that session for lost contact. */
+  offline_at: string | null;
+  /** When the computer was seen alive again. */
+  back_at: string;
+  /** The person's 1:1 with this agent; null when they have none. */
+  chat_id: SaltId | null;
+  chat?: DeviceChatBlock;
+  [key: string]: unknown;
+}
+
+/**
+ * A device session this identity ran just ended. Fires for EVERY end_reason;
+ * check `lostContact` (end_reason `"lost_contact"`) for the one that needs
+ * words. There is no `reply()` on purpose: `laneChatId` is the device lane
+ * the work travelled in, which the person does not read. Say it in the chat
+ * the work came from (remember it when you open the session) or their 1:1.
+ * Etiquette is in AGENTS.md ("A computer going quiet"): say it once per
+ * `sessionId`, plainly, and say that nothing else was sent. Never claim an
+ * action landed unless a device tool returned it.
+ */
+export interface DeviceSessionEndedContext {
+  identity: AgentIdentity;
+  sessionId: SaltId;
+  deviceId: SaltId;
+  mandateId: SaltId | null;
+  /** The device lane, NOT a chat to answer the person in. */
+  laneChatId: SaltId | null;
+  endReason: string | null;
+  /** `endReason === "lost_contact"`: the computer stopped answering for 15 s mid-session. */
+  lostContact: boolean;
+  intent: string | null;
+  endedAt: string | null;
+  /** The delivery verbatim. */
+  body: DeviceSessionEndedBody;
+}
+
+/**
+ * The computer that went quiet during one of this identity's sessions is
+ * answering again. Grants nothing: open a NEW session to continue. Offer to
+ * finish, and look at the screen before assuming the last step landed. Fires
+ * once per lost session; say it once.
+ */
+export interface DeviceBackContext {
+  identity: AgentIdentity;
+  deviceId: SaltId;
+  deviceName: string;
+  /** The session that ended `lost_contact` -- also the key to say this once. */
+  previousSessionId: SaltId;
+  offlineAt: string | null;
+  backAt: string;
+  /** The person's 1:1 with this agent, or null when they have none (then `reply()` throws). */
+  chatId: SaltId | null;
+  /** This identity's memory of `chatId`; null when `chatId` is. Whatever you reply() with is appended as an assistant turn and persisted. */
+  session: Session | null;
+  /** The delivery verbatim. */
+  body: DeviceBackBody;
+  /** Encrypts `text` for the 1:1's members and posts it. Throws when `chatId` is null. */
+  reply(text: string): Promise<void>;
+}
+
 /** A `describe_yourself` delivery: Salt asks this agent to write its own public description (the
  *  text shown on its profile, card and in the directory). Write it with `ctx.write(text)` -- that is
  *  `PATCH /api/v1/identity/sections {bio}` by this identity's own api-key; plain text, at most
@@ -573,6 +677,20 @@ export interface WebhookServerOptions {
    * still never sees the marker itself.
    */
   onWorkCancel?: (ctx: WorkCancelContext) => Promise<void> | void;
+  /**
+   * A device session this identity ran just ended (`device_session_ended`;
+   * fires for every end_reason, see DeviceSessionEndedContext.lostContact).
+   * Not a chat message: it never reaches `onMessage`. Ignored when the
+   * delivery is the DEVICE's own copy (the computer hosting its own
+   * session), which this process only sees if it hosts the device identity.
+   */
+  onDeviceSessionEnded?: (ctx: DeviceSessionEndedContext) => Promise<void> | void;
+  /**
+   * The computer that stopped answering mid-session is back
+   * (`device_back`): sent once per lost session, within 24 h, while the
+   * mandate is active. See DeviceBackContext.
+   */
+  onDeviceBack?: (ctx: DeviceBackContext) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -2023,6 +2141,65 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function handleDeviceSessionEnded(body: DeviceSessionEndedBody, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onDeviceSessionEnded) return;
+    const identity = resolveMandateIdentity(headerAgentId, body.agent_id);
+    if (!identity) return;
+    // The same delivery also goes to the computer itself; it is not the agent's to speak of.
+    if (sameId(identity.saltAppId, body.device_id)) return;
+    const sessionId = body.session_id ?? body.id;
+    if (sessionId == null) return;
+    const ctx: DeviceSessionEndedContext = {
+      identity,
+      sessionId,
+      deviceId: body.device_id,
+      mandateId: body.mandate_id ?? null,
+      laneChatId: body.chat_id ?? body.chat?.id ?? null,
+      endReason: body.end_reason ?? null,
+      lostContact: body.end_reason === DEVICE_LOST_CONTACT,
+      intent: typeof body.intent === "string" ? body.intent : null,
+      endedAt: body.ended_at ?? null,
+      body,
+    };
+    try {
+      await options.onDeviceSessionEnded(ctx);
+    } catch (err) {
+      logger.error(`[device session ${sessionId}] onDeviceSessionEnded failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleDeviceBack(body: DeviceBackBody, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onDeviceBack) return;
+    const identity = resolveMandateIdentity(headerAgentId);
+    if (!identity) return;
+    const chatId = body.chat_id ?? null;
+    const session = chatId != null ? await loadOrRebuildSession(identity, chatId) : null;
+    const repliesForSession: string[] = [];
+    const baseReply = chatId != null ? makeReply(identity, chatId) : null;
+    const ctx: DeviceBackContext = {
+      identity,
+      deviceId: body.device_id,
+      deviceName: body.device_name,
+      previousSessionId: body.previous_session_id,
+      offlineAt: body.offline_at ?? null,
+      backAt: body.back_at,
+      chatId,
+      session,
+      body,
+      reply: async (text: string) => {
+        if (!baseReply) throw new Error("device_back: the person has no 1:1 with this agent (chat_id is null), so there is nowhere to reply");
+        repliesForSession.push(text);
+        await baseReply(text);
+      },
+    };
+    try {
+      await options.onDeviceBack(ctx);
+      if (chatId != null && session) await persistSessionAfterReply(identity.saltAppId, chatId, session, repliesForSession);
+    } catch (err) {
+      logger.error(`[device ${body.device_id}] onDeviceBack failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleDescribeYourself(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     const agent = (body.agent ?? {}) as DescribeYourselfContext["agent"];
     const identity = resolveMandateIdentity(headerAgentId, agent?.id);
@@ -2106,6 +2283,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
     if (body?.type === "describe_yourself") return handleDescribeYourself(body, headerAgentId);
+    if (body?.type === "device_session_ended") return handleDeviceSessionEnded(body as never, headerAgentId);
+    if (body?.type === "device_back") return handleDeviceBack(body as never, headerAgentId);
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 

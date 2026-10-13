@@ -10,6 +10,8 @@ export * from "./reconcile";
 export * from "./delegations";
 export * from "./work";
 export * from "./sessions";
+export * from "./scriptJob";
+export * from "./chatPrivacy";
 export * from "./webhook";
 export * from "./ask";
 export * from "./socket";
