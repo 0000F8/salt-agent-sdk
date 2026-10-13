@@ -272,7 +272,10 @@ Instead of driving a person's computer one click at a time, an agent with a
 `device.task` grant hands it ONE whole task in plain words. A local agent on the
 computer (Salt Device) does it with commands, screenshots, the screen reader and
 input, checks the result, and answers with a checked receipt. Salt carries the task
-down and the result back; it never sees either. (Wire contract: salt-api
+down and the result back end to end encrypted. When the computer uses Salt's
+model allowance, the local agent's prompts and screenshots pass through Salt's
+model gateway in memory on their way to the model (never stored or logged); with
+the person's own model key on the computer, they go straight to the model. (Wire contract: salt-api
 `docs/DEVICE_PROTOCOL.md`; mirrored in `src/device/protocol.ts` and, for the
 envelope and the task shapes, in saltapp-python's `saltapp.device`.)
 
