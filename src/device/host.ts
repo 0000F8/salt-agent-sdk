@@ -68,15 +68,37 @@ import { sameId, type SaltId } from "../ids.js";
  *  a throw into an `error { code: "failed" }` and counts it as an error. */
 export interface DeviceHostHandlers {
   observe(args: ObserveArgs): Promise<ObservationResult>;
-  click(args: ClickArgs): Promise<void>;
-  type(args: { text: string }): Promise<void>;
-  key(args: KeyArgs): Promise<void>;
-  scroll(args: ScrollArgs): Promise<void>;
-  submit(args: SubmitArgs): Promise<void>;
-  focusApp(args: { app: string }): Promise<void>;
+  click(args: ClickArgs): Promise<HandlerResult>;
+  type(args: { text: string }): Promise<HandlerResult>;
+  key(args: KeyArgs): Promise<HandlerResult>;
+  scroll(args: ScrollArgs): Promise<HandlerResult>;
+  submit(args: SubmitArgs): Promise<HandlerResult>;
+  focusApp(args: { app: string }): Promise<HandlerResult>;
   listApps(): Promise<AppsResult>;
   readFile(args: { path: string }): Promise<FileResult>;
-  writeFile(args: { path: string; content_b64: string }): Promise<void>;
+  writeFile(args: { path: string; content_b64: string }): Promise<HandlerResult>;
+}
+
+/** What a mutating handler may hand back: nothing, or a flat record about how the action went
+ *  (a typed text reports `typed`, `method`, `verified`, `note`). Only string / number / boolean
+ *  fields ride into the ack, so the agent learns what the computer really did and nothing else. */
+export type HandlerResult = void | Record<string, unknown>;
+
+const ACK_NOTE_MAX = 300;
+
+/** The ack body: the handler's flat scalar fields, then `ok: true` (which a handler cannot override,
+ *  so an old agent that only reads `ok` sees the same wire it always did). */
+export function ackBody(result: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (result && typeof result === "object" && !Array.isArray(result)) {
+    for (const [k, v] of Object.entries(result as Record<string, unknown>)) {
+      if (k === "ok") continue;
+      if (typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v))) out[k] = v;
+      else if (typeof v === "string") out[k] = v.length > ACK_NOTE_MAX ? v.slice(0, ACK_NOTE_MAX) : v;
+    }
+  }
+  out.ok = true;
+  return out;
 }
 
 /** What the server told the device about this session in the
@@ -702,30 +724,23 @@ export function createDeviceHost(
       case "observe":
         return { op: "observation", body: await handlers.observe((body as ObserveArgs) ?? { target: "screen" }) };
       case "click":
-        await handlers.click(body as ClickArgs);
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.click(body as ClickArgs)) };
       case "type":
-        await handlers.type(body as { text: string });
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.type(body as { text: string })) };
       case "key":
-        await handlers.key(body as KeyArgs);
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.key(body as KeyArgs)) };
       case "scroll":
-        await handlers.scroll(body as ScrollArgs);
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.scroll(body as ScrollArgs)) };
       case "submit":
-        await handlers.submit(body as SubmitArgs);
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.submit(body as SubmitArgs)) };
       case "focus_app":
-        await handlers.focusApp(body as { app: string });
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.focusApp(body as { app: string })) };
       case "list_apps":
         return { op: "apps", body: await handlers.listApps() };
       case "read_file":
         return { op: "file", body: await handlers.readFile(body as { path: string }) };
       case "write_file":
-        await handlers.writeFile(body as { path: string; content_b64: string });
-        return { op: "ack", body: { ok: true } };
+        return { op: "ack", body: ackBody(await handlers.writeFile(body as { path: string; content_b64: string })) };
       default:
         throw new DeviceProtocolError("unsupported", op);
     }
