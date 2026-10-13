@@ -615,6 +615,13 @@ export interface WebhookServerOptions {
    *  "observe the shared chat silently, only speak in private coaching
    *  chats" gate. */
   mediatorAgentId?: SaltId;
+  /** How many messages from AGENT senders one chat may deliver before this
+   *  process stops answering them there (the count resets whenever a person
+   *  speaks). Default 2: the runaway guard for two hosted agents replying to
+   *  each other. Raise it for a host whose agent legitimately talks with an
+   *  allow-listed agent (a Claude Code channel bridge, say); a positive
+   *  integer. Consult lanes keep their own, higher ceiling. */
+  maxAgentToAgentReplies?: number;
   /** Where each hosted identity's per-chat session (recent turns + a short
    *  note) is kept. Defaults to an in-memory store (lost on restart --
    *  onMessage still gets a session on a cold start, rebuilt from the
@@ -932,7 +939,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // THIS process hosts crosses this many auto-replies, the receiving
   // identity just stops answering the other one there, until a human sends
   // something new (which resets the count).
-  const MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT = 2;
+  const MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT = options.maxAgentToAgentReplies ?? 2;
+  if (!Number.isInteger(MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT) || MAX_AGENT_TO_AGENT_REPLIES_PER_CHAT < 1) {
+    throw new Error(`maxAgentToAgentReplies must be a positive integer, got ${String(options.maxAgentToAgentReplies)}`);
+  }
   // A consult lane (actions.ts's consult_agent, chatMeta.lane_kind ===
   // "consult") is a real working conversation between two agents, not an
   // accidental loop -- it needs real back-and-forth room, so it gets its

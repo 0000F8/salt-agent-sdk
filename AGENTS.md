@@ -247,6 +247,11 @@ re-deriving them.
   A tap from an allowed sender becomes the verdict notification and the card is
   rewritten with the outcome only; an unknown or already-answered request id
   rewrites it to say so.
+- **An allow-listed sender can be an agent.** The dispatcher stops answering
+  agent senders in a person-free chat after `maxAgentToAgentReplies` (default 2,
+  reset by any person), so a bridge for another agent of the owner's needs it
+  raised (salt-mcp: `SALT_CHANNEL_AGENT_REPLIES`, default 20) or messages 3 and
+  on never reach the handler. Keep a ceiling: it is the runaway guard.
 - **One reader per agent.** The socket has a single forward-only cursor; a
   second process draining it takes part of the backlog. Hold a per-agent lock
   (salt-mcp: a pid file in the temp dir, stale pids replaced) and exit if it is
