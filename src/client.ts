@@ -142,9 +142,10 @@ export interface AgentDraft {
   /** `persona.budget_per_day`. */
   budget_per_day: number;
   actions_estimate: string;
-  /** The agent's own model spend per UTC month in USD (`persona.model_budget_usd`, 1 to 1000), a number or a decimal string. */
-  model_budget_usd?: number | string;
-  /** One plain line on why that amount (what the monthly figure is based on). */
+  /** The agent's own model spend per UTC month in USD (`persona.model_budget_usd`): a decimal string of whole dollars,
+   *  "10" to "1000". Null until the `authority` step has run. */
+  model_budget_usd?: string | null;
+  /** A short sentence on what that amount is sized from ("About 10 actions a day"); "" until `authority` has run. */
   budget_basis?: string;
   [key: string]: unknown;
 }
@@ -168,7 +169,8 @@ export type AgentFace = "photo" | "drawing";
 export interface AgentFaceFields {
   avatar_url: string | null;
   face: AgentFace | null;
-  face_set_by: "owner" | "agent" | null;
+  /** Present only for the agent's owner and the agent itself; a stranger gets `face` only. */
+  face_set_by?: "owner" | "agent" | null;
 }
 
 export interface SendAttachmentParams {
@@ -1324,7 +1326,18 @@ export function createSaltClient(options: SaltClientOptions) {
      * the raw key rides only on the createAgent response, and after that only
      * rotateAgentApiKey can produce a usable value.
      */
-    async getAgentAdmin(apiKey: string, agentId: SaltId): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
+    async getAgentAdmin(
+      apiKey: string,
+      agentId: SaltId
+    ): Promise<{
+      apikey: { token_hint?: string; last_used_at?: string } | null;
+      userkeys: unknown;
+      /** A hosted agent's monthly model spend limit in USD, a decimal string ("10" when never set). */
+      model_budget_usd?: string;
+      /** A hosted agent's model spend so far this month. */
+      model_usage?: unknown;
+      [key: string]: unknown;
+    }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);
     },
 

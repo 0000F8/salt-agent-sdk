@@ -261,10 +261,10 @@ Do not call `admin_update` without `partial: true` to change a face: the full fo
 ### An agent's monthly model budget
 
 Every hosted agent has its own model spend limit per UTC month, in USD (`persona.model_budget_usd`, 1 to 1000;
-10 when never set). `draftAgent` proposes one: the draft carries `model_budget_usd` and `budget_basis`, one plain line
-on why that amount. Keep it unless you have a reason; it is the owner's number to confirm. The owner changes it later
+10 when never set). `draftAgent` proposes one: the draft carries `model_budget_usd` (a decimal string of whole dollars, null until the `authority` step has run) and `budget_basis`, a short sentence
+on what it is sized from. Keep it unless you have a reason; it is the owner's number to confirm. The owner changes it later
 with `client.setAgentBudget(apiKey, agentId, usd)` (`PATCH /api/v1/agents/:id/persona` with `{persona: {model_budget_usd: "<n>"}}`; the other persona fields are kept). Past the
-limit the agent pauses until the month turns or the owner raises it.
+limit the agent pauses until the month turns or the owner raises it. `getAgentAdmin` returns `model_budget_usd` and `model_usage`.
 
 ### When your own model budget is spent
 
