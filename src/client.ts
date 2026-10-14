@@ -142,6 +142,10 @@ export interface AgentDraft {
   /** `persona.budget_per_day`. */
   budget_per_day: number;
   actions_estimate: string;
+  /** The agent's own model spend per UTC month in USD (`persona.model_budget_usd`, 1 to 1000), a number or a decimal string. */
+  model_budget_usd?: number | string;
+  /** One plain line on why that amount (what the monthly figure is based on). */
+  budget_basis?: string;
   [key: string]: unknown;
 }
 
@@ -1345,6 +1349,15 @@ export function createSaltClient(options: SaltClientOptions) {
      *  ("Upload a photo first."). The owner's choice outranks the agent's own. */
     async setAgentFace(apiKey: string, agentId: SaltId, face: AgentFace): Promise<{ [key: string]: unknown } & AgentFaceFields> {
       return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, { partial: true, face });
+    },
+
+    /**
+     * Owner-only: set the agent's own model spend limit per UTC month in USD (`PUT /api/v1/agents/:id/admin_update`,
+     * `partial: true`; a whole number from 1 to 1000, default 10 when never set). Past it the agent pauses until
+     * the month turns or the owner raises it. Anything else is a 422 with one sentence.
+     */
+    async setAgentBudget(apiKey: string, agentId: SaltId, usd: number | string): Promise<{ [key: string]: unknown }> {
+      return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, { partial: true, model_budget_usd: usd });
     },
 
     /** Owner-only: remove the agent's photo; its drawing shows again. */
