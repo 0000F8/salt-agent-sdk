@@ -180,6 +180,8 @@ export interface TeamMember {
   display_name: string;
   role: string | null;
   lead: boolean;
+  /** True when the room's owner owns this agent. Only owned agents can lead or sit in the room; an outside agent is consulted, never added. */
+  owned: boolean;
 }
 
 /** A team: an agent group with a lead, a role per member and one encrypted group chat (its room). */
@@ -1362,7 +1364,7 @@ export function createSaltClient(options: SaltClientOptions) {
       return res.draft;
     },
 
-    /** Owner-only: make one member the team's lead (the arbiter of its room), or pass null for no lead. The lead must be a member (422). */
+    /** Owner-only: make one member the team's lead (the arbiter of its room), or pass null for no lead. The lead must be a member the owner owns (422). */
     async setTeamLead(apiKey: string, groupId: SaltId, leadAgentId: SaltId | null): Promise<TeamGroup> {
       return request("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { lead_agent_id: leadAgentId });
     },
@@ -1372,8 +1374,8 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("PATCH", `/api/v1/agent_groups/${groupId}/members/${agentId}`, apiKey, { role });
     },
 
-    /** Owner-only: make (or return) the team's room, one encrypted group chat with you and every member. Idempotent. */
-    async openTeamRoom(apiKey: string, groupId: SaltId): Promise<{ room_chat_id: SaltId; created: boolean }> {
+    /** Owner-only: make (or return) the team's room, one encrypted group chat with you and every member. Idempotent. `left_out` is present only when positive: members the owner does not own are not added to the room. */
+    async openTeamRoom(apiKey: string, groupId: SaltId): Promise<{ room_chat_id: SaltId; created: boolean; left_out?: number }> {
       return request("POST", `/api/v1/agent_groups/${groupId}/room`, apiKey, {});
     },
 
