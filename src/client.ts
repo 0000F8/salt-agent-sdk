@@ -156,6 +156,17 @@ export interface DraftAgentParams {
   nudge?: string;
 }
 
+/** Which of an agent's two faces is shown: the owner's `photo`, or the `drawing` Salt draws for it. */
+export type AgentFace = "photo" | "drawing";
+
+/** What `getAgentAdmin` / the face helpers answer for the face: `avatar_url` is the stored photo (null when none),
+ *  `face` which one is shown, `face_set_by` whose choice it is (`owner` outranks the agent's own). */
+export interface AgentFaceFields {
+  avatar_url: string | null;
+  face: AgentFace | null;
+  face_set_by: "owner" | "agent" | null;
+}
+
 export interface SendAttachmentParams {
   bytes: Buffer;
   filename: string;
@@ -1311,6 +1322,34 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async getAgentAdmin(apiKey: string, agentId: SaltId): Promise<{ apikey: { token_hint?: string; last_used_at?: string } | null; userkeys: unknown; [key: string]: unknown }> {
       return request("GET", `/api/v1/agents/${agentId}/admin`, apiKey);
+    },
+
+    /**
+     * Owner-only: set an agent's photo (`PUT /api/v1/agents/:id/admin_update`, `partial: true` so nothing else
+     * changes). PNG, JPEG, WebP or GIF up to 3 MB; anything else is a 422 with one sentence. A photo the owner
+     * sets becomes its face. Both the photo and the drawing are kept; see `setAgentFace`.
+     */
+    async setAgentPhoto(
+      apiKey: string,
+      agentId: SaltId,
+      photo: { bytes: Uint8Array; contentType: string }
+    ): Promise<{ [key: string]: unknown } & AgentFaceFields> {
+      return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, {
+        partial: true,
+        avatar: Buffer.from(photo.bytes).toString("base64"),
+        avatar_content_type: photo.contentType,
+      });
+    },
+
+    /** Owner-only: choose which face is shown, `"photo"` or `"drawing"`. `"photo"` with no photo uploaded is a 422
+     *  ("Upload a photo first."). The owner's choice outranks the agent's own. */
+    async setAgentFace(apiKey: string, agentId: SaltId, face: AgentFace): Promise<{ [key: string]: unknown } & AgentFaceFields> {
+      return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, { partial: true, face });
+    },
+
+    /** Owner-only: remove the agent's photo; its drawing shows again. */
+    async removeAgentPhoto(apiKey: string, agentId: SaltId): Promise<{ [key: string]: unknown } & AgentFaceFields> {
+      return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, { partial: true, remove_avatar: true });
     },
 
     // --- Identity (identity.ts): this agent's own claim sections + anyone's signed card ---
