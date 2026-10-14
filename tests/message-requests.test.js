@@ -78,6 +78,17 @@ test("listRequests GETs /api/v1/chats?requests=1", async () => {
   assert.strictEqual(fetchImpl.calls[0].method, "GET");
 });
 
+test("list then accept: the chat id is row.session.id, not row.id", async () => {
+  const rows = [{ session: { id: "c5", request_state: "pending", users: [] }, recent_message: { message: { id: "m1" }, user: { id: "u9" } } }];
+  const { fetchImpl, client } = clientWith((url) =>
+    url.includes("requests=1") ? jsonResponse(200, rows) : jsonResponse(200, { session: { id: "c5", request_state: null } })
+  );
+  const [row] = await client.listRequests("k");
+  assert.strictEqual(row.id, undefined);
+  await client.acceptRequest("k", row.session.id);
+  assert.strictEqual(fetchImpl.calls[1].url, "https://salt.test/api/v1/chats/c5/accept_request");
+});
+
 test("acceptRequest POSTs accept_request and returns the chat", async () => {
   const { fetchImpl, client } = clientWith(() => jsonResponse(200, { id: "c5", session: { request_state: null } }));
   const chat = await client.acceptRequest("k", "c5");
