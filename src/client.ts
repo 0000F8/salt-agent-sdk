@@ -222,16 +222,25 @@ export interface TeamDraftMember {
   why: string;
   /** `personality` step. */
   voice?: string;
-  /** `personality` step. Only the lead has one (the room introduction); a member's is empty. */
+  /** `personality` step. Only the lead has one (the room introduction); a member's is "". */
   first_message?: string;
   /** `authority` step. */
   skills?: AgentDraft["skills"];
   services?: AgentDraft["services"];
-  budget_per_day?: number;
+  budget_per_day?: number | null;
   actions_estimate?: string;
+  /** A decimal string of whole dollars, "10" to "1000"; null until `authority` has run. */
   model_budget_usd?: string | null;
   budget_basis?: string;
   [key: string]: unknown;
+}
+
+/** The team's totals, filled by the `authority` step. */
+export interface TeamDraftTotals {
+  actions_per_day: number | null;
+  /** A decimal string of whole dollars (the members' monthly model limits summed); null until `authority` has run. */
+  model_budget_usd: string | null;
+  budget_basis: string;
 }
 
 /** The whole team draft `POST /api/v1/teams/draft` answers with. Two to five members including the lead. */
@@ -244,14 +253,16 @@ export interface TeamDraft {
   /** Index into `members` of the lead, or null for no lead. */
   lead_index: number | null;
   members: TeamDraftMember[];
+  totals: TeamDraftTotals;
   [key: string]: unknown;
 }
 
 export interface DraftTeamParams {
   /** Required on the first call. */
   idea?: string;
-  step: TeamDraftStep;
-  /** The current draft as edited; required for `personality` and `authority`. */
+  /** Defaults to "team" on the server. */
+  step?: TeamDraftStep;
+  /** The current draft as edited; `personality` and `authority` need `draft.members` (2 to 5, each with a brief). */
   draft?: TeamDraft;
   /** Steers a rewrite ("More playful"), at most 120 characters. */
   nudge?: string;
@@ -1357,7 +1368,7 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Owner-only: set a member's job in the team ("Showrunner"; at most 40 characters, blank clears it). */
-    async setMemberRole(apiKey: string, groupId: SaltId, agentId: SaltId, role: string): Promise<TeamGroup> {
+    async setMemberRole(apiKey: string, groupId: SaltId, agentId: SaltId, role: string | null): Promise<TeamGroup> {
       return request("PATCH", `/api/v1/agent_groups/${groupId}/members/${agentId}`, apiKey, { role });
     },
 
