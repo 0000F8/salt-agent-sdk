@@ -24,10 +24,10 @@ function clientWith(respond) {
 }
 
 test("draftAgent returns model_budget_usd and budget_basis on the draft", async () => {
-  const draft = { idea: "x", name: "N", model_budget_usd: 12, budget_basis: "About three posts a day on a small model." };
+  const draft = { idea: "x", name: "N", model_budget_usd: "12", budget_basis: "About three posts a day on a small model." };
   const { client } = clientWith(() => jsonResponse(200, { draft }));
   const result = await client.draftAgent("k", { idea: "x", step: "authority" });
-  assert.strictEqual(result.model_budget_usd, 12);
+  assert.strictEqual(result.model_budget_usd, "12");
   assert.strictEqual(result.budget_basis, "About three posts a day on a small model.");
 });
 
