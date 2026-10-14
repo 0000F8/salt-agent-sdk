@@ -1352,12 +1352,12 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
-     * Owner-only: set the agent's own model spend limit per UTC month in USD (`PUT /api/v1/agents/:id/admin_update`,
-     * `partial: true`; a whole number from 1 to 1000, default 10 when never set). Past it the agent pauses until
+     * Owner-only: set the agent's own model spend limit per UTC month in USD (`PATCH /api/v1/agents/:id/persona`, the
+     * route the web uses; a number from 1 to 1000, sent as a string, default 10 when never set). Past it the agent pauses until
      * the month turns or the owner raises it. Anything else is a 422 with one sentence.
      */
     async setAgentBudget(apiKey: string, agentId: SaltId, usd: number | string): Promise<{ [key: string]: unknown }> {
-      return request("PUT", `/api/v1/agents/${agentId}/admin_update`, apiKey, { partial: true, model_budget_usd: usd });
+      return request("PATCH", `/api/v1/agents/${agentId}/persona`, apiKey, { persona: { model_budget_usd: String(usd) } });
     },
 
     /** Owner-only: remove the agent's photo; its drawing shows again. */
