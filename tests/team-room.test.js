@@ -102,9 +102,10 @@ test("openTeamRoom POSTs .../room and returns the chat id", async () => {
 });
 
 test("myTeams GETs /api/v1/agent/teams and unwraps the list", async () => {
-  const teams = [{ id: "g1", name: "Writers' room", lead_agent_id: "a1", room_chat_id: "c9", owner_id: "u1", members: MEMBERS }];
+  const teams = [{ id: "g1", name: "Writers' room", lead_agent_id: "a1", room_chat_id: "c9", owner_id: "u1", group_owner_id: "o2", members: MEMBERS }];
   const { fetchImpl, client } = clientWith(() => jsonResponse(200, { teams }));
   assert.deepStrictEqual(await client.myTeams("agent-key"), teams);
+  assert.strictEqual((await client.myTeams("agent-key"))[0].group_owner_id, "o2");
   assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/agent/teams");
   assert.strictEqual(fetchImpl.calls[0].method, "GET");
   assert.strictEqual(fetchImpl.calls[0].headers["api-key"], "agent-key");

@@ -205,7 +205,10 @@ export interface MyTeam {
   name: string;
   lead_agent_id: SaltId | null;
   room_chat_id: SaltId | null;
+  /** The chain root above the group's owner (a person, or a root agent). */
   owner_id: SaltId;
+  /** The group's direct owner, who may be an agent. When it is the caller's own owner or the caller itself, see AGENTS.md "Teams". */
+  group_owner_id: SaltId;
   members: TeamMember[];
 }
 
