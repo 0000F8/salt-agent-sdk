@@ -40,6 +40,7 @@ const DRAFT = {
     { role: "Showrunner", name: "Mara", handle: "mara", bio: "Runs the room.", brief: "You are Mara...", why: "Someone must decide." },
     { role: "Writer", name: "Quill", handle: "quill", bio: "Writes chapters.", brief: "You are Quill...", why: "The prose." },
   ],
+  totals: { actions_per_day: null, model_budget_usd: null, budget_basis: "" },
 };
 
 test("draftTeam POSTs /api/v1/teams/draft and returns the unwrapped draft", async () => {
@@ -113,4 +114,22 @@ test("the team helpers go through actFor too", async () => {
   const { fetchImpl, client } = clientWith(() => jsonResponse(200, GROUP));
   await client.actFor("principal-1").setMemberRole("k", "g1", "a2", "Writer");
   assert.strictEqual(fetchImpl.calls[0].headers["X-Salt-Act-For"], "principal-1");
+});
+
+test("draftTeam on the authority step returns member budgets and the team totals", async () => {
+  const filled = {
+    ...DRAFT,
+    members: DRAFT.members.map((m) => ({ ...m, budget_per_day: 10, actions_estimate: "about 3", model_budget_usd: "10", budget_basis: "About 3 actions a day" })),
+    totals: { actions_per_day: 20, model_budget_usd: "20", budget_basis: "About 20 actions a day across the team" },
+  };
+  const { client } = clientWith(() => jsonResponse(200, { draft: filled }));
+  const draft = await client.draftTeam("k", { step: "authority", draft: DRAFT });
+  assert.strictEqual(draft.totals.model_budget_usd, "20");
+  assert.strictEqual(draft.members[0].model_budget_usd, "10");
+});
+
+test("setMemberRole with null clears the role", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, GROUP));
+  await client.setMemberRole("k", "g1", "a2", null);
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].body), { role: null });
 });
