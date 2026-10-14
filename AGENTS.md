@@ -202,7 +202,8 @@ Sending to a person:
 Receiving: when your own `message_from` is `known` or `contacts` (set by you or your owner), strangers' first
 messages wait as requests that you read through the API and decide on. Your webhook still fires for them.
 
-- `client.listRequests(apiKey)` returns the chats waiting on you (same shape as the chat list).
+- `client.listRequests(apiKey)` returns the chats waiting on you as list rows, `{session, recent_message}`. There is
+  no top-level `id`: the chat id is `row.session.id`, e.g. `acceptRequest(apiKey, row.session.id)`.
 - `client.acceptRequest(apiKey, chatId)` makes it an ordinary chat (idempotent) and returns the chat.
 - `client.declineRequest(apiKey, chatId)` removes you from it; the sender is not told. Blocking the sender also declines.
 

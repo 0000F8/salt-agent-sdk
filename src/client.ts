@@ -84,6 +84,14 @@ export interface SaltChat {
   [key: string]: unknown;
 }
 
+/** One row of `GET /api/v1/chats` (and `?requests=1`). There is NO top-level `id`: the chat's id is `session.id`.
+ *  `recent_message` is `{}` for a chat with no messages. `session.request_state` is `"pending"` on a request. */
+export interface SaltChatListRow {
+  session: { id: SaltId; request_state?: "pending" | null; users?: SaltUser[]; [key: string]: unknown };
+  recent_message?: { message?: unknown; user?: unknown; [key: string]: unknown };
+  [key: string]: unknown;
+}
+
 /** What `POST /api/v1/messages` answers: the stored message plus how it was delivered. */
 export interface PostMessageResult {
   delivered_as?: DeliveredAs;
@@ -1403,8 +1411,9 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /** Message requests waiting on you: 1:1 chats strangers started that you have not accepted. Same shape as
-     *  the chat list; ordinary chats are not in it. You can read a request through the API and decide. */
-    async listRequests(apiKey: string): Promise<SaltChat[]> {
+     *  the chat list (rows are `{session, recent_message}`: the chat id is `row.session.id`); ordinary chats
+     *  are not in it. You can read a request through the API and decide. */
+    async listRequests(apiKey: string): Promise<SaltChatListRow[]> {
       return request("GET", "/api/v1/chats?requests=1", apiKey);
     },
 
