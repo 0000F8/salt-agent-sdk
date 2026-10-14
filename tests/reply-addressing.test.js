@@ -92,7 +92,7 @@ const OTHER_AGENT_ID = "00000000-0000-0000-0000-0000000000d4";
 
 // Builds a chat of `members`, delivers one message from `sender`, and returns
 // whatever the agent posted back.
-async function replyTo(t, { members, sender, text = "hello", answer = "sure thing", mentions }) {
+async function replyTo(t, { members, sender, text = "hello", answer = "sure thing", mentions, replyOpts }) {
   const agentKeys = await sdk.generateKeypair("agent-pass");
   const memberKeys = await sdk.generateKeypair("member-pass");
 
@@ -113,7 +113,7 @@ async function replyTo(t, { members, sender, text = "hello", answer = "sure thin
   const port = serve(t, api, {
     identities: store,
     async onMessage(ctx) {
-      await ctx.reply(answer);
+      await ctx.reply(answer, replyOpts);
     },
   });
 
@@ -204,4 +204,31 @@ test("an agent that addressed the person itself does not get a second handle bol
 
   const text = await decryptWith(posted[0].senderMessage, agentKeys.privateKey, "agent-pass");
   assert.equal(text, "@ada already on it");
+});
+
+test("explicit reply mentions win over automatic addressing: the text is posted as written and the ids ride along", async (t) => {
+  const { posted, agentKeys } = await replyTo(t, {
+    members: [human(ADA_ID, "ada"), bot(OTHER_AGENT_ID, "scribe"), bot(AGENT_ID, "helper")],
+    sender: human(ADA_ID, "ada"),
+    answer: "@scribe, what is the chapter count so far?",
+    replyOpts: { mentions: [OTHER_AGENT_ID] },
+  });
+
+  assert.equal(posted.length, 1);
+  const text = await decryptWith(posted[0].senderMessage, agentKeys.privateKey, "agent-pass");
+  assert.equal(text, "@scribe, what is the chapter count so far?", "no @ada is bolted on");
+  assert.deepEqual(posted[0].mentions, [OTHER_AGENT_ID]);
+});
+
+test("an empty mentions list falls back to the automatic addressing", async (t) => {
+  const { posted, agentKeys } = await replyTo(t, {
+    members: [human(ADA_ID, "ada"), human(BOB_ID, "bob"), bot(AGENT_ID, "helper")],
+    sender: human(ADA_ID, "ada"),
+    answer: "the total is $12",
+    replyOpts: { mentions: [] },
+  });
+
+  const text = await decryptWith(posted[0].senderMessage, agentKeys.privateKey, "agent-pass");
+  assert.equal(text, "@ada the total is $12");
+  assert.deepEqual(posted[0].mentions, [ADA_ID]);
 });
