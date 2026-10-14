@@ -62,13 +62,31 @@ export interface SaltUser {
   [key: string]: unknown;
 }
 
+/** Who may start a 1:1 with an account without being refused or parked in Requests (`users.message_from`).
+ *  `everyone`: anyone. `known`: strangers land in the recipient's Requests (the default for a person).
+ *  `contacts`: strangers are refused with 403 `recipient_contacts_only`. An agent account defaults to `everyone`. */
+export type MessageFrom = "everyone" | "known" | "contacts";
+
+/** `request` means the other member's row in the 1:1 is a pending message request: the recipient has not
+ *  accepted yet, so they get no push and read receipts are held back. Wait for them; do not re-send and
+ *  do not open another chat. `chat` is a normal delivery. */
+export type DeliveredAs = "chat" | "request";
+
 export interface SaltChat {
   id: SaltId;
+  /** On a chat-create response: whether the other member received a normal chat or a pending request. */
+  delivered_as?: DeliveredAs;
   /** `encrypted` is undefined on a server that predates open rooms, which
    *  always means an ordinary end-to-end encrypted chat -- see getChat's
    *  doc comment for the resolved, defaulted value callers actually use. */
   session?: { users?: SaltUser[]; encrypted?: boolean; public?: boolean; [key: string]: unknown };
   messages?: unknown[];
+  [key: string]: unknown;
+}
+
+/** What `POST /api/v1/messages` answers: the stored message plus how it was delivered. */
+export interface PostMessageResult {
+  delivered_as?: DeliveredAs;
   [key: string]: unknown;
 }
 
@@ -736,6 +754,8 @@ export interface PostRepliesPage {
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
+  /** Salt's machine-readable refusal code (`{error, code}`), when the body carries one. */
+  code?: string;
 
   constructor(method: string, url: string, status: number, body: unknown) {
     // Salt's refusals carry one plain sentence ({error: "..."}). Put it in
@@ -750,6 +770,24 @@ export class SaltApiError extends Error {
     this.name = "SaltApiError";
     this.status = status;
     this.body = body;
+    if (typeof (b as { code?: unknown } | undefined)?.code === "string") this.code = (b as { code: string }).code;
+  }
+}
+
+export const RECIPIENT_CONTACTS_ONLY = "recipient_contacts_only";
+
+/** 403 `recipient_contacts_only`: the recipient only takes messages from their contacts and the caller is
+ *  not one, so no chat was created. `message` ends with the server's own sentence ("<name> only takes
+ *  messages from their contacts."), also on `sentence`. Do not retry; a request for contact is the only way in. */
+export class RecipientContactsOnlyError extends SaltApiError {
+  sentence: string;
+
+  constructor(method: string, url: string, status: number, body: unknown) {
+    super(method, url, status, body);
+    this.name = "RecipientContactsOnlyError";
+    this.code = RECIPIENT_CONTACTS_ONLY;
+    const e = (body as { error?: unknown } | undefined)?.error;
+    this.sentence = typeof e === "string" ? e : "This person only takes messages from their contacts.";
   }
 }
 
@@ -795,6 +833,9 @@ export function createSaltClient(options: SaltClientOptions) {
         parsed = await res.json();
       } catch {
         parsed = await res.text().catch(() => undefined);
+      }
+      if (res.status === 403 && (parsed as { code?: unknown } | undefined)?.code === RECIPIENT_CONTACTS_ONLY) {
+        throw new RecipientContactsOnlyError(method, url, res.status, parsed);
       }
       throw new SaltApiError(method, url, res.status, parsed);
     }
@@ -939,7 +980,9 @@ export function createSaltClient(options: SaltClientOptions) {
      * recipient reads; `senderMessage` is the copy encrypted to the
      * sender's own key. `delegations` (optional) is the provenance trail
      * -- salt-api re-validates every entry against the sender's actual
-     * memberships before storing it.
+     * memberships before storing it. The result carries `delivered_as`:
+     * `"request"` means the recipient has not accepted a first message from
+     * you yet (see Message requests in AGENTS.md) -- wait, do not re-send.
      */
     async postMessage(
       apiKey: string,
@@ -957,7 +1000,7 @@ export function createSaltClient(options: SaltClientOptions) {
       // an agent posting into a private lane -- a progress report (work.ts) --
       // and silently dropped anywhere else.
       opts?: { quiet?: boolean }
-    ): Promise<unknown> {
+    ): Promise<PostMessageResult> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
       if (delegations && delegations.length > 0) body.delegations = delegations;
       if (mentions && mentions.length > 0) body.mentions = mentions;
@@ -1340,9 +1383,40 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("GET", `/api/v1/agents/${agentId}`, apiKey);
     },
 
-    /** Create-or-reuse a 1:1 chat with `contactId` -- idempotent on Salt's side. */
+    /** Create-or-reuse a 1:1 chat with `contactId` -- idempotent on Salt's side. The result's `delivered_as` is
+     *  `"request"` when the contact has not accepted a first message from you yet: wait, and do not open another
+     *  chat. A recipient who only takes messages from their contacts throws `RecipientContactsOnlyError`. */
     async createOrGetChat(apiKey: string, contactId: SaltId): Promise<SaltChat> {
       return request("POST", "/api/v1/chats", apiKey, { contact_id: contactId });
+    },
+
+    /** Your own `message_from` setting: who can start a chat with you without landing in Requests or being refused. */
+    async getMessageFrom(apiKey: string): Promise<MessageFrom> {
+      const account = await request<{ message_from: MessageFrom }>("GET", "/api/v1/account", apiKey);
+      return account.message_from;
+    },
+
+    /** Set your own `message_from` (an agent changes its OWN setting). An unknown value is a 422 with
+     *  `code: "invalid_message_from"`. Returns the updated account fields. */
+    async setMessageFrom(apiKey: string, value: MessageFrom): Promise<{ message_from: MessageFrom; [key: string]: unknown }> {
+      return request("POST", "/api/v1/account", apiKey, { message_from: value });
+    },
+
+    /** Message requests waiting on you: 1:1 chats strangers started that you have not accepted. Same shape as
+     *  the chat list; ordinary chats are not in it. You can read a request through the API and decide. */
+    async listRequests(apiKey: string): Promise<SaltChat[]> {
+      return request("GET", "/api/v1/chats?requests=1", apiKey);
+    },
+
+    /** Accept a message request: it becomes an ordinary chat. Idempotent. Returns the chat. */
+    async acceptRequest(apiKey: string, chatId: SaltId): Promise<SaltChat> {
+      return request("POST", `/api/v1/chats/${chatId}/accept_request`, apiKey, {});
+    },
+
+    /** Decline a message request: you leave the chat and the sender is not told. A later new chat from them is a
+     *  fresh request. Blocking the sender (the block endpoint) also declines. */
+    async declineRequest(apiKey: string, chatId: SaltId): Promise<void> {
+      await request("POST", `/api/v1/chats/${chatId}/decline_request`, apiKey, {});
     },
 
     /** Exact-match lookup of accounts by handle (`username`) or a one-box `q`
