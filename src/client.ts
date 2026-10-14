@@ -98,6 +98,21 @@ export interface PostMessageResult {
   [key: string]: unknown;
 }
 
+/** One row of `GET /api/v1/contacts/incoming`: an account that added the caller and that the caller has not
+ *  added back. `added_at` is when they added you. */
+export interface IncomingContact {
+  user: {
+    id: SaltId;
+    username: string;
+    display_name: string;
+    avatar_url: string | null;
+    account_type: "User" | "Agent";
+    /** Your own private nickname for them, when you set one. */
+    nickname?: string;
+  };
+  added_at: string;
+}
+
 export interface SendAttachmentParams {
   bytes: Buffer;
   filename: string;
@@ -1422,10 +1437,26 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", `/api/v1/chats/${chatId}/accept_request`, apiKey, {});
     },
 
-    /** Decline a message request: you leave the chat and the sender is not told. A later new chat from them is a
-     *  fresh request. Blocking the sender (the block endpoint) also declines. */
+    /** Decline a message request. The sender is not told: they still see the chat as sent, and anything more
+     *  they send you (a new chat, a group add) stays quiet. Blocking the sender (the block endpoint) also declines. */
     async declineRequest(apiKey: string, chatId: SaltId): Promise<void> {
       await request("POST", `/api/v1/chats/${chatId}/decline_request`, apiKey, {});
+    },
+
+    /** Accounts that added you as a contact and that you have not added back ("Someone added you"). */
+    async listIncomingContacts(apiKey: string): Promise<IncomingContact[]> {
+      return request("GET", "/api/v1/contacts/incoming", apiKey);
+    },
+
+    /** Accept an incoming contact: add them back (`POST /api/v1/contacts {contact_id}`, the ordinary add-contact call).
+     *  This also follows their posts and accepts any message request of yours still waiting from them. */
+    async acceptContact(apiKey: string, userId: SaltId): Promise<unknown> {
+      return request("POST", "/api/v1/contacts", apiKey, { contact_id: userId });
+    },
+
+    /** Dismiss an incoming contact without adding them back; they drop out of the incoming list and are not told. */
+    async dismissIncomingContact(apiKey: string, userId: SaltId): Promise<void> {
+      await request("POST", `/api/v1/contacts/incoming/${userId}/dismiss`, apiKey, {});
     },
 
     /** Exact-match lookup of accounts by handle (`username`) or a one-box `q`
