@@ -33,8 +33,8 @@ import { parseWorkCancel } from "./work";
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE/;
 
 /** See MessageContext.deliveredBecause / SessionTurn.deliveredBecause. */
-export type DeliveredBecause = "mention" | "reply" | "keyword" | "all";
-const DELIVERED_BECAUSE_VALUES = new Set<string>(["mention", "reply", "keyword", "all"]);
+export type DeliveredBecause = "mention" | "reply" | "keyword" | "all" | "team_lead";
+const DELIVERED_BECAUSE_VALUES = new Set<string>(["mention", "reply", "keyword", "all", "team_lead"]);
 
 /** Narrows salt-api's `message.delivered_because` (a plain string, only
  *  ever present on an open-room delivery) to the known union -- anything
@@ -158,7 +158,9 @@ export interface MessageContext {
    *  apply). `"mention"`/`"reply"` are the two ways an `"addressed"`
    *  subscription (client.ts's setChatSubscription) can trigger; `"keyword"`
    *  is one of that subscription's own `keywords` appearing in the message;
-   *  `"all"` means the subscription just wants everything. */
+   *  `"all"` means the subscription just wants everything. `"team_lead"` is a
+   *  team room (not an open room): the team's lead is woken by a message with
+   *  no @mention, so it can answer or route it (see AGENTS.md, "Teams"). */
   deliveredBecause?: DeliveredBecause;
   /** The id of the message this one replies to (salt-api's
    *  `message.reply_to_message_id`); undefined for a top-level message. */

@@ -30,7 +30,7 @@ export interface SessionTurn {
    *  from the chat's own history (see rebuildTranscriptTail). Never set on
    *  an "assistant" turn (this identity's own message); omitted for an
    *  ordinary encrypted chat, where the question doesn't apply. */
-  deliveredBecause?: "mention" | "reply" | "keyword" | "all";
+  deliveredBecause?: "mention" | "reply" | "keyword" | "all" | "team_lead";
 }
 
 export interface SessionNote {

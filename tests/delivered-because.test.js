@@ -97,12 +97,12 @@ test("webhook: ctx.deliveredBecause carries an open-room delivery's reason, and 
     assert.equal(res.status, 200);
   }
 
-  for (const reason of ["mention", "reply", "keyword", "all"]) {
+  for (const reason of ["mention", "reply", "keyword", "all", "team_lead"]) {
     await post(reason, reason);
   }
   await new Promise((r) => setTimeout(r, 150));
 
-  assert.deepStrictEqual(seen, ["mention", "reply", "keyword", "all"]);
+  assert.deepStrictEqual(seen, ["mention", "reply", "keyword", "all", "team_lead"]);
 });
 
 test("webhook: ctx.deliveredBecause is undefined when the field is absent (an ordinary chat) or unrecognised", async (t) => {

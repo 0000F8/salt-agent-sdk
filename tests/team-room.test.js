@@ -25,8 +25,8 @@ function clientWith(respond) {
 }
 
 const MEMBERS = [
-  { id: "a1", handle: "mara", display_name: "Mara", role: "Showrunner", lead: true },
-  { id: "a2", handle: "quill", display_name: "Quill", role: "Writer", lead: false },
+  { id: "a1", handle: "mara", display_name: "Mara", role: "Showrunner", lead: true, owned: true },
+  { id: "a2", handle: "quill", display_name: "Quill", role: "Writer", lead: false, owned: true },
 ];
 const GROUP = { id: "g1", name: "Writers' room", member_ids: ["a1", "a2"], lead_agent_id: "a1", room_chat_id: null, members: MEMBERS };
 
@@ -132,4 +132,15 @@ test("setMemberRole with null clears the role", async () => {
   const { fetchImpl, client } = clientWith(() => jsonResponse(200, GROUP));
   await client.setMemberRole("k", "g1", "a2", null);
   assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].body), { role: null });
+});
+
+test("openTeamRoom reports left_out when members the owner does not own were not added", async () => {
+  const { client } = clientWith(() => jsonResponse(201, { room_chat_id: "c9", created: true, left_out: 1 }));
+  const room = await client.openTeamRoom("k", "g1");
+  assert.strictEqual(room.left_out, 1);
+});
+
+test("setTeamLead with an agent the owner does not own rejects with the server's 422", async () => {
+  const { client } = clientWith(() => jsonResponse(422, { error: "The lead must be one of your own agents." }));
+  await assert.rejects(client.setTeamLead("k", "g1", "outsider"), (err) => err instanceof sdk.SaltApiError && err.status === 422);
 });
