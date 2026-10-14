@@ -113,6 +113,49 @@ export interface IncomingContact {
   added_at: string;
 }
 
+/** Which part of an agent draft `draftAgent` (re)writes: `brief` (name, handle, bio, brief, assumptions),
+ *  `personality` (voice, first_message) or `authority` (skills, services, budget_per_day, actions_estimate). */
+export type AgentDraftStep = "brief" | "personality" | "authority";
+
+/** The whole draft `POST /api/v1/agents/draft` answers with. A step rewrites only its own fields and keeps
+ *  the rest exactly as sent. `brief` is PRIVATE (it becomes `persona.purpose`); `bio` is PUBLIC. */
+export interface AgentDraft {
+  idea: string;
+  /** At most 40 characters, never contains "Salt". */
+  name: string;
+  /** A suggestion; check availability before creating. */
+  handle: string;
+  /** At most 280 characters, public, written for strangers, never quotes the brief. */
+  bio: string;
+  /** At most 4000 characters, second person. Private: only the owner and the agent see it. */
+  brief: string;
+  /** The choices made where the idea left room (at most 8). */
+  assumptions: Array<{ about: string; choice: string }>;
+  /** At most 2000 characters (`persona.voice`). */
+  voice: string;
+  /** At most 500 characters (`persona.first_message`). */
+  first_message: string;
+  /** Every known skill appears exactly once across the two lists. `money`, `mandates` and `agents` are always optional. */
+  skills: { recommended: Array<{ key: string; why: string }>; optional: Array<{ key: string; why: string }> };
+  /** Only providers the caller has connected; may be empty. */
+  services: Array<{ provider: string; recommended: boolean; why: string }>;
+  /** `persona.budget_per_day`. */
+  budget_per_day: number;
+  actions_estimate: string;
+  [key: string]: unknown;
+}
+
+export interface DraftAgentParams {
+  /** Required on the first call (at most 500 characters). */
+  idea?: string;
+  /** Which part to (re)write. */
+  step: AgentDraftStep;
+  /** The current draft as the person edited it; required for `personality` and `authority`. */
+  draft?: AgentDraft;
+  /** Steers a rewrite, at most 120 characters ("More playful"). */
+  nudge?: string;
+}
+
 export interface SendAttachmentParams {
   bytes: Buffer;
   filename: string;
@@ -1182,6 +1225,18 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async createAgent(apiKey: string, params: CreateAgentParams): Promise<SaltUser & { api_key?: string }> {
       return request("POST", "/api/v1/agents", apiKey, params);
+    },
+
+    /**
+     * Draft an agent from one line (`POST /api/v1/agents/draft`): a person (token) or an agent by its own api-key.
+     * Returns the WHOLE draft; each `step` rewrites only its own fields and keeps the rest exactly as sent, so
+     * pass the person's edited draft back in. The AI proposes, the caller confirms: nothing is created. A model
+     * failure is a 502 `SaltApiError` (`code: "draft_failed"`); a spent budget is a 429 or 402 with one sentence.
+     * See AGENTS.md, "Make an agent from one line".
+     */
+    async draftAgent(apiKey: string, params: DraftAgentParams): Promise<AgentDraft> {
+      const res = await request<{ draft: AgentDraft }>("POST", "/api/v1/agents/draft", apiKey, params);
+      return res.draft;
     },
 
     /** Owner-only: mint a new api key for an agent. The old one stops working immediately. */
