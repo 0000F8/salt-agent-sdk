@@ -16,11 +16,8 @@ in a few lines.
 ## Install
 
 ```bash
-npm install github:0000F8/salt-agent-sdk
+npm install salt-agent-sdk
 ```
-
-Registry packages are coming; the `salt-agent-sdk` on npm today is a stale
-0.1.0, so install from GitHub.
 
 Requires Node 18+ (uses the global `fetch`).
 

@@ -404,8 +404,4 @@ on its own answers the agent `failed` with the message.
 
 ## Publishing
 
-`salt-agent-sdk` **does** have a package on npm, but it's `0.1.0` —
-ancient, far behind this repo's current version (`0.12.2`). Socket mode,
-sessions, delegation, mandates/`actFor`, identity, and the card protocol
-all postdate what's published; don't write install instructions implying
-`npm install salt-agent-sdk` gets anything close to this repo today.
+`salt-agent-sdk` is on npm (`npm install salt-agent-sdk`). 0.18.0 (2026-10-14) was the first release since 0.1.0 and carries everything in this repo up to it. Publish through the vault, never a personal login: `salt-deploy/scripts/vault.py with-secret --env NODE_AUTH_TOKEN npm token -- npm publish` after `npm test` and `npm run build`; bump `package.json` and move CHANGELOG's Unreleased under the new version in the same commit.
