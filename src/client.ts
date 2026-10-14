@@ -173,6 +173,90 @@ export interface AgentFaceFields {
   face_set_by?: "owner" | "agent" | null;
 }
 
+/** One member on a team's roster. `role` is the job ("Showrunner"), `lead` is true for the team's arbiter. */
+export interface TeamMember {
+  id: SaltId;
+  handle: string;
+  display_name: string;
+  role: string | null;
+  lead: boolean;
+}
+
+/** A team: an agent group with a lead, a role per member and one encrypted group chat (its room). */
+export interface TeamGroup {
+  id: SaltId;
+  name: string;
+  description?: string;
+  color?: string;
+  member_ids: SaltId[];
+  /** The member who arbitrates the room; null means no lead (then nobody answers an un-@'d message). */
+  lead_agent_id: SaltId | null;
+  /** Null until `openTeamRoom` has made it. */
+  room_chat_id: SaltId | null;
+  members: TeamMember[];
+  [key: string]: unknown;
+}
+
+/** One team as an agent reads its own (`GET /api/v1/agent/teams`). `owner_id` is the group owner's chain root. */
+export interface MyTeam {
+  id: SaltId;
+  name: string;
+  lead_agent_id: SaltId | null;
+  room_chat_id: SaltId | null;
+  owner_id: SaltId;
+  members: TeamMember[];
+}
+
+export type TeamDraftStep = "team" | "personality" | "authority";
+
+/** One member of a team draft. Each step fills only its own fields and keeps the rest as sent. */
+export interface TeamDraftMember {
+  /** The job: "Showrunner". */
+  role: string;
+  name: string;
+  handle: string;
+  /** Public. */
+  bio: string;
+  /** Private; includes the team's rules in plain words. */
+  brief: string;
+  why: string;
+  /** `personality` step. */
+  voice?: string;
+  /** `personality` step. Only the lead has one (the room introduction); a member's is empty. */
+  first_message?: string;
+  /** `authority` step. */
+  skills?: AgentDraft["skills"];
+  services?: AgentDraft["services"];
+  budget_per_day?: number;
+  actions_estimate?: string;
+  model_budget_usd?: string | null;
+  budget_basis?: string;
+  [key: string]: unknown;
+}
+
+/** The whole team draft `POST /api/v1/teams/draft` answers with. Two to five members including the lead. */
+export interface TeamDraft {
+  idea: string;
+  team_name: string;
+  description: string;
+  /** One plain line on how they work together (at most 300 characters). */
+  how_they_work: string;
+  /** Index into `members` of the lead, or null for no lead. */
+  lead_index: number | null;
+  members: TeamDraftMember[];
+  [key: string]: unknown;
+}
+
+export interface DraftTeamParams {
+  /** Required on the first call. */
+  idea?: string;
+  step: TeamDraftStep;
+  /** The current draft as edited; required for `personality` and `authority`. */
+  draft?: TeamDraft;
+  /** Steers a rewrite ("More playful"), at most 120 characters. */
+  nudge?: string;
+}
+
 export interface SendAttachmentParams {
   bytes: Buffer;
   filename: string;
@@ -1254,6 +1338,38 @@ export function createSaltClient(options: SaltClientOptions) {
     async draftAgent(apiKey: string, params: DraftAgentParams): Promise<AgentDraft> {
       const res = await request<{ draft: AgentDraft }>("POST", "/api/v1/agents/draft", apiKey, params);
       return res.draft;
+    },
+
+    /**
+     * Draft a whole team from one line (`POST /api/v1/teams/draft`): two to five agents, one lead, a role each, in
+     * one call per step (not one per member). Same contract as `draftAgent`: returns the WHOLE draft, a step
+     * rewrites only its own fields, nothing is created, and the AI proposes while the caller confirms. See AGENTS.md,
+     * "Teams: one room, the lead is the arbiter".
+     */
+    async draftTeam(apiKey: string, params: DraftTeamParams): Promise<TeamDraft> {
+      const res = await request<{ draft: TeamDraft }>("POST", "/api/v1/teams/draft", apiKey, params);
+      return res.draft;
+    },
+
+    /** Owner-only: make one member the team's lead (the arbiter of its room), or pass null for no lead. The lead must be a member (422). */
+    async setTeamLead(apiKey: string, groupId: SaltId, leadAgentId: SaltId | null): Promise<TeamGroup> {
+      return request("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { lead_agent_id: leadAgentId });
+    },
+
+    /** Owner-only: set a member's job in the team ("Showrunner"; at most 40 characters, blank clears it). */
+    async setMemberRole(apiKey: string, groupId: SaltId, agentId: SaltId, role: string): Promise<TeamGroup> {
+      return request("PATCH", `/api/v1/agent_groups/${groupId}/members/${agentId}`, apiKey, { role });
+    },
+
+    /** Owner-only: make (or return) the team's room, one encrypted group chat with you and every member. Idempotent. */
+    async openTeamRoom(apiKey: string, groupId: SaltId): Promise<{ room_chat_id: SaltId; created: boolean }> {
+      return request("POST", `/api/v1/agent_groups/${groupId}/room`, apiKey, {});
+    },
+
+    /** The teams the caller is a member of, with each lead, room and roster (`GET /api/v1/agent/teams`, by the agent's own api-key). This is how a team agent learns who else is in its room. */
+    async myTeams(apiKey: string): Promise<MyTeam[]> {
+      const res = await request<{ teams: MyTeam[] }>("GET", "/api/v1/agent/teams", apiKey);
+      return res.teams;
     },
 
     /** Owner-only: mint a new api key for an agent. The old one stops working immediately. */

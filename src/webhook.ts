@@ -127,6 +127,16 @@ function isTextLikeAttachment(contentType: string): boolean {
   return ["application/json", "application/csv", "application/markdown"].includes(contentType);
 }
 
+/** Options for `ctx.reply(text, opts)`. */
+export interface ReplyOptions {
+  /** User ids to @-mention. Salt only sees ciphertext, so an "@handle" in the body notifies nobody by itself; these ids
+   *  are what wake a member (an agent in a group is only woken when mentioned). Salt keeps only ids of chat members.
+   *  When given, they replace the automatic "@sender" addressing and the text is posted exactly as written, so write
+   *  the "@handle" yourself. */
+  mentions?: SaltId[];
+}
+
+
 export interface MessageContext {
   identity: AgentIdentity;
   chatId: SaltId;
@@ -187,7 +197,7 @@ export interface MessageContext {
    *  copy), posts it, drains this reply's delegation trail onto it, and
    *  emits an agent_reply_sent metric. Handles a typing-indicator heartbeat
    *  for the duration of the call automatically. */
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** The id of the message being handled (the delivery's `message_id`). */
   messageId: SaltId;
   /** React to THIS message with one emoji; resolves with the server's reactions summary.
@@ -278,7 +288,7 @@ export interface AppActionContext {
   /** Whoever tapped `salt.ask` inside the app. */
   sender: RawSender;
   /** Encrypts `text` for every current chat member (+ this identity's own copy) and posts it -- same closure every other context type gets. A no-op (logged) on a personal installation, which has no chat to post into. */
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
 }
 
 export interface InvoicePaidContext {
@@ -292,7 +302,7 @@ export interface InvoicePaidContext {
   transferRequestId: SaltId;
   /** This identity's memory of `chatId` (see MessageContext.session). Whatever you reply() with here is appended as an assistant turn and persisted, same as onMessage. */
   session: Session;
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** See MessageContext.ask. */
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
@@ -346,7 +356,7 @@ export interface ChatOpenedContext {
   session: Session;
   /** Encrypts `text` for every current chat member (+ this identity's own
    *  copy) and posts it -- the same closure every other context type gets. */
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** See MessageContext.ask. */
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
@@ -371,7 +381,7 @@ export interface HandoffConfirmedContext {
    *  moot once you've handed off, but there if you're ever handed this
    *  chat again later. */
   session: Session;
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** See MessageContext.ask. */
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
@@ -393,7 +403,7 @@ export interface HandoffReceivedContext {
    *  appended as an assistant turn and persisted, so it's already in
    *  transcriptTail by the time the next onMessage call for this chat runs. */
   session: Session;
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** See MessageContext.ask. */
   ask(question: string, opts?: AskOptions): Promise<AskResult>;
   /** See MessageContext.approve. */
@@ -556,7 +566,7 @@ export interface DeviceBackContext {
   /** The delivery verbatim. */
   body: DeviceBackBody;
   /** Encrypts `text` for the 1:1's members and posts it. Throws when `chatId` is null. */
-  reply(text: string): Promise<void>;
+  reply(text: string, opts?: ReplyOptions): Promise<void>;
 }
 
 /** A `describe_yourself` delivery: Salt asks this agent to write its own public description (the
@@ -1253,8 +1263,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     identity: AgentIdentity,
     chatId: SaltId,
     addressee?: { id: SaltId; username?: string; account_type?: string } | null
-  ): (text: string) => Promise<void> {
-    return async (text: string) => {
+  ): (text: string, opts?: ReplyOptions) => Promise<void> {
+    return async (text: string, opts?: ReplyOptions) => {
       const startedAt = Date.now();
       let recipientKeys: string[];
       let memberCount = 0;
@@ -1286,10 +1296,13 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         !new RegExp(`(^|\\s)@${addressee.username}(?![\\w.-])`).test(text)
           ? addressee.username
           : null;
-      const outgoing = addressHandle ? `@${addressHandle} ${text}` : text;
+      // Explicit `opts.mentions` (a team lead waking a member, a member waking the lead) win over the
+      // automatic addressing: the author wrote the "@handle" in the text, so nothing is prefixed.
+      const explicitMentions = opts?.mentions && opts.mentions.length > 0 ? opts.mentions : undefined;
+      const outgoing = !explicitMentions && addressHandle ? `@${addressHandle} ${text}` : text;
       // The ids, not the text: Salt only ever sees ciphertext, so an "@handle"
       // in the body is invisible to it and notifies nobody by itself.
-      const mentions = addressHandle ? [addressee!.id] : undefined;
+      const mentions = explicitMentions ?? (addressHandle ? [addressee!.id] : undefined);
 
       let encryptedMessage: string, senderMessage: string;
       try {
@@ -1737,9 +1750,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // Nothing about what actually gets sent changes.
     const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId, senderRaw);
-    const trackedReply = async (text: string): Promise<void> => {
+    const trackedReply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
-      await baseReply(text);
+      await baseReply(text, opts);
     };
 
     const ctx: MessageContext = {
@@ -1902,9 +1915,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     const session = await loadOrRebuildSession(identity, chatId);
     const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId);
-    const trackedReply = async (text: string): Promise<void> => {
+    const trackedReply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
-      await baseReply(text);
+      await baseReply(text, opts);
     };
 
     const ctx: InvoicePaidContext = {
@@ -1969,9 +1982,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     const session = await loadOrRebuildSession(identity, chatId, chat);
     const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId);
-    const trackedReply = async (text: string): Promise<void> => {
+    const trackedReply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
-      await baseReply(text);
+      await baseReply(text, opts);
     };
 
     const ctx: ChatOpenedContext = {
@@ -2027,10 +2040,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // a handler that wrote to it before calling reply() is picked up.
     const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId);
-    const reply = async (text: string): Promise<void> => {
+    const reply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
       const noteLine = sessions.formatSessionNoteLine(session.note);
-      await baseReply(noteLine ? `${text}\n${noteLine}` : text);
+      await baseReply(noteLine ? `${text}\n${noteLine}` : text, opts);
     };
 
     const ctx: HandoffConfirmedContext = {
@@ -2103,9 +2116,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // transcriptTail the next time this chat's onMessage runs.
     const repliesForSession: string[] = [];
     const baseReply = makeReply(identity, chatId);
-    const trackedReply = async (text: string): Promise<void> => {
+    const trackedReply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
-      await baseReply(text);
+      await baseReply(text, opts);
     };
 
     const ctx: HandoffReceivedContext = {
@@ -2250,10 +2263,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       chatId,
       session,
       body,
-      reply: async (text: string) => {
+      reply: async (text: string, opts?: ReplyOptions) => {
         if (!baseReply) throw new Error("device_back: the person has no 1:1 with this agent (chat_id is null), so there is nowhere to reply");
         repliesForSession.push(text);
-        await baseReply(text);
+        await baseReply(text, opts);
       },
     };
     try {
