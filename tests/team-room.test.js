@@ -207,3 +207,9 @@ test("publishTeam POSTs the template and returns the slug; setTeamListed PATCHes
   assert.strictEqual(fetchImpl.calls[1].method, "PATCH");
   assert.deepStrictEqual(JSON.parse(fetchImpl.calls[1].body), { listed: false });
 });
+
+test("rule error codes are exposed on SaltApiError.code", async () => {
+  assert.ok(sdk.RULE_ERROR_CODES.includes("rule_removes_unnamed"));
+  const { client } = clientWith(() => jsonResponse(422, { error: "Would drop a rule.", code: "rule_removes_unnamed" }));
+  await assert.rejects(client.setTeamRules("k", "g1", [{ text: "x" }]), (err) => err.code === "rule_removes_unnamed");
+});
