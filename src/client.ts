@@ -1001,6 +1001,28 @@ export interface PostRepliesPage {
   next_before: string | null;
 }
 
+/** The `code` on a refused rule write or rule card (`SaltApiError.code`). Read it instead of parsing the sentence. */
+export type RuleErrorCode =
+  | "rules_cap"
+  | "rule_needs_service"
+  | "rule_expired"
+  | "rule_removes_unnamed"
+  | "rule_invalid"
+  | "stale_rules"
+  | "owner_only"
+  | "payer_only";
+
+export const RULE_ERROR_CODES: readonly RuleErrorCode[] = [
+  "rules_cap",
+  "rule_needs_service",
+  "rule_expired",
+  "rule_removes_unnamed",
+  "rule_invalid",
+  "stale_rules",
+  "owner_only",
+  "payer_only",
+];
+
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
