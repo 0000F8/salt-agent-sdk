@@ -173,7 +173,7 @@ export interface AgentFaceFields {
   face_set_by?: "owner" | "agent" | null;
 }
 
-/** One member on a team's roster. `role` is the job ("Showrunner"), `lead` is true for the team's arbiter. */
+/** One member on a team's roster. `role` is the job ("Lead"), `lead` is true for the team's arbiter. */
 export interface TeamMember {
   id: SaltId;
   handle: string;
@@ -248,7 +248,7 @@ export type TeamDraftStep = "team" | "personality" | "authority";
 
 /** One member of a team draft. Each step fills only its own fields and keeps the rest as sent. */
 export interface TeamDraftMember {
-  /** The job: "Showrunner". */
+  /** The job: "Lead". */
   role: string;
   name: string;
   handle: string;
@@ -1416,7 +1416,7 @@ export function createSaltClient(options: SaltClientOptions) {
       return group.rules;
     },
 
-    /** Owner-only: set a member's job in the team ("Showrunner"; at most 40 characters, blank clears it). */
+    /** Owner-only: set a member's job in the team ("Lead"; at most 40 characters, blank clears it). */
     async setMemberRole(apiKey: string, groupId: SaltId, agentId: SaltId, role: string | null): Promise<TeamGroup> {
       return request("PATCH", `/api/v1/agent_groups/${groupId}/members/${agentId}`, apiKey, { role });
     },
