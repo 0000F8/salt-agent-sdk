@@ -196,6 +196,10 @@ export interface TeamGroup {
   /** Null until `openTeamRoom` has made it. */
   room_chat_id: SaltId | null;
   members: TeamMember[];
+  /** The group's `updated_at`; pass it as `baseVersion` to `setTeamRules` to catch a concurrent change. */
+  updated_at?: string;
+  /** The shared team template made from this group, or null when it was never published. */
+  listed_template?: { slug: string; listed: boolean } | null;
   [key: string]: unknown;
 }
 
@@ -216,7 +220,8 @@ export interface MyTeam {
 
 /** One pinned team rule (0.208.0): at most 10 per team, `text` at most 200 characters. `approve_paid: true` means
  *  "ask the owner before every paid service write", `false` means "do not ask" (for `service`, if set), `null` leaves the default
- *  (ask once per job). `service` scopes the rule to one service; `expires_at` ends it. */
+ *  (ask once per job). `service` scopes the rule to one service (REQUIRED with `approve_paid: false`); `expires_at` ends it
+ *  and must be in the future. */
 export interface TeamRule {
   id: string;
   text: string;
@@ -229,9 +234,16 @@ export interface TeamRule {
 /** What you send for a rule: `id` and `created_at` are the server's. A PATCH replaces the whole list. */
 export type TeamRuleInput = Pick<TeamRule, "text"> & Partial<Pick<TeamRule, "id" | "approve_paid" | "service" | "expires_at">>;
 
+/** Button types on first-party rule and approval cards also carry `rule_summary` (multi-line text) and `rule.replaces`.
+ *  Salt WRITES the button's label, `rule_summary` and `service_label` itself on `accept_team_rule` and `dont_ask_again`;
+ *  what a card author sends for them is overwritten, so treat them as read-only. */
+export interface RuleButtonExtras {
+  rule_summary?: string;
+}
+
 /** The first-party rule and approval card taps (0.208.0), as they arrive in a `card_interaction`: `value` is the action
  *  type, `tapped_by_owner: true` is set on the FIRST tap only (honour nothing else), and a Change note is in `values`. */
-export interface RuleCardInteraction {
+export interface RuleCardInteraction extends RuleButtonExtras {
   action_id: string;
   value: "approve_paid_action" | "change_paid_action" | "go_anyway" | "accept_team_rule";
   tapped_by_owner?: true;
@@ -473,7 +485,30 @@ export interface TeamTemplate {
   author: { id: SaltId; username: string; display_name: string; avatar_url: string | null; account_type: string };
   /** Absent from list responses. */
   agents?: TeamAgentRecipe[];
+  /** True while the template is listed and still linked to a team its author owns; then `members` is the live roster. */
+  live?: boolean;
+  members?: TeamTemplateMember[];
   [key: string]: unknown;
+}
+
+/** One member of a listed team's live roster: public profile fields only. */
+export interface TeamTemplateMember {
+  id: SaltId;
+  username: string;
+  display_name: string;
+  role: string | null;
+  lead: boolean;
+  bio: string | null;
+  avatar_url: string | null;
+  character: unknown;
+  face: unknown;
+}
+
+/** The `team` block on an agent's profile: set only for an agent on a listed team, else null. */
+export interface AgentProfileTeam {
+  name: string;
+  lead: { id: SaltId; username: string; display_name: string } | null;
+  slug: string;
 }
 
 export interface ShareTeamParams {
@@ -989,6 +1024,21 @@ export class SaltApiError extends Error {
   }
 }
 
+/** 409 `stale_rules` from `setTeamRules` when you passed a `baseVersion` and the rules changed since. Carries the
+ *  current `rules` and `updatedAt` (use it as the next `baseVersion`): merge your change onto them and send again. */
+export class StaleRulesError extends SaltApiError {
+  rules: TeamRule[];
+  updatedAt: string;
+
+  constructor(method: string, url: string, status: number, body: unknown) {
+    super(method, url, status, body);
+    this.name = "StaleRulesError";
+    const b = (body ?? {}) as { rules?: TeamRule[]; updated_at?: string };
+    this.rules = b.rules ?? [];
+    this.updatedAt = b.updated_at ?? "";
+  }
+}
+
 export const RECIPIENT_CONTACTS_ONLY = "recipient_contacts_only";
 
 /** 403 `recipient_contacts_only`: the recipient only takes messages from their contacts and the caller is
@@ -1410,10 +1460,49 @@ export function createSaltClient(options: SaltClientOptions) {
       return res.groups.find((g) => String(g.id) === String(groupId))?.rules ?? [];
     },
 
-    /** Owner-only: replace the WHOLE list of the team's pinned rules (at most 10, each text at most 200 characters; 422 otherwise). Returns the saved list. */
-    async setTeamRules(apiKey: string, groupId: SaltId, rules: TeamRuleInput[]): Promise<TeamRule[]> {
-      const group = await request<{ rules: TeamRule[] }>("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { rules });
-      return group.rules;
+    /**
+     * Owner-only: replace the WHOLE list of the team's pinned rules (at most 10, each text at most 200 characters; 422 otherwise).
+     * `approve_paid: false` needs a `service`, and `expires_at` must be in the future (both checked here before sending).
+     * Pass `baseVersion` (the group's `updated_at`) to refuse overwriting a change made since you loaded the rules: the
+     * server then answers 409 and this throws `StaleRulesError` carrying the current `rules` and `updatedAt`.
+     * Returns the saved list.
+     */
+    async setTeamRules(apiKey: string, groupId: SaltId, rules: TeamRuleInput[], baseVersion?: string): Promise<TeamRule[]> {
+      for (const r of rules) {
+        if (r.approve_paid === false && !r.service) throw new Error(`Rule "${r.text}": approve_paid false needs a service to apply to.`);
+        if (r.expires_at && Date.parse(r.expires_at) <= Date.now()) throw new Error(`Rule "${r.text}": expires_at must be in the future.`);
+      }
+      const path = `/api/v1/agent_groups/${groupId}`;
+      const body: { rules: TeamRuleInput[]; base_version?: string } = { rules };
+      if (baseVersion) body.base_version = baseVersion;
+      try {
+        const group = await request<{ rules: TeamRule[] }>("PATCH", path, apiKey, body);
+        return group.rules;
+      } catch (err) {
+        if (err instanceof SaltApiError && err.status === 409 && err.code === "stale_rules") {
+          throw new StaleRulesError("PATCH", path, err.status, err.body);
+        }
+        throw err;
+      }
+    },
+
+    /**
+     * Owner-only: publish one of your teams as a shareable template and get its `slug` (`POST /api/v1/team_templates`).
+     * Publishing the same team again refreshes its existing template. `listed` puts it on the Teams shelf.
+     */
+    async publishTeam(apiKey: string, params: { agentGroupId: SaltId; name?: string; description?: string; listed: boolean }): Promise<{ slug: string }> {
+      const t = await request<TeamTemplate>("POST", "/api/v1/team_templates", apiKey, {
+        agent_group_id: params.agentGroupId,
+        name: params.name,
+        description: params.description,
+        listed: params.listed,
+      });
+      return { slug: t.slug };
+    },
+
+    /** Author only: list or unlist a published team template by its slug. */
+    async setTeamListed(apiKey: string, slug: string, listed: boolean): Promise<TeamTemplate> {
+      return request("PATCH", `/api/v1/team_templates/${encodeURIComponent(slug)}`, apiKey, { listed });
     },
 
     /** Owner-only: set a member's job in the team ("Lead"; at most 40 characters, blank clears it). */
