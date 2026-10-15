@@ -172,3 +172,38 @@ test("setTeamRules works through actFor (owner's agent)", async () => {
   await client.actFor("u1").setTeamRules("k", "g1", []);
   assert.strictEqual(fetchImpl.calls[0].headers["X-Salt-Act-For"], "u1");
 });
+
+test("setTeamRules checks approve_paid:false needs a service, and expires_at in the past, before sending", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { ...GROUP, rules: RULES }));
+  await assert.rejects(client.setTeamRules("k", "g1", [{ text: "x", approve_paid: false }]), /needs a service/);
+  await assert.rejects(client.setTeamRules("k", "g1", [{ text: "x", expires_at: "2020-01-01T00:00:00Z" }]), /in the future/);
+  assert.strictEqual(fetchImpl.calls.length, 0);
+  await client.setTeamRules("k", "g1", [{ text: "x", approve_paid: false, service: "Acme" }]);
+  assert.strictEqual(fetchImpl.calls.length, 1);
+});
+
+test("setTeamRules sends base_version and a 409 stale_rules becomes StaleRulesError", async () => {
+  const stale = { error: "stale", code: "stale_rules", updated_at: "2026-10-15T01:00:00.000000Z", rules: RULES };
+  const { fetchImpl, client } = clientWith(() => jsonResponse(409, stale));
+  await assert.rejects(client.setTeamRules("k", "g1", [], "2026-10-15T00:00:00.000000Z"), (err) => {
+    assert.ok(err instanceof sdk.StaleRulesError && err instanceof sdk.SaltApiError);
+    assert.deepStrictEqual(err.rules, RULES);
+    assert.strictEqual(err.updatedAt, stale.updated_at);
+    return true;
+  });
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].body), { rules: [], base_version: "2026-10-15T00:00:00.000000Z" });
+  const other = clientWith(() => jsonResponse(409, { error: "nope" }));
+  await assert.rejects(other.client.setTeamRules("k", "g1", []), (err) => err instanceof sdk.SaltApiError && !(err instanceof sdk.StaleRulesError));
+});
+
+test("publishTeam POSTs the template and returns the slug; setTeamListed PATCHes by slug", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { id: "t1", slug: "driftlight", listed: true }));
+  assert.deepStrictEqual(await client.publishTeam("k", { agentGroupId: "g1", listed: true }), { slug: "driftlight" });
+  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/team_templates");
+  assert.strictEqual(fetchImpl.calls[0].method, "POST");
+  assert.strictEqual(JSON.parse(fetchImpl.calls[0].body).agent_group_id, "g1");
+  await client.setTeamListed("k", "driftlight", false);
+  assert.strictEqual(fetchImpl.calls[1].url, "https://salt.test/api/v1/team_templates/driftlight");
+  assert.strictEqual(fetchImpl.calls[1].method, "PATCH");
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[1].body), { listed: false });
+});
