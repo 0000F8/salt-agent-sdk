@@ -146,14 +146,14 @@ test("setTeamLead with an agent the owner does not own rejects with the server's
   await assert.rejects(client.setTeamLead("k", "g1", "outsider"), (err) => err instanceof sdk.SaltApiError && err.status === 422);
 });
 
-const RULES = [{ id: "r1", text: "Ask before spending", approve_paid: true, created_at: "2026-10-15T00:00:00Z" }];
+const RULES = [{ id: "r1", text: "Ask before spending", approve_paid: true, service: null, created_at: "2026-10-15T00:00:00Z", expires_at: null }];
 
-test("getTeamRules GETs the group and returns its rules ([] when absent)", async () => {
-  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { ...GROUP, rules: RULES }));
+test("getTeamRules lists the groups and returns the matching group's rules ([] when absent)", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { groups: [{ ...GROUP, id: "g0", rules: [] }, { ...GROUP, rules: RULES }] }));
   assert.deepStrictEqual(await client.getTeamRules("k", "g1"), RULES);
-  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/agent_groups/g1");
+  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/agent_groups");
   assert.strictEqual(fetchImpl.calls[0].method, "GET");
-  const bare = clientWith(() => jsonResponse(200, GROUP));
+  const bare = clientWith(() => jsonResponse(200, { groups: [GROUP] }));
   assert.deepStrictEqual(await bare.client.getTeamRules("k", "g1"), []);
 });
 
