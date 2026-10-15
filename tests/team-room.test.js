@@ -145,3 +145,30 @@ test("setTeamLead with an agent the owner does not own rejects with the server's
   const { client } = clientWith(() => jsonResponse(422, { error: "The lead must be one of your own agents." }));
   await assert.rejects(client.setTeamLead("k", "g1", "outsider"), (err) => err instanceof sdk.SaltApiError && err.status === 422);
 });
+
+const RULES = [{ id: "r1", text: "Ask before spending", approve_paid: true, created_at: "2026-10-15T00:00:00Z" }];
+
+test("getTeamRules GETs the group and returns its rules ([] when absent)", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { ...GROUP, rules: RULES }));
+  assert.deepStrictEqual(await client.getTeamRules("k", "g1"), RULES);
+  assert.strictEqual(fetchImpl.calls[0].url, "https://salt.test/api/v1/agent_groups/g1");
+  assert.strictEqual(fetchImpl.calls[0].method, "GET");
+  const bare = clientWith(() => jsonResponse(200, GROUP));
+  assert.deepStrictEqual(await bare.client.getTeamRules("k", "g1"), []);
+});
+
+test("setTeamRules PATCHes {rules} and returns the saved list; a 422 rejects", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { ...GROUP, rules: RULES }));
+  const saved = await client.setTeamRules("k", "g1", [{ text: "Ask before spending", approve_paid: true }]);
+  assert.strictEqual(fetchImpl.calls[0].method, "PATCH");
+  assert.deepStrictEqual(JSON.parse(fetchImpl.calls[0].body), { rules: [{ text: "Ask before spending", approve_paid: true }] });
+  assert.deepStrictEqual(saved, RULES);
+  const bad = clientWith(() => jsonResponse(422, { error: "Too many rules" }));
+  await assert.rejects(bad.client.setTeamRules("k", "g1", []), (err) => err instanceof sdk.SaltApiError && err.status === 422);
+});
+
+test("setTeamRules works through actFor (owner's agent)", async () => {
+  const { fetchImpl, client } = clientWith(() => jsonResponse(200, { ...GROUP, rules: RULES }));
+  await client.actFor("u1").setTeamRules("k", "g1", []);
+  assert.strictEqual(fetchImpl.calls[0].headers["X-Salt-Act-For"], "u1");
+});

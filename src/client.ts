@@ -209,8 +209,34 @@ export interface MyTeam {
   owner_id: SaltId;
   /** The group's direct owner, who may be an agent. When it is the caller's own owner or the caller itself, see AGENTS.md "Teams". */
   group_owner_id: SaltId;
+  /** The owner's pinned team rules (0.208.0). Honour every one on every team-room turn. */
+  rules: TeamRule[];
   members: TeamMember[];
 }
+
+/** One pinned team rule (0.208.0): at most 10 per team, `text` at most 200 characters. `approve_paid: true` means
+ *  "ask the owner before every paid service write", not just the first one per job. */
+export interface TeamRule {
+  id: string;
+  text: string;
+  approve_paid: boolean;
+  created_at?: string;
+}
+
+/** What you send for a rule: `id` and `created_at` are the server's to assign. */
+export type TeamRuleInput = Pick<TeamRule, "text"> & Partial<Pick<TeamRule, "id" | "approve_paid">>;
+
+/** The `value`/button action_ids of the first-party rule and approval cards (0.208.0). Salt applies the owner-only
+ *  ones itself on the tap; the card_interaction event tells an agent what happened. */
+export type RuleCardAction =
+  /** Owner approved ONE paid service write; run exactly that call once. */
+  | { action_id: "approve_paid_action"; tapped_by_owner: true }
+  /** Owner wants changes; `values.note` carries their words. Do not run the call. */
+  | { action_id: "change_paid_action"; values?: Record<string, string> }
+  /** Owner overrode a gap check; counts as the approval for that one job. Only honour it when `tapped_by_owner`. */
+  | { action_id: "go_anyway"; tapped_by_owner: boolean }
+  /** Owner saved a proposed team rule (Salt writes it; the agent never does). */
+  | { action_id: "accept_team_rule"; tapped_by_owner: boolean };
 
 export type TeamDraftStep = "team" | "personality" | "authority";
 
@@ -1370,6 +1396,18 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Owner-only: make one member the team's lead (the arbiter of its room), or pass null for no lead. The lead must be a member the owner owns (422). */
     async setTeamLead(apiKey: string, groupId: SaltId, leadAgentId: SaltId | null): Promise<TeamGroup> {
       return request("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { lead_agent_id: leadAgentId });
+    },
+
+    /** Owner-only: the team's pinned rules (`GET /api/v1/agent_groups/:id`, `rules`). A team agent reads them with `myTeams` instead. */
+    async getTeamRules(apiKey: string, groupId: SaltId): Promise<TeamRule[]> {
+      const group = await request<{ rules?: TeamRule[] }>("GET", `/api/v1/agent_groups/${groupId}`, apiKey);
+      return group.rules ?? [];
+    },
+
+    /** Owner-only: replace the team's pinned rules (at most 10, each text at most 200 characters; 422 otherwise). Returns the saved list. */
+    async setTeamRules(apiKey: string, groupId: SaltId, rules: TeamRuleInput[]): Promise<TeamRule[]> {
+      const group = await request<{ rules: TeamRule[] }>("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { rules });
+      return group.rules;
     },
 
     /** Owner-only: set a member's job in the team ("Showrunner"; at most 40 characters, blank clears it). */
