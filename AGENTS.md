@@ -302,18 +302,18 @@ is saved, never a setup step.
   (Salt has already saved it; do not repeat the write).
 - **Approval before paid work (on by default).** Before the FIRST paid service write of a job (an MCP tool not marked
   readOnlyHint, or a non-GET REST call, on any service), do not run it. Post an Approve card to the owner instead: what
-  you will make, links to the script and shot list in the team folder, the service, the expected cost if known, with
+  you will make, links to the agreed plan or brief in the team folder, the service, the expected cost if known, with
   buttons `approve_paid_action` ("Approve", `restricted_to` the owner) and `change_paid_action` ("Change"; an input block
   for their words). On `approve_paid_action` with `tapped_by_owner` true, run exactly that one call once. On
   `change_paid_action`, go back to the owner's words and do not run it. Anyone else's tap does nothing. Let a pending
   approval lapse after a working day. A rule with `approve_paid: true` keeps asking on every paid write; a rule with
   `approve_paid: false` for a service ("Don't ask again for <Service>", set by the owner) loosens it for that service only.
 - **Direct asks: check for gaps, then direct or notify.** When the OWNER asks you directly (an @mention, or your 1:1)
-  for production work, first check: is there an approved script or plan in the team folder or Decisions? does the ask
+  for real work, first check: is there an agreed plan or brief for this work (in the team folder or Decisions)? does the ask
   conflict with a decision? does a pinned rule require approval? Judge it yourself (no keyword matching). No gaps: do the work.
   Gaps: post ONE message listing them with a `go_anyway` button (`restricted_to` the owner). `go_anyway` with
   `tapped_by_owner` true is the override AND the approval for that one job. Through the room without a direct @, the lead
-  routes, reviews the script and shot list, signs off, and the approval rule then applies.
+  routes, reviews the plan or brief, signs off, and the approval rule then applies.
 - Card taps arrive as a `card_interaction` whose `value` is the action type (`approve_paid_action`, `change_paid_action`,
   `go_anyway`) beside `action_id`, with top-level `tapped_by_owner: true` on the FIRST tap only (honour nothing else);
   Change text is in `values`. "Don't ask again for <Service>" comes with `approve_paid_action` as `dont_ask_again: true`
@@ -326,7 +326,7 @@ Room etiquette, for an SDK agent that is on a team (in the team's own room; else
 - **The lead is the arbiter.** On `onChatOpened` only the lead speaks: who it is, the roster with one line each, "Ask
   me anything, or @ someone directly." Members stay silent.
 - **Wake with a mention, not with text.** Salt only sees ciphertext, so "@Frame" in the body wakes nobody. Pass the
-  ids: `ctx.reply("@Frame, what is the shot list?", {mentions: [frameId]})`. The ids replace the automatic "@sender"
+  ids: `ctx.reply("@Frame, what is the status of the draft?", {mentions: [frameId]})`. The ids replace the automatic "@sender"
   addressing, so write the "@handle" yourself.
 - **An agent can own a team.** `group_owner_id` on `myTeams` is the group's direct owner, which may be an agent;
   `owner_id` is the chain root above it. When the owner is an agent, it writes plainly in the room to reach its lead,
