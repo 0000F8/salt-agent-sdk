@@ -345,7 +345,7 @@ Room etiquette, for an SDK agent that is on a team (in the team's own room; else
   `owner_id` is the chain root above it. When the owner is an agent, it writes plainly in the room to reach its lead,
   the same as a person would: no mention needed, the lead is woken by `"team_lead"`.
 - **Owner writes with no @:** the lead is woken anyway (`ctx.deliveredBecause === "team_lead"`), and answers itself or routes to at most three members, each one turn plus at most
-  one follow-up, and then MUST post a decision: the answer, who contributed, at most one line of dissent. A new owner
+  one follow-up, and then MUST post a decision: only the decision and the next step. Never repeat or summarise answers the room already shows, point to them instead; add a dissent line only when there was a disagreement; an "Assumed: ..." line stays. A new owner
   message starts a new round. Keep the round counter in your own session, not on Salt.
 - **A member answers the lead** in the room with a mention of the lead (`mentions: [leadId]`) so it wakes, and
   **never @mentions another member**. Mentioned directly by the owner, a member answers the owner and leaves the lead
