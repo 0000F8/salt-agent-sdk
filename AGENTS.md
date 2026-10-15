@@ -292,10 +292,10 @@ A rule is a preference pinned to memory: shown to you on every turn, never misse
 remove. Defaults come first: a team works with zero setup, and the Rules list is where the owner SEES and removes what
 is saved, never a setup step.
 
-- **Read them.** `client.myTeams(...)` carries `rules` on each team: `[{id, text, approve_paid}]`, at most 10, each text at
+- **Read them.** `client.myTeams(...)` carries `rules` on each team: `[{id, text, approve_paid (true/false/null), service, expires_at}]`, at most 10, each text at
   most 200 characters. Refresh with the roster. Treat them as the owner's standing instructions on every turn in that
   team's room (quote none of them back as your own idea). The owner reads and replaces them with `client.getTeamRules(apiKey, groupId)` and
-  `client.setTeamRules(apiKey, groupId, rules)` (`PATCH /api/v1/agent_groups/:id {rules}`, owner only, 422 past the limits; send `{text, approve_paid}`, ids are the server's;
+  `client.setTeamRules(apiKey, groupId, rules)` (read from `GET /api/v1/agent_groups`, write with `PATCH /api/v1/agent_groups/:id {rules}`, which REPLACES the whole list; owner only, 422 past the limits; send `{text, approve_paid, service?, expires_at?}`, ids are the server's;
   works through `act_for` too). A 1:1 agent's own saved directives are its pinned rules, and they also apply in the owner's own team room.
 - **Never write a rule yourself.** Propose it: the lead posts a card "Save this as a team rule?" with Save / Not now.
   The tap is verified by Salt to be the group owner's; you hear it as a `card_interaction` with action_id `accept_team_rule`
@@ -314,8 +314,12 @@ is saved, never a setup step.
   Gaps: post ONE message listing them with a `go_anyway` button (`restricted_to` the owner). `go_anyway` with
   `tapped_by_owner` true is the override AND the approval for that one job. Through the room without a direct @, the lead
   routes, reviews the script and shot list, signs off, and the approval rule then applies.
-- Card tap shapes you receive: `approve_paid_action`, `change_paid_action`, `go_anyway` (each with `tapped_by_owner`),
-  `accept_team_rule`. The SDK type is `RuleCardAction` (TypeScript); in Python they are plain `card_interaction` dicts.
+- Card taps arrive as a `card_interaction` whose `value` is the action type (`approve_paid_action`, `change_paid_action`,
+  `go_anyway`) beside `action_id`, with top-level `tapped_by_owner: true` on the FIRST tap only (honour nothing else);
+  Change text is in `values`. "Don't ask again for <Service>" comes with `approve_paid_action` as `dont_ask_again: true`
+  plus `service` and `service_label`: it ALSO approves the current job, and Salt pins the rule. `accept_team_rule`
+  carries `rule {text, approve_paid?, service?, expires_at?, replaces: [{id, text}]}`; Salt has already saved it.
+  The SDK type is `RuleCardInteraction` (TypeScript); in Python these are plain dicts.
 
 Room etiquette, for an SDK agent that is on a team (in the team's own room; elsewhere you behave as always):
 

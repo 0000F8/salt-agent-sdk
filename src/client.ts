@@ -215,28 +215,34 @@ export interface MyTeam {
 }
 
 /** One pinned team rule (0.208.0): at most 10 per team, `text` at most 200 characters. `approve_paid: true` means
- *  "ask the owner before every paid service write", not just the first one per job. */
+ *  "ask the owner before every paid service write", `false` means "do not ask" (for `service`, if set), `null` leaves the default
+ *  (ask once per job). `service` scopes the rule to one service; `expires_at` ends it. */
 export interface TeamRule {
   id: string;
   text: string;
-  approve_paid: boolean;
-  created_at?: string;
+  approve_paid: boolean | null;
+  service: string | null;
+  created_at: string;
+  expires_at: string | null;
 }
 
-/** What you send for a rule: `id` and `created_at` are the server's to assign. */
-export type TeamRuleInput = Pick<TeamRule, "text"> & Partial<Pick<TeamRule, "id" | "approve_paid">>;
+/** What you send for a rule: `id` and `created_at` are the server's. A PATCH replaces the whole list. */
+export type TeamRuleInput = Pick<TeamRule, "text"> & Partial<Pick<TeamRule, "id" | "approve_paid" | "service" | "expires_at">>;
 
-/** The `value`/button action_ids of the first-party rule and approval cards (0.208.0). Salt applies the owner-only
- *  ones itself on the tap; the card_interaction event tells an agent what happened. */
-export type RuleCardAction =
-  /** Owner approved ONE paid service write; run exactly that call once. */
-  | { action_id: "approve_paid_action"; tapped_by_owner: true }
-  /** Owner wants changes; `values.note` carries their words. Do not run the call. */
-  | { action_id: "change_paid_action"; values?: Record<string, string> }
-  /** Owner overrode a gap check; counts as the approval for that one job. Only honour it when `tapped_by_owner`. */
-  | { action_id: "go_anyway"; tapped_by_owner: boolean }
-  /** Owner saved a proposed team rule (Salt writes it; the agent never does). */
-  | { action_id: "accept_team_rule"; tapped_by_owner: boolean };
+/** The first-party rule and approval card taps (0.208.0), as they arrive in a `card_interaction`: `value` is the action
+ *  type, `tapped_by_owner: true` is set on the FIRST tap only (honour nothing else), and a Change note is in `values`. */
+export interface RuleCardInteraction {
+  action_id: string;
+  value: "approve_paid_action" | "change_paid_action" | "go_anyway" | "accept_team_rule";
+  tapped_by_owner?: true;
+  values?: Record<string, string>;
+  /** approve_paid_action only: "Don't ask again for <Service>" was ticked. It also approves the current job. */
+  dont_ask_again?: boolean;
+  service?: string;
+  service_label?: string;
+  /** accept_team_rule only. Salt has already saved it. */
+  rule?: { text: string; approve_paid?: boolean | null; service?: string; expires_at?: string; replaces?: { id: string; text: string }[] };
+}
 
 export type TeamDraftStep = "team" | "personality" | "authority";
 
@@ -1398,13 +1404,13 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { lead_agent_id: leadAgentId });
     },
 
-    /** Owner-only: the team's pinned rules (`GET /api/v1/agent_groups/:id`, `rules`). A team agent reads them with `myTeams` instead. */
+    /** Owner-only: the team's pinned rules (from `GET /api/v1/agent_groups`, the group with this id). A team agent reads them with `myTeams` instead. */
     async getTeamRules(apiKey: string, groupId: SaltId): Promise<TeamRule[]> {
-      const group = await request<{ rules?: TeamRule[] }>("GET", `/api/v1/agent_groups/${groupId}`, apiKey);
-      return group.rules ?? [];
+      const res = await request<{ groups: { id: SaltId; rules?: TeamRule[] }[] }>("GET", "/api/v1/agent_groups", apiKey);
+      return res.groups.find((g) => String(g.id) === String(groupId))?.rules ?? [];
     },
 
-    /** Owner-only: replace the team's pinned rules (at most 10, each text at most 200 characters; 422 otherwise). Returns the saved list. */
+    /** Owner-only: replace the WHOLE list of the team's pinned rules (at most 10, each text at most 200 characters; 422 otherwise). Returns the saved list. */
     async setTeamRules(apiKey: string, groupId: SaltId, rules: TeamRuleInput[]): Promise<TeamRule[]> {
       const group = await request<{ rules: TeamRule[] }>("PATCH", `/api/v1/agent_groups/${groupId}`, apiKey, { rules });
       return group.rules;
