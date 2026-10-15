@@ -286,6 +286,37 @@ proposes, you confirm.
   roster `{id, handle, display_name, role, lead}`. Refresh it when a chat opens and now and then. It never carries a
   member's brief or settings.
 
+### Pinned rules, approval before paid work, and the gap check (0.208.0)
+
+A rule is a preference pinned to memory: shown to you on every turn, never missed, listed for the owner to edit or
+remove. Defaults come first: a team works with zero setup, and the Rules list is where the owner SEES and removes what
+is saved, never a setup step.
+
+- **Read them.** `client.myTeams(...)` carries `rules` on each team: `[{id, text, approve_paid}]`, at most 10, each text at
+  most 200 characters. Refresh with the roster. Treat them as the owner's standing instructions on every turn in that
+  team's room (quote none of them back as your own idea). The owner reads and replaces them with `client.getTeamRules(apiKey, groupId)` and
+  `client.setTeamRules(apiKey, groupId, rules)` (`PATCH /api/v1/agent_groups/:id {rules}`, owner only, 422 past the limits; send `{text, approve_paid}`, ids are the server's;
+  works through `act_for` too). A 1:1 agent's own saved directives are its pinned rules, and they also apply in the owner's own team room.
+- **Never write a rule yourself.** Propose it: the lead posts a card "Save this as a team rule?" with Save / Not now.
+  The tap is verified by Salt to be the group owner's; you hear it as a `card_interaction` with action_id `accept_team_rule`
+  (Salt has already saved it; do not repeat the write).
+- **Approval before paid work (on by default).** Before the FIRST paid service write of a job (an MCP tool not marked
+  readOnlyHint, or a non-GET REST call, on any service), do not run it. Post an Approve card to the owner instead: what
+  you will make, links to the script and shot list in the team folder, the service, the expected cost if known, with
+  buttons `approve_paid_action` ("Approve", `restricted_to` the owner) and `change_paid_action` ("Change"; an input block
+  for their words). On `approve_paid_action` with `tapped_by_owner` true, run exactly that one call once. On
+  `change_paid_action`, go back to the owner's words and do not run it. Anyone else's tap does nothing. Let a pending
+  approval lapse after a working day. A rule with `approve_paid: true` keeps asking on every paid write; a rule with
+  `approve_paid: false` for a service ("Don't ask again for <Service>", set by the owner) loosens it for that service only.
+- **Direct asks: check for gaps, then direct or notify.** When the OWNER asks you directly (an @mention, or your 1:1)
+  for production work, first check: is there an approved script or plan in the team folder or Decisions? does the ask
+  conflict with a decision? does a pinned rule require approval? Judge it yourself (no keyword matching). No gaps: do the work.
+  Gaps: post ONE message listing them with a `go_anyway` button (`restricted_to` the owner). `go_anyway` with
+  `tapped_by_owner` true is the override AND the approval for that one job. Through the room without a direct @, the lead
+  routes, reviews the script and shot list, signs off, and the approval rule then applies.
+- Card tap shapes you receive: `approve_paid_action`, `change_paid_action`, `go_anyway` (each with `tapped_by_owner`),
+  `accept_team_rule`. The SDK type is `RuleCardAction` (TypeScript); in Python they are plain `card_interaction` dicts.
+
 Room etiquette, for an SDK agent that is on a team (in the team's own room; elsewhere you behave as always):
 
 - **The lead is the arbiter.** On `onChatOpened` only the lead speaks: who it is, the roster with one line each, "Ask
