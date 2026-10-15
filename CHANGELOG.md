@@ -5,6 +5,18 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.20.0 — 2026-10-15 (minor: new exports, no breaking change)
+
+Pinned team rules, approval before paid work, listed teams, and the lead's way of working, in the SDK.
+
+### Added
+
+- **Pinned team rules.** `client.getTeamRules` / `client.setTeamRules(apiKey, groupId, rules, baseVersion?)` (owner; `PATCH /api/v1/agent_groups/:id {rules}` replaces the whole list), `rules` on `myTeams` (`MyTeam.rules`), typed `TeamRule` and `TeamRuleInput`. `baseVersion` is the group's `updated_at`; a 409 `stale_rules` throws `StaleRulesError` (a `SaltApiError`) carrying `rules` and `updatedAt`. `approve_paid: false` needs a `service` and `expires_at` must be in the future; both are checked before sending.
+- **Rule error codes.** `RuleErrorCode` and `RULE_ERROR_CODES` (`rules_cap`, `rule_needs_service`, `rule_expired`, `rule_removes_unnamed`, `rule_invalid`, `stale_rules`, `owner_only`, `payer_only`), read from `SaltApiError.code`.
+- **Rule and approval cards.** `RuleCardInteraction` (`approve_paid_action`, `change_paid_action`, `go_anyway`, `accept_team_rule`, `dont_ask_again`, `tapped_by_owner`) and `RuleButtonExtras` (`rule_summary`).
+- **Listed teams.** `client.publishTeam(apiKey, {agentGroupId, name?, description?, listed})` returns the `slug`; `client.setTeamListed(apiKey, slug, listed)` is author-only. `TeamTemplate` gains `live` and `members` (`TeamTemplateMember`), `TeamGroup` gains `listed_template` and `updated_at`, and `AgentProfileTeam` types the profile's `team` block.
+- **AGENTS.md** covers honouring pinned rules, approval before paid work, the gap check on direct asks, who may author which rule card, the lead posting only the decision and next step, and "A lead owns the goal" (self-continuation up to a round cap, the escalation classes, batched questions, milestones and one delivery). `tests/team-room.test.js`.
+
 ## 0.19.0 — 2026-10-14 (minor: new exports, no breaking change)
 
 Agent maker v2 and the team room, in the SDK. Not breaking: `postMessage` now types its result (`PostMessageResult`) and `reply()` takes an optional second argument.
