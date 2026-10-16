@@ -227,7 +227,8 @@ test("postStill enforces 2 s between stills and 30 a minute", async () => {
 });
 
 test("postStill stops at 30 in any minute when the gap is shorter", async () => {
-  const { host, clock } = setup({ options: { stillMinIntervalMs: 100 } });
+  // People-only stills (the agent is not granted observe), so the per-second observe cap does not apply.
+  const { host, clock } = setup({ snapshotExtra: { caps: {} }, options: { stillMinIntervalMs: 100, peopleReaderKeys: () => ["PERSON"] } });
   host.handleDelivery("help_request_viewing", { help_request: helpReq() });
   let posted = 0;
   for (let i = 0; i < 40; i++) {
@@ -344,4 +345,56 @@ test("an automatic resume leaves a phone pause; only a local resume clears it, a
   await host.resume({ local: true });
   assert.equal(host.pausedReason(), null);
   assert.deepEqual(calls.filter((c) => c[0] === "resume"), [["resume", { local: true }]]);
+});
+
+test("a still the agent receives costs one observe against the budget; at the cap it is refused 'budget'", async () => {
+  const counts = [];
+  const stops = [];
+  const { host, clock } = setup({
+    snapshotExtra: { budget: { maxActions: 2 } },
+    callbacks: {},
+  });
+  host.handleDelivery("help_request_viewing", { help_request: helpReq() });
+  assert.equal(host.actionsSpent(), 0);
+  assert.equal((await host.postStill(still())).posted, true);
+  assert.equal(host.actionsSpent(), 1);
+  clock.t += 2_000;
+  assert.equal((await host.postStill(still())).posted, true);
+  assert.equal(host.actionsSpent(), 2);
+  clock.t += 2_000;
+  assert.deepEqual(await host.postStill(still()), { posted: false, reason: "budget" });
+  void counts; void stops;
+});
+
+test("a people-only still (agent not granted) never touches the budget", async () => {
+  const { host, clock } = setup({
+    snapshotExtra: { caps: {}, budget: { maxActions: 1 } },
+    options: { peopleReaderKeys: () => ["PERSON"] },
+  });
+  host.handleDelivery("help_request_viewing", { help_request: helpReq() });
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await host.postStill(still())).posted, true);
+    clock.t += 2_000;
+  }
+  assert.equal(host.actionsSpent(), 0);
+});
+
+test("a still counts as an observe in the report to Salt", async () => {
+  const reported = [];
+  const tx = { async postResult() {}, async beat() {}, async reportCounts(_s, c) { reported.push(c); }, async stop() {} };
+  const host = sdk.createDeviceHost({ sessionId: "sess-1", agentId: "ag", readers: READERS, caps: { "device.observe": { mode: "notify" } }, budget: { maxActions: 5 } }, {}, tx, {}, { now: () => 5_000_000 });
+  host.handleDelivery("help_request_viewing", { help_request: helpReq() });
+  assert.equal((await host.postStill(still())).posted, true);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(reported[0], { observe: 1 });
+});
+
+test("the per-second observe cap holds for stills the agent receives", async () => {
+  const { host, clock } = setup({ options: { stillMinIntervalMs: 0 } });
+  host.handleDelivery("help_request_viewing", { help_request: helpReq() });
+  assert.equal((await host.postStill(still())).posted, true);
+  clock.t += 500;
+  assert.deepEqual(await host.postStill(still()), { posted: false, reason: "too_soon" });
+  clock.t += 500;
+  assert.equal((await host.postStill(still())).posted, true);
 });
