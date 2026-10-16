@@ -248,7 +248,7 @@ export interface DeviceHostTransport {
    *  endpoint's shape lives is httpDeviceHostTransport (http.ts). */
   pause?(sessionId: SaltId, reason: DevicePauseReason): Promise<void>;
   /** POST /device_sessions/:sid/resume (device key). */
-  resume?(sessionId: SaltId): Promise<void>;
+  resume?(sessionId: SaltId, opts?: { local?: boolean }): Promise<void>;
 }
 
 /** The optional body of a beat: when the device last executed a command
@@ -372,7 +372,7 @@ export interface DeviceHost {
    *  interrupt a command already executing. */
   pause(reason: DevicePauseReason): Promise<void>;
   /** Clear the pause and tell Salt. No-op when not paused. */
-  resume(): Promise<void>;
+  resume(opts?: { local?: boolean }): Promise<void>;
   /** The current pause reason, or null. */
   pausedReason(): DevicePauseReason | null;
   /** Show Me: feed a lane message in together with WHO sent it (the decrypted text and the sender's
@@ -382,8 +382,8 @@ export interface DeviceHost {
    *  `options.isWatchLive()`), and once per point id; the answer is a `pointed` op with `re` = the
    *  point id. Every refusal is one audit line (op `point`) and no reply. */
   handleLaneMessage(plaintext: string, senderId: SaltId): Promise<boolean>;
-  /** Also takes `device_session_paused` / `device_session_resumed` for this session (a person pausing from
-   *  their phone, reason "person"): the host pauses or resumes itself, like a stop reaches it. */
+  /** Also takes `device_session_paused {reason:"phone"}` / `device_session_resumed` for this session (a person
+   *  pausing from their phone): the host pauses or resumes the PHONE pause itself, never a local guard. */
   /** Show Me: feed a `help_request_opened|viewing|closed` delivery in (the `onDeviceDelivery` type
    *  and body). Returns true when it was one of those for THIS session and the matching callback
    *  ran. */
@@ -393,7 +393,7 @@ export interface DeviceHost {
    *  `too_many` (30 in the last minute), `no_help` (no help request open for that id and no live
    *  watch), `secure_field` (the session is paused for a secure field), `ended`. Throws
    *  `bad_args` for a malformed body and `too_large` over the per-message cap. */
-  postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "secure_field" | "ended" }>;
+  postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "paused" | "not_viewed" | "not_granted" | "ended" }>;
   /** The help request ids currently open on this session. */
   openHelpIds(): string[];
 }
@@ -422,6 +422,10 @@ export function createDeviceHost(
     /** Show Me: is a live watch call on this device right now? While it is, a point is accepted
      *  without an open help request. Default: never. */
     isWatchLive?: () => boolean;
+    /** Show Me: armored public keys of the people over the device (owner, root, this session's grantor).
+     *  Used when the grant lacks `device.observe` in auto or notify mode: a still is then encrypted for
+     *  these keys ONLY, never the agent's. Absent or empty in that case, stills are refused `not_granted`. */
+    peopleReaderKeys?: () => string[];
     /** Least gap between two stills (default STILL_MIN_INTERVAL_MS, 2 s). For tests: the 30-a-minute
      *  cap can only be reached below the default gap. */
     stillMinIntervalMs?: number;
@@ -438,7 +442,17 @@ export function createDeviceHost(
   // Newest command this host actually executed (for lease reports).
   let lastRanAt: string | null = null;
   let lastRanSeq: number | null = null;
+  // The effective pause reason is a LOCAL guard pause (person_active, secure_field, person, ...) if one
+  // holds, else "phone" while the person has paused from their phone. The two are tracked apart: a
+  // phone resume never clears a local guard, and the machine's own idle resume never clears the phone.
+  let localPause: DevicePauseReason | null = null;
+  let phonePause = false;
   let pausedReason: DevicePauseReason | null = null;
+  // Salt still holds a phone pause that the person at this machine released; told on the next sync.
+  let serverPhoneToClear = false;
+  const recomputePause = (): void => {
+    pausedReason = localPause ?? (phonePause ? "phone" : null);
+  };
   // One command at a time per session: every command runs behind this tail.
   let tail: Promise<unknown> = Promise.resolve();
   // Ids received and not yet started / ids a `cancel` asked us to drop.
@@ -1111,6 +1125,7 @@ export function createDeviceHost(
     beatTimer = durationTimer = null;
     for (const ac of runningTasks.values()) ac.abort("session_ended");
     openHelp.clear();
+    viewedHelp.clear();
     audit({ commandId: "-", op: "stop", decision: "ended", reason });
     callbacks.onEnded?.(reason);
     try {
@@ -1122,13 +1137,25 @@ export function createDeviceHost(
 
   /** Make Salt's picture of our pause state match ours. Salt only accepts a
    *  pause from `active`, so a reason CHANGE is resume-then-pause. A failed
-   *  report is retried on the next beat (the local pause stands meanwhile). */
+   *  report is retried on the next beat (the local pause stands meanwhile).
+   *  Only LOCAL reasons are reported; a phone pause is Salt's own, and while it holds Salt keeps
+   *  its reason whatever we report. */
   function syncPause(): Promise<void> {
     pauseSync = pauseSync.then(async () => {
       if (ended) return;
-      const want = pausedReason;
-      if (reportedPause === want) return;
       try {
+        if (serverPhoneToClear) {
+          // The person pressed Resume at this machine: the one resume Salt accepts for a phone pause.
+          await transport.resume?.(snapshot.sessionId, { local: true });
+          serverPhoneToClear = false;
+          reportedPause = null;
+        }
+        const want = localPause;
+        if (phonePause) {
+          reportedPause = want;
+          return;
+        }
+        if (reportedPause === want) return;
         if (reportedPause !== null) {
           await transport.resume?.(snapshot.sessionId);
           reportedPause = null;
@@ -1146,18 +1173,32 @@ export function createDeviceHost(
 
   async function pause(reason: DevicePauseReason): Promise<void> {
     if (ended) return;
-    const changed = pausedReason !== reason;
-    pausedReason = reason;
+    if (reason === "phone") {
+      // Not a local guard: only the phone delivery path sets it.
+      return;
+    }
+    const changed = localPause !== reason;
+    localPause = reason;
+    recomputePause();
     audit({ commandId: "-", op: "pause", decision: "refused", reason });
     if (!changed) return;
     await syncPause();
   }
 
-  async function resume(): Promise<void> {
-    if (ended || pausedReason === null) return;
-    pausedReason = null;
+  /** Clear the local pause. A phone pause is cleared only by `{local: true}`: the person pressed
+   *  Resume at the machine. An automatic resume (the idle timer, the end of a secure field) leaves it. */
+  async function resume(opts: { local?: boolean } = {}): Promise<void> {
+    if (ended) return;
+    const clearPhone = opts.local === true && phonePause;
+    if (localPause === null && !clearPhone) return;
+    localPause = null;
+    if (clearPhone) {
+      phonePause = false;
+      serverPhoneToClear = true;
+    }
+    recomputePause();
     audit({ commandId: "-", op: "resume", decision: "ran" });
-    for (const release of [...resumeWaiters]) release();
+    if (pausedReason === null) for (const release of [...resumeWaiters]) release();
     await syncPause();
   }
 
@@ -1165,6 +1206,8 @@ export function createDeviceHost(
   // Help requests open on THIS session, by id. A point is acted on only while its help id is here
   // (or a watch is live).
   const openHelp = new Map<string, HelpRequest>();
+  // Help requests the person has tapped (help_request_viewing). Stills start only then.
+  const viewedHelp = new Set<string>();
   // Point ids already answered, oldest dropped: a replayed or re-delivered point is answered once.
   const seenPoints = new Set<string>();
   const SEEN_POINTS_CAP = 256;
@@ -1182,20 +1225,28 @@ export function createDeviceHost(
   }
 
   // A person pausing or resuming from their phone reaches the device as a server delivery for THIS
-  // session (`device_session_paused` / `device_session_resumed`, reason "person"). Only the person's
-  // own pause is taken from the wire; the device's reasons (person_active, secure_field) stay local,
-  // and a resume only clears a person pause.
+  // session: `device_session_paused {session_id, reason:"phone"}` and `device_session_resumed {session_id}`.
+  // Only the phone's own reason is taken from the wire. A phone pause never replaces a local guard
+  // (it waits underneath it), and a resume clears only the phone pause, never a local guard.
   function handleSessionPauseDelivery(type: string, body: unknown): boolean {
     const b = (body ?? {}) as { session_id?: unknown; id?: unknown; session?: { id?: unknown }; reason?: unknown; pause_reason?: unknown };
     const sid = b.session_id ?? b.session?.id ?? b.id;
     if (sid == null || !sameId(sid, snapshot.sessionId)) return false;
     if (type === "device_session_paused") {
-      const reason = b.reason ?? b.pause_reason ?? "person";
-      if (reason !== "person") return false;
-      void pause("person");
+      if ((b.reason ?? b.pause_reason) !== "phone") return false;
+      phonePause = true;
+      serverPhoneToClear = false;
+      recomputePause();
+      audit({ commandId: "-", op: "pause", decision: "refused", reason: "phone" });
       return true;
     }
-    if (pausedReason === "person") void resume();
+    if (!phonePause) return true;
+    phonePause = false;
+    serverPhoneToClear = false;
+    reportedPause = null; // Salt is active again; re-report any local pause that still holds
+    recomputePause();
+    if (pausedReason === null) for (const release of [...resumeWaiters]) release();
+    void syncPause();
     return true;
   }
 
@@ -1211,10 +1262,12 @@ export function createDeviceHost(
       callbacks.onHelpOpened?.(req);
     } else if (type === "help_request_viewing") {
       openHelp.set(req.id, req);
+      viewedHelp.add(req.id);
       const v = (body as { viewer?: HelpViewer | null }).viewer;
       callbacks.onHelpViewing?.(req, v && typeof v === "object" && typeof v.id === "string" ? v : null);
     } else {
       openHelp.delete(req.id);
+      viewedHelp.delete(req.id);
       callbacks.onHelpClosed?.(req);
     }
     return true;
@@ -1226,13 +1279,26 @@ export function createDeviceHost(
 
   async function postStill(
     raw: StillBody
-  ): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "secure_field" | "ended" }> {
+  ): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "paused" | "not_viewed" | "not_granted" | "ended" }> {
     if (ended) return { posted: false, reason: "ended" };
     const body = normalizeStill(raw);
     if (!body) throw new DeviceProtocolError("bad_args", "malformed still");
     if (!helpAllowsStills(body.help_id)) return { posted: false, reason: "no_help" };
-    // No new still while secure input is on.
-    if (pausedReason === "secure_field") return { posted: false, reason: "secure_field" };
+    // Never while paused, for any reason (the person has the computer, a secure field, the phone).
+    if (pausedReason !== null) return { posted: false, reason: "paused" };
+    // Only after the person tapped (help_request_viewing), never on `opened`. A live watch is its own consent.
+    if (!viewedHelp.has(body.help_id) && !(options.isWatchLive?.() ?? false)) return { posted: false, reason: "not_viewed" };
+    // A picture goes to the agent only when its grant allows observing. Otherwise it goes to the people
+    // over the device alone (the lane readers minus the agent), which the transport can do because every
+    // post names its readers.
+    const observeMode = snapshot.caps["device.observe"]?.mode;
+    const agentMayObserve = observeMode === "auto" || observeMode === "notify";
+    let readers = snapshot.readers;
+    if (!agentMayObserve) {
+      const keys = options.peopleReaderKeys?.() ?? [];
+      if (keys.length === 0) return { posted: false, reason: "not_granted" };
+      readers = { ...snapshot.readers, publicKeys: keys };
+    }
     const now = clock();
     while (stillTimes.length && now - stillTimes[0] >= 60_000) stillTimes.shift();
     if (stillTimes.length && now - stillTimes[stillTimes.length - 1] < (options.stillMinIntervalMs ?? STILL_MIN_INTERVAL_MS)) return { posted: false, reason: "too_soon" };
@@ -1243,7 +1309,7 @@ export function createDeviceHost(
     );
     if (Buffer.byteLength(plaintext, "utf8") > MAX_DEVICE_PLAINTEXT_BYTES) throw new DeviceProtocolError("too_large", "still exceeds the per-message limit");
     stillTimes.push(now);
-    await transport.postResult(plaintext, snapshot.readers);
+    await transport.postResult(plaintext, readers);
     return { posted: true };
   }
 

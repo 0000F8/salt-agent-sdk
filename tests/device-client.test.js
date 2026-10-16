@@ -55,7 +55,7 @@ test("a command posts a device message and resolves on the matching result", asy
     { v: 1, id: "res1", seq: 1, op: "observation", session: "sess-1", re: sent.header.id },
     { obs: "o1", width: 100, height: 50, scale: 2, format: "png", image_b64: "AAAA" }
   );
-  assert.equal(c.handleLaneMessage(answer), true);
+  assert.equal(c.handleLaneMessage(answer, "d"), true);
   const shot = await p;
   assert.equal(shot.obs, "o1");
   assert.equal(shot.width, 100);
@@ -74,7 +74,7 @@ test("an error result rejects the command with its code", async () => {
     { v: 1, id: "e1", seq: 1, op: "error", session: "sess-1", re: sent.header.id },
     { code: "out_of_scope", message: "no device.act" }
   );
-  c.handleLaneMessage(err);
+  c.handleLaneMessage(err, "d");
   await assert.rejects(p, (e) => e.code === "out_of_scope");
 });
 
@@ -88,11 +88,11 @@ test("seq increments per command (one in flight at a time)", async () => {
   const b = c.type("b");
   assert.equal(sdk.decodeDeviceMessage(t.posted[0].plaintext).header.seq, 1);
   assert.equal(t.posted.length, 1); // "b" waits for "a"
-  c.handleLaneMessage(ack(t.posted[0].plaintext));
+  c.handleLaneMessage(ack(t.posted[0].plaintext), "d");
   await a;
   await new Promise((r) => setImmediate(r));
   assert.equal(sdk.decodeDeviceMessage(t.posted[1].plaintext).header.seq, 2);
-  c.handleLaneMessage(ack(t.posted[1].plaintext));
+  c.handleLaneMessage(ack(t.posted[1].plaintext), "d");
   await b;
 });
 
@@ -134,5 +134,5 @@ test("a result for someone else's session is ignored", async () => {
   c.handleDelivery("device_session", activeDelivery());
   await opened;
   const stray = sdk.encodeDeviceMessage({ v: 1, id: "r", seq: 1, op: "ack", session: "OTHER", re: "x" }, { ok: true });
-  assert.equal(c.handleLaneMessage(stray), false);
+  assert.equal(c.handleLaneMessage(stray, "d"), false);
 });

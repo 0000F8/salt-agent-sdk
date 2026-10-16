@@ -663,7 +663,7 @@ async function wired(handlers, hostExtra = {}, hostOptions = {}, clientOptions =
   };
   const ht = {
     async postResult(p) {
-      client.handleLaneMessage(p);
+      client.handleLaneMessage(p, "d");
     },
     async beat() {},
     async reportCounts() {},
@@ -737,7 +737,7 @@ test("client: the result is allow-listed again on this side; a device that adds 
       { v: 1, id: "r1", seq: 1, op: "task_result", session: "sess-1", re: sent.id },
       { ...ok({ summary: "z".repeat(900) }), image_b64: "AAAA", status: "done", steps: [{ n: 1, kind: "command", line: "a", ok: true, output: "x" }] }
     )
-  );
+  , "d");
   const r = await run;
   assert.equal(r.summary.length, 500);
   assert.deepEqual(Object.keys(r).sort(), ["checked", "commands", "duration_ms", "status", "steps", "summary", "task_id"]);
@@ -766,15 +766,15 @@ test("client: progress lines that arrive out of order are dropped (older seq aft
   });
   const re = t.posted[0].header.id;
   const prog = (seq, body) => sdk.encodeDeviceMessage({ v: 1, id: `p${seq}`, seq, op: "progress", session: "sess-1", re }, body);
-  assert.equal(c.handleLaneMessage(prog(2, { step: 2, line: "two", secret: "x" })), true);
-  assert.equal(c.handleLaneMessage(prog(1, { step: 1, line: "one" })), true); // late: consumed, not delivered
-  assert.equal(c.handleLaneMessage(prog(3, { nope: true })), true); // not a progress line: consumed, not delivered
-  assert.equal(c.handleLaneMessage(prog(4, { step: 3, line: "three" })), true);
+  assert.equal(c.handleLaneMessage(prog(2, { step: 2, line: "two", secret: "x" }), "d"), true);
+  assert.equal(c.handleLaneMessage(prog(1, { step: 1, line: "one" }), "d"), true); // late: consumed, not delivered
+  assert.equal(c.handleLaneMessage(prog(3, { nope: true }), "d"), true); // not a progress line: consumed, not delivered
+  assert.equal(c.handleLaneMessage(prog(4, { step: 3, line: "three" }), "d"), true);
   assert.deepEqual(got, [{ step: 2, line: "two" }, { step: 3, line: "three" }]);
-  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "r", seq: 5, op: "task_result", session: "sess-1", re }, ok()));
+  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "r", seq: 5, op: "task_result", session: "sess-1", re }, ok()), "d");
   assert.equal((await run).status, "done");
   // after the result, a straggling progress line is not ours any more
-  assert.equal(c.handleLaneMessage(prog(6, { step: 4, line: "late" })), false);
+  assert.equal(c.handleLaneMessage(prog(6, { step: 4, line: "late" }), "d"), false);
 });
 
 test("client: no result within timeoutS + 30 s sends cancel with re = the task id (and body id), then rejects", async () => {

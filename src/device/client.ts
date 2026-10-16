@@ -215,9 +215,11 @@ export interface DeviceClient {
    *  paused / resumed / ended, and the legacy active / ended types). The
    *  consumer calls this from its dispatcher. */
   handleDelivery(event: string, body: unknown): void;
-  /** Feed a decrypted lane message in (a result the device posted). Returns
-   *  true if it was a device result this client consumed. */
-  handleLaneMessage(plaintext: string): boolean;
+  /** Feed a decrypted lane message in together with WHO sent it (the sender's account id). Only the
+   *  device's own account counts: a person, another agent or anyone else who can post in the lane is
+   *  ignored, so no one else can forge a result, a still or a `pointed`. Returns true if it was a
+   *  device result this client consumed. */
+  handleLaneMessage(plaintext: string, senderId: SaltId): boolean;
   on(event: "active" | "ended" | "ask", cb: Listener): void;
   /** Show Me: a still the computer posted into the lane while a help request is open (op `still`,
    *  unsolicited). The body is allow-listed (`normalizeStill`); a malformed one is dropped. Returns an unsubscribe. */
@@ -697,7 +699,8 @@ export function createDeviceClient(
     }
   }
 
-  function handleLaneMessage(plaintext: string): boolean {
+  function handleLaneMessage(plaintext: string, senderId?: SaltId): boolean {
+    if (senderId == null || !sameId(senderId, params.deviceId)) return false;
     let decoded;
     try {
       decoded = decodeDeviceMessage(plaintext);

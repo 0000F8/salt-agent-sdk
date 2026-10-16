@@ -184,20 +184,20 @@ test("device client surfaces a still and a pointed result through onStill / onPo
   const offStill = c.onStill((s) => stills.push(s));
   c.onPointed((p, id) => pointed.push([p, id]));
   const still = { help_id: "h", obs: "O1", width: 10, height: 10, scale: 1, format: "jpeg", image_b64: "AA", taken_at: "t" };
-  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s1", seq: 1, op: "still", session: "sess-1" }, still)), true);
+  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s1", seq: 1, op: "still", session: "sess-1" }, still), "d"), true);
   assert.equal(stills.length, 1);
   assert.equal(stills[0].obs, "O1");
   const body = { help_id: "h", x: 0.5, y: 0.5, screen: { x: 1, y: 2 }, app: "Finder", element: null, refused: null, words: "" };
-  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p1", seq: 2, op: "pointed", session: "sess-1", re: "POINT1" }, body)), true);
+  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p1", seq: 2, op: "pointed", session: "sess-1", re: "POINT1" }, body), "d"), true);
   assert.equal(pointed[0][1], "POINT1");
   assert.equal(pointed[0][0].app, "Finder");
   // a malformed body is consumed but never delivered
-  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p2", seq: 3, op: "pointed", session: "sess-1", re: "P2" }, { nope: 1 }));
+  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p2", seq: 3, op: "pointed", session: "sess-1", re: "P2" }, { nope: 1 }), "d");
   assert.equal(pointed.length, 1);
   // another session's still is not ours
-  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s2", seq: 4, op: "still", session: "other" }, still)), false);
+  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s2", seq: 4, op: "still", session: "other" }, still), "d"), false);
   offStill();
-  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s3", seq: 5, op: "still", session: "sess-1" }, still));
+  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "s3", seq: 5, op: "still", session: "sess-1" }, still), "d");
   assert.equal(stills.length, 1);
 });
 
@@ -207,6 +207,46 @@ test("a throwing onPointed listener never breaks the stream", async () => {
   const got = [];
   c.onPointed((p) => got.push(p));
   const body = { help_id: "h", x: 0.5, y: 0.5, screen: { x: 1, y: 2 }, app: null, element: null, refused: null, words: "" };
-  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p1", seq: 1, op: "pointed", session: "sess-1", re: "P" }, body)), true);
+  assert.equal(c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "p1", seq: 1, op: "pointed", session: "sess-1", re: "P" }, body), "d"), true);
   assert.equal(got.length, 1);
+});
+
+test("the device client accepts lane messages only from the device's own account", async () => {
+  const t = {
+    async openSession(deviceId) { return { id: "sess-1", device_id: deviceId, agent_id: "ag", mandate_id: "m", status: "requested" }; },
+    async stopSession() {},
+    posted: [],
+    async postCommand(pt) { this.posted.push(pt); },
+  };
+  const c = sdk.createDeviceClient(t, { deviceId: "d" });
+  const opened = c.open();
+  c.handleDelivery("device_session", { type: "device_session_active", session: { id: "sess-1", device_id: "d", agent_id: "ag", mandate_id: "m", status: "active", chat: { id: "chat-1", readers: ["k"] } } });
+  await opened;
+  const stills = [];
+  const pointed = [];
+  c.onStill((s) => stills.push(s));
+  c.onPointed((p) => pointed.push(p));
+  const still = { help_id: "h", obs: "O", width: 1, height: 1, scale: 1, format: "jpeg", image_b64: "AA", taken_at: "t" };
+  const stillMsg = sdk.encodeDeviceMessage({ v: 1, id: "s", seq: 1, op: "still", session: "sess-1" }, still);
+  const body = { help_id: "h", x: 0.5, y: 0.5, screen: { x: 1, y: 1 }, app: null, element: null, refused: null, words: "" };
+  const pointedMsg = sdk.encodeDeviceMessage({ v: 1, id: "p", seq: 2, op: "pointed", session: "sess-1", re: "P" }, body);
+  for (const who of ["person-1", "another-agent", "", undefined, null]) {
+    assert.equal(c.handleLaneMessage(stillMsg, who), false);
+    assert.equal(c.handleLaneMessage(pointedMsg, who), false);
+  }
+  assert.equal(stills.length + pointed.length, 0);
+  // a forged result from a non-device sender does not settle a pending command
+  const p = c.observe({ target: "screen" });
+  const sent = sdk.decodeDeviceMessage(t.posted[0]);
+  const forged = sdk.encodeDeviceMessage({ v: 1, id: "r", seq: 3, op: "observation", session: "sess-1", re: sent.header.id }, { obs: "fake", image_b64: "AA" });
+  assert.equal(c.handleLaneMessage(forged, "person-1"), false);
+  const settled = await Promise.race([p.then(() => "settled", () => "rejected"), new Promise((r) => setTimeout(() => r("pending"), 50))]);
+  assert.equal(settled, "pending");
+  const real = sdk.encodeDeviceMessage({ v: 1, id: "r2", seq: 4, op: "observation", session: "sess-1", re: sent.header.id }, { obs: "real", image_b64: "AA" });
+  assert.equal(c.handleLaneMessage(real, "d"), true);
+  assert.equal((await p).obs, "real");
+  assert.equal(c.handleLaneMessage(stillMsg, "d"), true);
+  assert.equal(c.handleLaneMessage(pointedMsg, "D"), true, "ids compare as ids");
+  assert.equal(stills.length, 1);
+  assert.equal(pointed.length, 1);
 });

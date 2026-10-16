@@ -20,7 +20,7 @@ test("client.submit posts a submit command carrying the element and resolves on 
   const sent = sdk.decodeDeviceMessage(posted[0]);
   assert.equal(sent.header.op, "submit");
   assert.deepEqual(sent.body, { element: EL });
-  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "r1", seq: 1, op: "ack", session: "sess-1", re: sent.header.id }, { ok: true }));
+  c.handleLaneMessage(sdk.encodeDeviceMessage({ v: 1, id: "r1", seq: 1, op: "ack", session: "sess-1", re: sent.header.id }, { ok: true }), "d");
   await p;
 });
 
