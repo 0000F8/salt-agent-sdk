@@ -51,6 +51,15 @@ export const MUTATING_OPS: readonly string[] = ["click", "type", "key", "scroll"
  *  pause or hotkey. Free-form strings are tolerated on the wire. */
 export type DevicePauseReason = "person_active" | "secure_field" | "person" | "other" | (string & {});
 
+/** Show Me (0.22.0): two device-to-agent ops that are not answers to a command.
+ *  `still` is unsolicited (no `re`): the device posts a downscaled picture of its
+ *  screen into the lane while a help request is open. `pointed` answers a person's
+ *  `[[SALT-POINT]]` (its `re` is the point id): what is under the spot they tapped.
+ *  They are kept out of `DEVICE_RESULT_OPS` on purpose: that list is pinned by the
+ *  envelope-vector fixture shared byte for byte with saltapp-python. */
+export type DeviceUnsolicitedOp = "still" | "pointed";
+export const DEVICE_UNSOLICITED_OPS: readonly DeviceUnsolicitedOp[] = ["still", "pointed"];
+
 /** Commands an agent sends to a device. */
 export type DeviceOp =
   | "observe"
@@ -685,4 +694,192 @@ export function deviceMessageId(now: number = Date.now(), rand: () => number = M
     randPart += CROCKFORD[Math.floor(rand() * 32)];
   }
   return time + randPart;
+}
+
+// ---- Show Me: stills and points (CONTRACT.md section 3) ---------------------
+
+/** The device posts at most one still every 2 s, and at most 30 a minute per lane. */
+export const STILL_MIN_INTERVAL_MS = 2_000;
+export const STILL_MAX_PER_MINUTE = 30;
+/** A person's optional words on a point. */
+export const POINT_WORDS_MAX = 200;
+/** Longest id a SALT-POINT header field may carry (help id, obs id, point id). */
+export const POINT_ID_MAX = 64;
+/** `pointed.words` is the point's words, same cap. */
+export const POINTED_NAME_MAX = 200;
+
+export interface StillBody {
+  help_id: string;
+  /** The observation id of this picture; a person's point names it back. */
+  obs: string;
+  width: number;
+  height: number;
+  scale: number;
+  format: "jpeg" | "png";
+  image_b64: string;
+  /** ISO8601. */
+  taken_at: string;
+}
+
+export type PointedRefusal = "forbidden_app" | "secure_field" | "stale" | "not_allowed";
+export const POINTED_REFUSALS: readonly PointedRefusal[] = ["forbidden_app", "secure_field", "stale", "not_allowed"];
+
+export interface PointedElement {
+  role: string;
+  subrole: string | null;
+  name: string | null;
+  value: string | null;
+  bounds: { x: number; y: number; w: number; h: number };
+}
+
+export interface PointedBody {
+  help_id: string;
+  x: number;
+  y: number;
+  /** The spot in screen coordinates. */
+  screen: { x: number; y: number };
+  app: string | null;
+  /** Null when nothing is named under the point, or when the answer was refused. */
+  element: PointedElement | null;
+  refused: PointedRefusal | null;
+  words: string;
+}
+
+/** A still body, allow-listed with types checked; null when it is not one. Used by the agent
+ *  on what a device sent. Extra fields are dropped. */
+export function normalizeStill(raw: unknown): StillBody | null {
+  if (!isRecord(raw)) return null;
+  const { help_id, obs, width, height, scale, format, image_b64, taken_at } = raw;
+  if (typeof help_id !== "string" || help_id === "" || typeof obs !== "string" || obs === "") return null;
+  if (format !== "jpeg" && format !== "png") return null;
+  if (typeof image_b64 !== "string" || image_b64 === "") return null;
+  const w = wholeNumber(width);
+  const h = wholeNumber(height);
+  if (w === null || h === null || w < 1 || h < 1) return null;
+  if (typeof scale !== "number" || !Number.isFinite(scale) || scale <= 0) return null;
+  return { help_id, obs, width: w, height: h, scale, format, image_b64, taken_at: typeof taken_at === "string" ? taken_at : "" };
+}
+
+function finite(x: unknown): number | null {
+  return typeof x === "number" && Number.isFinite(x) ? x : null;
+}
+
+/** A `pointed` body, allow-listed field by field; null when it is not one. A refused answer
+ *  never carries an element, whatever the sender put there. */
+export function normalizePointed(raw: unknown): PointedBody | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.help_id !== "string" || raw.help_id === "") return null;
+  const x = finite(raw.x);
+  const y = finite(raw.y);
+  if (x === null || y === null || x < 0 || x > 1 || y < 0 || y > 1) return null;
+  const sx = isRecord(raw.screen) ? finite(raw.screen.x) : null;
+  const sy = isRecord(raw.screen) ? finite(raw.screen.y) : null;
+  if (sx === null || sy === null) return null;
+  const refused = POINTED_REFUSALS.includes(raw.refused as PointedRefusal) ? (raw.refused as PointedRefusal) : null;
+  let element: PointedElement | null = null;
+  if (refused === null && isRecord(raw.element) && typeof raw.element.role === "string") {
+    const e = raw.element;
+    const b = isRecord(e.bounds) ? e.bounds : {};
+    element = {
+      role: clip(e.role as string, 80),
+      subrole: typeof e.subrole === "string" ? clip(e.subrole, 80) : null,
+      name: typeof e.name === "string" ? clip(e.name, POINTED_NAME_MAX) : null,
+      value: typeof e.value === "string" ? clip(e.value, POINTED_NAME_MAX) : null,
+      bounds: { x: finite(b.x) ?? 0, y: finite(b.y) ?? 0, w: finite(b.w) ?? 0, h: finite(b.h) ?? 0 },
+    };
+  }
+  return {
+    help_id: raw.help_id,
+    x,
+    y,
+    screen: { x: sx, y: sy },
+    app: typeof raw.app === "string" ? clip(raw.app, 200) : null,
+    element,
+    refused,
+    words: typeof raw.words === "string" ? clip(raw.words, POINT_WORDS_MAX) : "",
+  };
+}
+
+/** One point a person made on a still (or, live, on the call's frame). */
+export interface PointMessage {
+  v: number;
+  /** The help request this point answers. */
+  help: string;
+  /** The still it was made on; absent means the live frame. */
+  obs?: string;
+  /** Fractions of the picture, 0..1. */
+  x: number;
+  y: number;
+  /** A fresh id per point; the device answers each id once. */
+  id: string;
+  words: string;
+}
+
+const POINT_MARKER_RE = /^\[\[SALT-POINT ((?:[a-z_]+=[^\s\]]+ ?)+)\]\]([\s\S]*)$/;
+const POINT_TOKEN_RE = /^[A-Za-z0-9_-]{1,64}$/;
+// 0..1 with at most four decimals: "0", "1", "0.5", "0.6012", "1.0".
+const POINT_FRACTION_RE = /^(?:0(?:\.\d{1,4})?|1(?:\.0{1,4})?)$/;
+
+/** True when the text opens with the SALT-POINT marker (well formed or not). */
+export function isPointMessage(plaintext: string): boolean {
+  return plaintext.trimStart().startsWith("[[SALT-POINT");
+}
+
+function fraction(n: number, what: string): string {
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0 || n > 1) {
+    throw new DeviceProtocolError("bad_args", `${what} must be between 0 and 1`);
+  }
+  return n.toFixed(4);
+}
+
+/** The plaintext of a point. `x` and `y` are written with four decimals. Throws
+ *  DeviceProtocolError("bad_args") on an out-of-range fraction, a bad id, or words over 200
+ *  characters (nothing is cut off silently). */
+export function encodePoint(p: { help: string; obs?: string; x: number; y: number; id: string; words?: string }): string {
+  for (const [what, val] of [["help", p.help], ["id", p.id], ...(p.obs !== undefined ? [["obs", p.obs]] : [])] as Array<[string, string]>) {
+    if (typeof val !== "string" || !POINT_TOKEN_RE.test(val)) throw new DeviceProtocolError("bad_args", `${what} is not a valid id`);
+  }
+  const words = p.words ?? "";
+  if (typeof words !== "string" || charCount(words) > POINT_WORDS_MAX) {
+    throw new DeviceProtocolError("bad_args", `words are over ${POINT_WORDS_MAX} characters`);
+  }
+  const parts = [`v=${DEVICE_PROTOCOL_VERSION}`, `help=${p.help}`];
+  if (p.obs !== undefined) parts.push(`obs=${p.obs}`);
+  parts.push(`x=${fraction(p.x, "x")}`, `y=${fraction(p.y, "y")}`, `id=${p.id}`);
+  const marker = `[[SALT-POINT ${parts.join(" ")}]]`;
+  return words === "" ? marker : `${marker}\n${words}`;
+}
+
+/** Parse the decrypted plaintext of a lane message. Returns null when it is not a point at
+ *  all. Throws DeviceProtocolError("bad_args") on a message that opens with the marker but
+ *  is broken: a wrong version, a missing field, an x or y outside 0..1 (or with more than
+ *  four decimals), a bad id, or words over 200 characters. */
+export function decodePoint(plaintext: string): PointMessage | null {
+  const trimmed = plaintext.trimStart();
+  if (!trimmed.startsWith("[[SALT-POINT")) return null;
+  const m = POINT_MARKER_RE.exec(trimmed);
+  if (!m) throw new DeviceProtocolError("bad_args", "malformed SALT-POINT marker");
+  const fields: Record<string, string> = {};
+  for (const pair of m[1].trim().split(/\s+/)) {
+    const eq = pair.indexOf("=");
+    if (eq === -1) throw new DeviceProtocolError("bad_args", `bad marker field: ${pair}`);
+    const k = pair.slice(0, eq);
+    if (k in fields) throw new DeviceProtocolError("bad_args", `repeated marker field: ${k}`);
+    fields[k] = pair.slice(eq + 1);
+  }
+  for (const required of ["v", "help", "x", "y", "id"]) {
+    if (fields[required] === undefined) throw new DeviceProtocolError("bad_args", `marker missing ${required}`);
+  }
+  if (fields.v !== String(DEVICE_PROTOCOL_VERSION)) throw new DeviceProtocolError("unsupported", `unsupported SALT-POINT version ${fields.v}`);
+  for (const k of ["help", "id", ...(fields.obs !== undefined ? ["obs"] : [])]) {
+    if (!POINT_TOKEN_RE.test(fields[k])) throw new DeviceProtocolError("bad_args", `${k} is not a valid id`);
+  }
+  if (!POINT_FRACTION_RE.test(fields.x) || !POINT_FRACTION_RE.test(fields.y)) {
+    throw new DeviceProtocolError("bad_args", "x and y must be between 0 and 1 with at most four decimals");
+  }
+  const words = m[2].replace(/^\r?\n/, "").trim();
+  if (charCount(words) > POINT_WORDS_MAX) throw new DeviceProtocolError("bad_args", `words are over ${POINT_WORDS_MAX} characters`);
+  const out: PointMessage = { v: DEVICE_PROTOCOL_VERSION, help: fields.help, x: Number(fields.x), y: Number(fields.y), id: fields.id, words };
+  if (fields.obs !== undefined) out.obs = fields.obs;
+  return out;
 }
