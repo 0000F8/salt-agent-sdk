@@ -10,6 +10,7 @@ export * from "./reconcile";
 export * from "./delegations";
 export * from "./work";
 export * from "./help";
+export * from "./callBundle";
 export * from "./sessions";
 export * from "./scriptJob";
 export * from "./chatPrivacy";
