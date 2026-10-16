@@ -17,7 +17,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import type { Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
+import type { AskForHelpParams, Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
+import type { HelpRequest } from "./help.js";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import * as identityShare from "./identityShare.js";
@@ -224,6 +225,8 @@ export interface MessageContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** Shares `keys` from this identity's own card into `chatId` -- one signed SLICE to every non-observer member (see identityShare.ts's share()). */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 /** An incoming `[[SALT-WORK-CANCEL id=...]]` (work.ts) -- the person
@@ -316,6 +319,8 @@ export interface InvoicePaidContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface ChatOpenedChat {
@@ -370,6 +375,8 @@ export interface ChatOpenedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface HandoffConfirmedContext {
@@ -395,6 +402,8 @@ export interface HandoffConfirmedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface HandoffReceivedContext {
@@ -417,6 +426,8 @@ export interface HandoffReceivedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 // --- Mandate rail events (R2) ----------------------------------------------
@@ -739,7 +750,8 @@ export interface WebhookServerOptions {
    * carries `device_queue`, `device_grants_changed`, `device_owner_changed` and
    * `device_ask_answered` (`{ask_id, decision, device_id, session_id}`: the person's
    * phone answered a command or session ask; the answer is authenticated as the
-   * person by Salt). See src/device/.
+   * person by Salt) and, from Show Me (0.22.0), `help_request_opened|viewing|closed`
+   * (`{help_request, viewer?}`): feed those to `host.handleDelivery`. See src/device/.
    */
   onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
   /**
@@ -1382,6 +1394,11 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     return (keys: string[], opts?: identityShare.ShareOptions) => identitySharer.share(identity, chatId, keys, opts);
   }
 
+  // ctx.askForHelp (client.ts) -- bound to one (identity, chatId) like the others.
+  function makeAskForHelp(identity: AgentIdentity, chatId: SaltId): (opts: Omit<AskForHelpParams, "chatId" | "selfId">) => Promise<HelpRequest> {
+    return (opts) => client.askForHelp(identity.apiKey, { ...opts, chatId, selfId: identity.saltAppId });
+  }
+
   // True when `chatId` has at least one human (account_type !== "Agent")
   // member who is NOT a silent observer. A consult lane's human -- the
   // delegation chain's auditor added per actions.ts's delegation-
@@ -1794,6 +1811,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
       approve: makeApprove(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
@@ -1949,6 +1967,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
       approve: makeApprove(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
@@ -2015,6 +2034,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
       approve: makeApprove(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
@@ -2073,6 +2093,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
@@ -2146,6 +2167,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
@@ -2385,7 +2407,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       return;
     }
     if (body?.type === "device_back") return handleDeviceBack(body as never, headerAgentId);
-    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed" || body.type === "device_ask_answered")) {
+    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed" || body.type === "device_ask_answered" || body.type === "help_request_opened" || body.type === "help_request_viewing" || body.type === "help_request_closed")) {
       await options.onDeviceDelivery?.(body.type, body);
       return;
     }

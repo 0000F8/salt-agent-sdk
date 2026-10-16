@@ -56,3 +56,34 @@ export function decodeHelp(plaintext: string): HelpMessage | null {
   if (question === "" || codePoints(question) > HELP_QUESTION_MAX) return null;
   return { reason: m[1] as HelpReason, question };
 }
+
+// ---- the help request record (salt-api /api/v1/help_requests) ----------------
+
+export type HelpRequestStatus = "open" | "answered" | "withdrawn" | "ended";
+
+/** A help request as salt-api serves it. The server stores ids, the reason and the status only;
+ *  the question itself rides end-to-end encrypted in the 1:1 chat. */
+export interface HelpRequest {
+  id: string;
+  agent: { id: string; username?: string; display_name?: string };
+  person_id: string;
+  chat_id: string;
+  message_id: string;
+  reason: HelpReason;
+  status: HelpRequestStatus;
+  device_session_id: string | null;
+  device: { id: string; name?: string; lane_chat_id?: string } | null;
+  created_at: string;
+  closed_at: string | null;
+  last_viewed_at: string | null;
+}
+
+/** The person looking at a help request from their phone. */
+export interface HelpViewer {
+  id: string;
+  display_name?: string;
+}
+
+/** The deliveries a device receives about a help request (CONTRACT.md section 4). */
+export const HELP_DELIVERY_TYPES = ["help_request_opened", "help_request_viewing", "help_request_closed"] as const;
+export type HelpDeliveryType = (typeof HELP_DELIVERY_TYPES)[number];
