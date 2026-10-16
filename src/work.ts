@@ -65,6 +65,8 @@ export interface WorkReport {
   due?: string;
   /** Only meaningful alongside status "scheduled" -- how often it recurs. */
   repeat?: WorkRepeat;
+  /** The confirmed transfer behind money work (`transfer=<id>`); salt-fe reads the receipt row from it. */
+  transfer?: string;
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -91,6 +93,7 @@ export function formatWorkReport(report: WorkReport): string {
   if (handle && HANDLE_RE.test(handle)) attrs.push(`with=${handle}`);
   if (report.due && DUE_RE.test(report.due)) attrs.push(`due=${report.due}`);
   if (report.repeat && WORK_REPEATS.includes(report.repeat)) attrs.push(`repeat=${report.repeat}`);
+  if (report.transfer && ID_RE.test(report.transfer)) attrs.push(`transfer=${report.transfer}`);
   const title = oneLine(report.title, MAX_WORK_TITLE);
   if (!title) throw new Error("A work report needs a title.");
   const detail = (report.detail || "").trim().slice(0, MAX_WORK_DETAIL);
@@ -114,6 +117,7 @@ export function parseWorkReport(plaintext: string): WorkReport | null {
   if (attrs.with && HANDLE_RE.test(attrs.with)) report.with = attrs.with;
   if (attrs.due && DUE_RE.test(attrs.due) && !Number.isNaN(Date.parse(attrs.due))) report.due = attrs.due;
   if (WORK_REPEATS.includes(attrs.repeat as WorkRepeat)) report.repeat = attrs.repeat as WorkRepeat;
+  if (attrs.transfer && ID_RE.test(attrs.transfer)) report.transfer = attrs.transfer;
   const detail = rest.join("\n").trim();
   if (detail) report.detail = detail;
   return report;

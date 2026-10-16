@@ -382,6 +382,8 @@ export interface DeviceHost {
    *  `options.isWatchLive()`), and once per point id; the answer is a `pointed` op with `re` = the
    *  point id. Every refusal is one audit line (op `point`) and no reply. */
   handleLaneMessage(plaintext: string, senderId: SaltId): Promise<boolean>;
+  /** Also takes `device_session_paused` / `device_session_resumed` for this session (a person pausing from
+   *  their phone, reason "person"): the host pauses or resumes itself, like a stop reaches it. */
   /** Show Me: feed a `help_request_opened|viewing|closed` delivery in (the `onDeviceDelivery` type
    *  and body). Returns true when it was one of those for THIS session and the matching callback
    *  ran. */
@@ -1179,7 +1181,27 @@ export function createDeviceHost(
     return r;
   }
 
+  // A person pausing or resuming from their phone reaches the device as a server delivery for THIS
+  // session (`device_session_paused` / `device_session_resumed`, reason "person"). Only the person's
+  // own pause is taken from the wire; the device's reasons (person_active, secure_field) stay local,
+  // and a resume only clears a person pause.
+  function handleSessionPauseDelivery(type: string, body: unknown): boolean {
+    const b = (body ?? {}) as { session_id?: unknown; id?: unknown; session?: { id?: unknown }; reason?: unknown; pause_reason?: unknown };
+    const sid = b.session_id ?? b.session?.id ?? b.id;
+    if (sid == null || !sameId(sid, snapshot.sessionId)) return false;
+    if (type === "device_session_paused") {
+      const reason = b.reason ?? b.pause_reason ?? "person";
+      if (reason !== "person") return false;
+      void pause("person");
+      return true;
+    }
+    if (pausedReason === "person") void resume();
+    return true;
+  }
+
   function handleDelivery(type: string, body: unknown): boolean {
+    if (ended) return false;
+    if (type === "device_session_paused" || type === "device_session_resumed") return handleSessionPauseDelivery(type, body);
     if (!(HELP_DELIVERY_TYPES as readonly string[]).includes(type)) return false;
     if (ended) return false;
     const req = helpFromBody(body);
