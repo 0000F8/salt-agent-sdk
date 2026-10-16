@@ -23,6 +23,8 @@ import { sameId, type SaltId } from "./ids.js";
 import { HELP_REASONS, type HelpReason } from "./help.js";
 import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, MAX_CAPABILITIES, type AgentClaimSectionKey, type CardSection, type Capability, type IdentityClaims } from "./identity.js";
 
+const ID_RE_TRANSFER = /^[A-Za-z0-9_-]{1,64}$/;
+
 export type JsonSchema = Record<string, unknown>;
 
 export interface ActionContext {
@@ -557,7 +559,7 @@ export function createActions(options: ActionsOptions) {
     }
 
     const id = input.id && /^[A-Za-z0-9_-]{1,64}$/.test(input.id) ? input.id : newWorkId();
-    const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail });
+    const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail, ...(transferId && ID_RE_TRANSFER.test(transferId) ? { transfer: transferId } : {}) });
     return reported
       ? { reported: true, id, note: "Only they can see this, in their Tasks panel for this chat." }
       : { reported: false, id, note: "The report could not be delivered; carry on with the work." };

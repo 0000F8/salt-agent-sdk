@@ -251,3 +251,18 @@ test("no still while secure input is on, and none after the session ended", asyn
   await host.stop("done");
   assert.deepEqual(await host.postStill(still()), { posted: false, reason: "ended" });
 });
+
+test("a person's pause and resume from their phone reach the host as deliveries", async () => {
+  const { host } = setup();
+  assert.equal(host.handleDelivery("device_session_paused", { session_id: "other", reason: "person" }), false);
+  assert.equal(host.pausedReason(), null);
+  assert.equal(host.handleDelivery("device_session_paused", { session_id: "sess-1", reason: "person" }), true);
+  assert.equal(host.pausedReason(), "person");
+  assert.equal(host.handleDelivery("device_session_paused", { session_id: "sess-1", reason: "secure_field" }), false);
+  assert.equal(host.handleDelivery("device_session_resumed", { session_id: "sess-1" }), true);
+  assert.equal(host.pausedReason(), null);
+  // a resume never clears the device's own reason
+  await host.pause("secure_field");
+  host.handleDelivery("device_session_resumed", { session_id: "sess-1" });
+  assert.equal(host.pausedReason(), "secure_field");
+});

@@ -107,3 +107,26 @@ test("report_progress surfaces a getTransfer failure as a readable refusal rathe
     /Could not verify transfer tr-4/
   );
 });
+
+test("evidence.transfer_id rides the SALT-WORK header as transfer=<id>, and the parser reads it back", async () => {
+  const agentKeys = await keypair("agent");
+  const personKeys = await keypair("person");
+  const caller = { saltAppId: "agent-1", apiKey: "k", publicKey: agentKeys.publicKey };
+  const ctx = { depth: 0, mainChatId: "chat-1", requesterId: "person-1" };
+  const client = fakeClient({ agentKeys, personKeys, transferStatus: "Confirmed" });
+  const actions = sdk.createActions({ client, identities: {}, pgpPassphrase: "", publicWebhookUrl: "" });
+  await actions.execute("report_progress", { id: "w_1", status: "done", title: "Paid the invoice", evidence: { transfer_id: "tr-3" } }, caller, ctx);
+  const msg = await openpgp.readMessage({ armoredMessage: client.posted[0].message });
+  const { data } = await openpgp.decrypt({ message: msg, decryptionKeys: await openpgp.readPrivateKey({ armoredKey: personKeys.privateKey }) });
+  assert.match(data.split("\n")[0], /^\[\[SALT-WORK id=w_1 status=done kind=task transfer=tr-3\]\]$/);
+  assert.equal(sdk.parseWorkReport(data).transfer, "tr-3");
+});
+
+test("transfer survives format/parse; a bad transfer id is left off", () => {
+  const text = sdk.formatWorkReport({ id: "w_2", status: "running", title: "Sending", transfer: "tr_9" });
+  assert.match(text, /^\[\[SALT-WORK id=w_2 status=running transfer=tr_9\]\]/);
+  assert.equal(sdk.parseWorkReport(text).transfer, "tr_9");
+  assert.doesNotMatch(sdk.formatWorkReport({ id: "w_2", status: "running", title: "x", transfer: "bad id!" }), /transfer=/);
+  assert.equal(sdk.parseWorkReport("[[SALT-WORK id=w_2 status=running transfer=a/b]]\nx").transfer, undefined);
+  assert.equal(sdk.parseWorkReport("[[SALT-WORK id=w_2 status=running]]\nx").transfer, undefined);
+});
