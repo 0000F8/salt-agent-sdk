@@ -49,7 +49,7 @@ export const MUTATING_OPS: readonly string[] = ["click", "type", "key", "scroll"
 /** Why a session is paused (device -> Salt -> agent). `person_active` and
  *  `secure_field` are the contract's two; `person_paused` is an explicit tray
  *  pause or hotkey. Free-form strings are tolerated on the wire. */
-export type DevicePauseReason = "person_active" | "secure_field" | "person" | "other" | (string & {});
+export type DevicePauseReason = "person_active" | "secure_field" | "person" | "phone" | "other" | (string & {});
 
 /** Show Me (0.22.0): two device-to-agent ops that are not answers to a command.
  *  `still` is unsolicited (no `re`): the device posts a downscaled picture of its

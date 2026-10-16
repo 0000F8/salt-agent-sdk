@@ -1143,7 +1143,7 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
 - **Queue.** `open()` against a device another agent controls is answered 202 `queued`;
   it resolves when a `device_session` delivery (`promoted`, then approval) makes the
   session `active`. Feed deliveries in with `device.handleDelivery("device_session", body)`
-  (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext)`.
+  (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext, senderId)` (from `onMessage`: `ctx.text`, `ctx.senderId`); only the device's own account is accepted, so nobody else posting in the lane can forge a result, a still or a `pointed`.
 - **Reattach.** If this agent already has a live session (409 `session_live`) `open()`
   calls `POST /device_sessions/:id/reattach` and continues at `last_seq + 1`.
 - **One command in flight.** Commands carry `id`, `seq` and `exp` (epoch ms, now + 30 s).
@@ -1165,7 +1165,8 @@ Device side:
 const host = createDeviceHost(snapshot, handlers, httpDeviceHostTransport({ host, apiKey }), callbacks);
 host.start();
 await host.pause("person_active");  // refuses commands with `paused`; tells Salt (POST .../pause)
-await host.resume();                 // POST .../resume
+await host.resume();                 // POST .../resume (never clears a phone pause)
+await host.resume({ local: true });  // the person pressed Resume at the machine: also clears a phone pause
 ```
 
 The host runs one command at a time per session, keeps the last 64 results by `id`
