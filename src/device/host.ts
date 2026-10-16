@@ -390,10 +390,11 @@ export interface DeviceHost {
   handleDelivery(type: string, body: unknown): boolean;
   /** Show Me: post a still into the lane (op `still`, no `re`). Resolves `{posted: true}`, or
    *  `{posted: false, reason}` when held back: `too_soon` (under 2 s since the last one),
+   *  `budget` (the grant's `max_actions` is spent; a still the agent receives costs one `observe`),
    *  `too_many` (30 in the last minute), `no_help` (no help request open for that id and no live
    *  watch), `secure_field` (the session is paused for a secure field), `ended`. Throws
    *  `bad_args` for a malformed body and `too_large` over the per-message cap. */
-  postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "paused" | "not_viewed" | "not_granted" | "ended" }>;
+  postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "budget" | "paused" | "not_viewed" | "not_granted" | "ended" }>;
   /** The help request ids currently open on this session. */
   openHelpIds(): string[];
 }
@@ -1279,7 +1280,7 @@ export function createDeviceHost(
 
   async function postStill(
     raw: StillBody
-  ): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "paused" | "not_viewed" | "not_granted" | "ended" }> {
+  ): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "budget" | "paused" | "not_viewed" | "not_granted" | "ended" }> {
     if (ended) return { posted: false, reason: "ended" };
     const body = normalizeStill(raw);
     if (!body) throw new DeviceProtocolError("bad_args", "malformed still");
@@ -1303,6 +1304,14 @@ export function createDeviceHost(
     while (stillTimes.length && now - stillTimes[0] >= 60_000) stillTimes.shift();
     if (stillTimes.length && now - stillTimes[stillTimes.length - 1] < (options.stillMinIntervalMs ?? STILL_MIN_INTERVAL_MS)) return { posted: false, reason: "too_soon" };
     if (stillTimes.length >= STILL_MAX_PER_MINUTE) return { posted: false, reason: "too_many" };
+    // A still the agent receives is an observation: it counts against the session's action budget and
+    // the per-second observe cap. A people-only still (agent not granted) is the agent's no business.
+    const maxActions = snapshot.budget?.maxActions;
+    if (agentMayObserve) {
+      if (maxActions !== undefined && spent >= maxActions) return { posted: false, reason: "budget" };
+      while (obsTimes.length && now - obsTimes[0] >= 1000) obsTimes.shift();
+      if (obsTimes.length >= MAX_OBSERVE_PER_SECOND) return { posted: false, reason: "too_soon" };
+    }
     const plaintext = encodeDeviceMessage(
       { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: nextOutSeq(), op: "still", session: snapshot.sessionId },
       body
@@ -1310,6 +1319,13 @@ export function createDeviceHost(
     if (Buffer.byteLength(plaintext, "utf8") > MAX_DEVICE_PLAINTEXT_BYTES) throw new DeviceProtocolError("too_large", "still exceeds the per-message limit");
     stillTimes.push(now);
     await transport.postResult(plaintext, readers);
+    if (agentMayObserve) {
+      spent += 1;
+      obsTimes.push(now);
+      bump("observe");
+      // Spending the last action does not end the session here: the next still is refused "budget" and
+      // the next command hits the budget gate, which ends it (budget_exhausted).
+    }
     return { posted: true };
   }
 
