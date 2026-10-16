@@ -44,8 +44,14 @@ import {
   MAX_DEVICE_PLAINTEXT_BYTES,
   MAX_OBSERVE_PER_SECOND,
   MUTATING_OPS,
+  decodePoint,
+  isPointMessage,
+  normalizePointed,
   normalizeProgress,
+  normalizeStill,
   normalizeTaskResult,
+  STILL_MAX_PER_MINUTE,
+  STILL_MIN_INTERVAL_MS,
   newTaskId,
   parseTaskArgs,
   PROGRESS_MIN_INTERVAL_MS,
@@ -62,14 +68,18 @@ import {
   type KeyArgs,
   type ObservationResult,
   type ObserveArgs,
+  type PointedBody,
+  type PointedRefusal,
   type Progress,
   type ScrollArgs,
+  type StillBody,
   type SubmitArgs,
   type TaskArgs,
   type TaskResult,
 } from "./protocol.js";
 import pathMod from "node:path";
 import type { LaneReaders } from "./client.js";
+import { HELP_DELIVERY_TYPES, type HelpRequest, type HelpViewer } from "../help.js";
 import { sameId, type SaltId } from "../ids.js";
 
 /** The seams. The desktop app implements every method; the host calls one only
@@ -92,7 +102,26 @@ export interface DeviceHostHandlers {
    *  extra field never reaches the agent. Let a `DeviceBudgetSpentError` from `ctx.spend`
    *  bubble: it ends the task and the session. */
   task?(args: TaskArgs, ctx: DeviceTaskContext): Promise<TaskResult>;
+  /** Show Me: what is under the spot a person pointed at? Optional: a host without it answers a
+   *  point `refused: "not_allowed"`. Called only after the host accepted the point (a person over
+   *  the device, a help request or watch still open, a fresh point id). `x` and `y` are fractions
+   *  of the picture the person tapped (`obs` names the still; absent = the live frame). Return the
+   *  `screen` spot, the frontmost `app`, the `element` under it and, when the answer must be withheld,
+   *  `refused`. The host drops the element of a refused answer and of any never-allowed app, so a
+   *  handler that forgets cannot leak a name. A throw is answered `not_allowed`. */
+  resolvePoint?(args: ResolvePointArgs): Promise<ResolvedPoint>;
 }
+
+export interface ResolvePointArgs {
+  help_id: string;
+  obs?: string;
+  x: number;
+  y: number;
+  words: string;
+}
+
+/** What `resolvePoint` hands back; the host adds `help_id`, `x`, `y` and `words` itself. */
+export type ResolvedPoint = Pick<PointedBody, "screen" | "app" | "element" | "refused">;
 
 /** What `ctx.spend` counts a task step as. `act` is counted as a `click` (the closest of the
  *  existing classes: a press of a control) and `apps` as `app_focus`. */
@@ -285,6 +314,14 @@ export interface DeviceHostCallbacks {
   /** Every gate decision, for the app's append-only on-disk audit log. Content
    *  is the caller's to redact; the host passes op + decision + reason only. */
   onAudit?(entry: DeviceAuditEntry): void;
+  /** Show Me: a help request opened on this session. The app posts a still now and then stills on
+   *  change (via `host.postStill`) for ten minutes. */
+  onHelpOpened?(req: HelpRequest): void;
+  /** Show Me: the person is looking from their phone. The app posts a still now, restarts its
+   *  ten-minute window and shows "<name> is looking from their phone". */
+  onHelpViewing?(req: HelpRequest, viewer: HelpViewer | null): void;
+  /** Show Me: the help request closed (answered, withdrawn or ended). The app stops and clears its lines. */
+  onHelpClosed?(req: HelpRequest): void;
 }
 
 export interface DeviceAuditEntry {
@@ -338,6 +375,25 @@ export interface DeviceHost {
   resume(): Promise<void>;
   /** The current pause reason, or null. */
   pausedReason(): DevicePauseReason | null;
+  /** Show Me: feed a lane message in together with WHO sent it (the decrypted text and the sender's
+   *  account id). Returns true when it was a `[[SALT-POINT]]` line, consumed here whether or not it
+   *  was acted on; false for anything else (pass that to `handleCommand`). A point is accepted only
+   *  from a person `options.isPersonOverDevice` names, only while its help request is open (or
+   *  `options.isWatchLive()`), and once per point id; the answer is a `pointed` op with `re` = the
+   *  point id. Every refusal is one audit line (op `point`) and no reply. */
+  handleLaneMessage(plaintext: string, senderId: SaltId): Promise<boolean>;
+  /** Show Me: feed a `help_request_opened|viewing|closed` delivery in (the `onDeviceDelivery` type
+   *  and body). Returns true when it was one of those for THIS session and the matching callback
+   *  ran. */
+  handleDelivery(type: string, body: unknown): boolean;
+  /** Show Me: post a still into the lane (op `still`, no `re`). Resolves `{posted: true}`, or
+   *  `{posted: false, reason}` when held back: `too_soon` (under 2 s since the last one),
+   *  `too_many` (30 in the last minute), `no_help` (no help request open for that id and no live
+   *  watch), `secure_field` (the session is paused for a secure field), `ended`. Throws
+   *  `bad_args` for a malformed body and `too_large` over the per-message cap. */
+  postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "secure_field" | "ended" }>;
+  /** The help request ids currently open on this session. */
+  openHelpIds(): string[];
 }
 
 export function createDeviceHost(
@@ -357,6 +413,16 @@ export function createDeviceHost(
     progressMinIntervalMs?: number;
     /** How long past `timeout_s` a task handler may run before it is cut off (default 15 s). */
     taskGraceMs?: number;
+    /** Show Me: is this account one of the device's people (owner, chain root or the session's
+     *  grantor), per the host's cached `GET /devices/:id/grants`? A point from anyone else is ignored.
+     *  Absent, every point is ignored. */
+    isPersonOverDevice?: (accountId: SaltId) => boolean;
+    /** Show Me: is a live watch call on this device right now? While it is, a point is accepted
+     *  without an open help request. Default: never. */
+    isWatchLive?: () => boolean;
+    /** Least gap between two stills (default STILL_MIN_INTERVAL_MS, 2 s). For tests: the 30-a-minute
+     *  cap can only be reached below the default gap. */
+    stillMinIntervalMs?: number;
   } = {}
 ): DeviceHost {
   const deviceLock = options.deviceLock ?? sharedDeviceLock;
@@ -1042,6 +1108,7 @@ export function createDeviceHost(
     if (durationTimer) clearTimeout(durationTimer);
     beatTimer = durationTimer = null;
     for (const ac of runningTasks.values()) ac.abort("session_ended");
+    openHelp.clear();
     audit({ commandId: "-", op: "stop", decision: "ended", reason });
     callbacks.onEnded?.(reason);
     try {
@@ -1092,7 +1159,135 @@ export function createDeviceHost(
     await syncPause();
   }
 
-  return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason };
+  // ---- Show Me: help requests, stills and points (CONTRACT.md sections 3 and 4) ----------------
+  // Help requests open on THIS session, by id. A point is acted on only while its help id is here
+  // (or a watch is live).
+  const openHelp = new Map<string, HelpRequest>();
+  // Point ids already answered, oldest dropped: a replayed or re-delivered point is answered once.
+  const seenPoints = new Set<string>();
+  const SEEN_POINTS_CAP = 256;
+  // Times of recently posted stills (the 2 s gap and the 30-a-minute window).
+  const stillTimes: number[] = [];
+
+  function helpFromBody(body: unknown): HelpRequest | null {
+    const hr = (body as { help_request?: unknown } | null | undefined)?.help_request;
+    if (!hr || typeof hr !== "object") return null;
+    const r = hr as HelpRequest;
+    if (typeof r.id !== "string" || r.id === "") return null;
+    // A delivery about another session is not ours.
+    if (r.device_session_id == null || !sameId(r.device_session_id, snapshot.sessionId)) return null;
+    return r;
+  }
+
+  function handleDelivery(type: string, body: unknown): boolean {
+    if (!(HELP_DELIVERY_TYPES as readonly string[]).includes(type)) return false;
+    if (ended) return false;
+    const req = helpFromBody(body);
+    if (!req) return false;
+    if (type === "help_request_opened") {
+      openHelp.set(req.id, req);
+      callbacks.onHelpOpened?.(req);
+    } else if (type === "help_request_viewing") {
+      openHelp.set(req.id, req);
+      const v = (body as { viewer?: HelpViewer | null }).viewer;
+      callbacks.onHelpViewing?.(req, v && typeof v === "object" && typeof v.id === "string" ? v : null);
+    } else {
+      openHelp.delete(req.id);
+      callbacks.onHelpClosed?.(req);
+    }
+    return true;
+  }
+
+  function helpAllowsStills(helpId: string): boolean {
+    return openHelp.has(helpId) || (options.isWatchLive?.() ?? false);
+  }
+
+  async function postStill(
+    raw: StillBody
+  ): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "secure_field" | "ended" }> {
+    if (ended) return { posted: false, reason: "ended" };
+    const body = normalizeStill(raw);
+    if (!body) throw new DeviceProtocolError("bad_args", "malformed still");
+    if (!helpAllowsStills(body.help_id)) return { posted: false, reason: "no_help" };
+    // No new still while secure input is on.
+    if (pausedReason === "secure_field") return { posted: false, reason: "secure_field" };
+    const now = clock();
+    while (stillTimes.length && now - stillTimes[0] >= 60_000) stillTimes.shift();
+    if (stillTimes.length && now - stillTimes[stillTimes.length - 1] < (options.stillMinIntervalMs ?? STILL_MIN_INTERVAL_MS)) return { posted: false, reason: "too_soon" };
+    if (stillTimes.length >= STILL_MAX_PER_MINUTE) return { posted: false, reason: "too_many" };
+    const plaintext = encodeDeviceMessage(
+      { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: nextOutSeq(), op: "still", session: snapshot.sessionId },
+      body
+    );
+    if (Buffer.byteLength(plaintext, "utf8") > MAX_DEVICE_PLAINTEXT_BYTES) throw new DeviceProtocolError("too_large", "still exceeds the per-message limit");
+    stillTimes.push(now);
+    await transport.postResult(plaintext, snapshot.readers);
+    return { posted: true };
+  }
+
+  function pointRefused(pointId: string, why: string): void {
+    audit({ commandId: pointId, op: "point", decision: "refused", code: "forbidden", reason: why });
+  }
+
+  async function handleLaneMessage(plaintext: string, senderId: SaltId): Promise<boolean> {
+    if (!isPointMessage(plaintext)) return false;
+    if (ended) return true;
+    let point;
+    try {
+      point = decodePoint(plaintext);
+    } catch (e) {
+      pointRefused("-", `malformed point: ${(e as Error).message}`);
+      return true;
+    }
+    if (!point) return true;
+    if (!options.isPersonOverDevice?.(senderId)) {
+      pointRefused(point.id, "sender is not a person over this device");
+      return true;
+    }
+    if (!helpAllowsStills(point.help)) {
+      pointRefused(point.id, "no open help request for that id");
+      return true;
+    }
+    if (seenPoints.has(point.id)) {
+      pointRefused(point.id, "point id already answered");
+      return true;
+    }
+    seenPoints.add(point.id);
+    while (seenPoints.size > SEEN_POINTS_CAP) seenPoints.delete(seenPoints.values().next().value as string);
+
+    let resolved: ResolvedPoint | null = null;
+    let refused: PointedRefusal | null = null;
+    if (!handlers.resolvePoint) {
+      refused = "not_allowed";
+    } else {
+      try {
+        resolved = await handlers.resolvePoint({ help_id: point.help, obs: point.obs, x: point.x, y: point.y, words: point.words });
+      } catch {
+        refused = "not_allowed";
+      }
+    }
+    // The floor, again: never name anything in a never-allowed app, whatever the handler said.
+    if (resolved && refused === null) {
+      refused = resolved.refused ?? null;
+      if (refused === null && resolved.app && isNeverAllowed(resolved.app)) refused = "forbidden_app";
+    }
+    const answer: PointedBody =
+      normalizePointed({
+        help_id: point.help,
+        x: point.x,
+        y: point.y,
+        screen: resolved?.screen ?? { x: 0, y: 0 },
+        app: refused === "forbidden_app" ? null : (resolved?.app ?? null),
+        element: refused === null ? (resolved?.element ?? null) : null,
+        refused,
+        words: point.words,
+      }) ?? ({ help_id: point.help, x: point.x, y: point.y, screen: { x: 0, y: 0 }, app: null, element: null, refused: "not_allowed", words: "" } as PointedBody);
+    audit({ commandId: point.id, op: "point", decision: "ran", reason: answer.refused ?? undefined });
+    await reply({ id: point.id } as DeviceHeader, "pointed", answer);
+    return true;
+  }
+
+  return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason, handleLaneMessage, handleDelivery, postStill, openHelpIds: () => [...openHelp.keys()] };
 }
 
 const AGENT_OP_SET = new Set<DeviceOp>([

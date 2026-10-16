@@ -23,7 +23,9 @@ import {
   deviceMessageId,
   decodeDeviceMessage,
   encodeDeviceMessage,
+  normalizePointed,
   normalizeProgress,
+  normalizeStill,
   normalizeTaskResult,
   taskCommandBody,
   TASK_CLIENT_GRACE_MS,
@@ -42,7 +44,9 @@ import {
   type SubmitArgs,
   type ElementRef,
   type AppsResult,
+  type PointedBody,
   type Progress,
+  type StillBody,
   type TaskResult,
 } from "./protocol.js";
 import { sameId, type SaltId } from "../ids.js";
@@ -215,6 +219,12 @@ export interface DeviceClient {
    *  true if it was a device result this client consumed. */
   handleLaneMessage(plaintext: string): boolean;
   on(event: "active" | "ended" | "ask", cb: Listener): void;
+  /** Show Me: a still the computer posted into the lane while a help request is open (op `still`,
+   *  unsolicited). The body is allow-listed (`normalizeStill`); a malformed one is dropped. Returns an unsubscribe. */
+  onStill(cb: (still: StillBody) => void): () => void;
+  /** Show Me: the computer's answer to a person's point (op `pointed`). `pointId` is the SALT-POINT id it
+   *  answers (the header's `re`). The body is allow-listed (`normalizePointed`). Returns an unsubscribe. */
+  onPointed(cb: (pointed: PointedBody, pointId: string) => void): () => void;
   /** Session state changes: queued(position) / requested / active /
    *  paused(reason) / resumed / ended(reason). Returns an unsubscribe. */
   onState(cb: (s: DeviceState) => void): () => void;
@@ -236,6 +246,8 @@ export function createDeviceClient(
   const pending = new Map<string, Pending>();
   const listeners: Record<string, Listener[]> = { active: [], ended: [], ask: [] };
   const stateListeners: Array<(s: DeviceState) => void> = [];
+  const stillListeners: Array<(s: StillBody) => void> = [];
+  const pointedListeners: Array<(p: PointedBody, pointId: string) => void> = [];
   let openResolve: ((m: DeviceSessionMeta) => void) | null = null;
   let openReject: ((e: Error) => void) | null = null;
   let openTimer: ReturnType<typeof setTimeout> | null = null;
@@ -677,6 +689,14 @@ export function createDeviceClient(
     }
   }
 
+  function safely(fn: () => void): void {
+    try {
+      fn();
+    } catch {
+      /* a listener throwing never breaks the stream */
+    }
+  }
+
   function handleLaneMessage(plaintext: string): boolean {
     let decoded;
     try {
@@ -687,6 +707,17 @@ export function createDeviceClient(
     if (!decoded) return false;
     const { header, body } = decoded;
     if (!meta || !sameId(header.session, meta.id)) return false;
+    // Show Me: the two device-to-agent ops that are not answers to a command.
+    if (header.op === "still" && header.re === undefined) {
+      const still = normalizeStill(body);
+      if (still) for (const cb of [...stillListeners]) safely(() => cb(still));
+      return true;
+    }
+    if (header.op === "pointed" && header.re !== undefined) {
+      const pointed = normalizePointed(body);
+      if (pointed) for (const cb of [...pointedListeners]) safely(() => cb(pointed, header.re as string));
+      return true;
+    }
     if (header.re === undefined) return false; // a result always answers a command id
     const p = pending.get(header.re);
     if (!p) return false;
@@ -750,6 +781,20 @@ export function createDeviceClient(
     handleLaneMessage,
     on: (event, cb) => {
       (listeners[event] ??= []).push(cb);
+    },
+    onStill: (cb) => {
+      stillListeners.push(cb);
+      return () => {
+        const i = stillListeners.indexOf(cb);
+        if (i >= 0) stillListeners.splice(i, 1);
+      };
+    },
+    onPointed: (cb) => {
+      pointedListeners.push(cb);
+      return () => {
+        const i = pointedListeners.indexOf(cb);
+        if (i >= 0) pointedListeners.splice(i, 1);
+      };
     },
     onState: (cb) => {
       stateListeners.push(cb);
