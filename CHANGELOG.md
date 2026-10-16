@@ -5,6 +5,14 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.21.0 — 2026-10-15 (minor: new option, behaviour change in link only, no breaking change)
+
+Replies answer the message they answer.
+
+### Changed
+
+- **Replies link the message they answer, by default.** `ctx.reply(text)` in `onMessage` now posts with `reply_to_message_id` set to the incoming message (`ctx.messageId`), so Salt shows it quoted above the reply and a person who sent several messages can tell which one is being answered. Opt out per reply with `ctx.reply(text, { replyTo: null })`; `{ replyTo: id }` links a different message of the same chat; `{ mentions }` still works alongside. Chat-opened, hand-off, card and app contexts answer no message and are unchanged. `client.postMessage` stays a primitive and defaults nothing; it gains `opts.replyTo` (and `postPlainMessage` / `sendAttachment` an optional `replyTo`). salt-api drops an id that is not in the chat, so a wrong id costs the link, never the message. `tests/reply-link.test.js`.
+
 ## 0.20.0 — 2026-10-15 (minor: new exports, no breaking change)
 
 Pinned team rules, approval before paid work, listed teams, and the lead's way of working, in the SDK.

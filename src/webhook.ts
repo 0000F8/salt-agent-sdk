@@ -134,8 +134,11 @@ export interface ReplyOptions {
    *  When given, they replace the automatic "@sender" addressing and the text is posted exactly as written, so write
    *  the "@handle" yourself. */
   mentions?: SaltId[];
+  /** Every reply to an incoming message links that message (Salt shows it quoted above the reply) so a person who
+   *  sent several messages can tell which one is being answered. `null` opts out for this reply; an id links a
+   *  different message of the same chat. */
+  replyTo?: SaltId | null;
 }
-
 
 export interface MessageContext {
   identity: AgentIdentity;
@@ -198,7 +201,9 @@ export interface MessageContext {
   /** Encrypts `text` for every current chat member (+ this identity's own
    *  copy), posts it, drains this reply's delegation trail onto it, and
    *  emits an agent_reply_sent metric. Handles a typing-indicator heartbeat
-   *  for the duration of the call automatically. */
+   *  for the duration of the call automatically. Links the message being
+   *  handled (`messageId`) as the one answered, unless `{ replyTo: null }`
+   *  (opt out) or `{ replyTo: otherId }` (override) is passed. */
   reply(text: string, opts?: ReplyOptions): Promise<void>;
   /** The id of the message being handled (the delivery's `message_id`). */
   messageId: SaltId;
@@ -1264,9 +1269,14 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   function makeReply(
     identity: AgentIdentity,
     chatId: SaltId,
-    addressee?: { id: SaltId; username?: string; account_type?: string } | null
+    addressee?: { id: SaltId; username?: string; account_type?: string } | null,
+    // The message this reply answers by default; only onMessage supplies one.
+    // Chat-opened, hand-off, card and app contexts answer no message.
+    defaultReplyTo?: SaltId
   ): (text: string, opts?: ReplyOptions) => Promise<void> {
     return async (text: string, opts?: ReplyOptions) => {
+      const replyTo =
+        opts && Object.prototype.hasOwnProperty.call(opts, "replyTo") ? opts.replyTo ?? undefined : defaultReplyTo;
       const startedAt = Date.now();
       let recipientKeys: string[];
       let memberCount = 0;
@@ -1317,7 +1327,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
 
       const trail = delegations.drainTrail(identity.saltAppId, chatId);
       try {
-        await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail, mentions);
+        await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail, mentions, {
+          replyTo,
+        });
       } catch (err) {
         logger.error(`[chat ${chatId}] posting reply failed: ${(err as Error).message}`);
         return;
@@ -1751,7 +1763,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     // handler returns successfully -- see the persistence step below.
     // Nothing about what actually gets sent changes.
     const repliesForSession: string[] = [];
-    const baseReply = makeReply(identity, chatId, senderRaw);
+    const baseReply = makeReply(identity, chatId, senderRaw, message.message_id as SaltId);
     const trackedReply = async (text: string, opts?: ReplyOptions): Promise<void> => {
       repliesForSession.push(text);
       await baseReply(text, opts);
