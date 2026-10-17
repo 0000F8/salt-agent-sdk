@@ -5,6 +5,14 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## Unreleased — key reset, phase 2 (not versioned yet)
+
+### Added
+
+- **`client.resetChatKey(apiKey, {password, vaultPassword?, devices?, dryRun?, token?, userId?})`** (`POST /api/v1/userkeys/reset`). Builds the whole request on this side: a new keypair and a NEW messages DEK (never the old one), the new vault row (password and recovery wraps, a new recovery phrase returned once, `phrase_ciphertext` re-encrypted), every older key generation rewrapped, the owner's vault-scheme agent keys rewrapped (fingerprint-checked), and a v2 re-seal for each device that stays, signed by the new key AND the generation that device holds. Devices not named in `devices` are unlinked by the server. `dryRun` returns the plan only. `buildChatKeyReset` and `authString` are the pure pieces.
+- **`onMemberKeyChanged`** (`member_key_changed {user_id, key_generation, public_fingerprint}`), on webhook and socket delivery.
+- **Per-send recipient keys, with the guard.** `reply()` resolves members at send time (as before), now passes `recipient_fingerprints` and `sender_fingerprint` to `postMessage` when every member carries a fingerprint, and answers a 409 `stale_recipient_keys` by encrypting once more to the members the refusal names.
+
 ## 0.22.0 — 2026-10-15 (minor: new exports, no breaking change)
 
 Show Me, in the SDK: ask a person for help, let them look at the computer's screen and point at it, and answer a live watch call from a device. Wire format and rules: `design-fleet/runs/2026-10-15-watch/CONTRACT.md` sections 1, 3, 4 and 5.

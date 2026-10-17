@@ -16,6 +16,7 @@ import {
 } from "./identity.js";
 import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitation, type RecoveryRequestForGuardian } from "./recovery.js";
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
+import { buildChatKeyReset, type AgentKeyToRewrap, type LinkedDeviceRow, type UserKeysResponse, type VaultRow } from "./keyReset.js";
 import { encodeHelp, type HelpReason, type HelpRequest } from "./help.js";
 
 // --- Show Me: asking a person for help (help.ts, salt-api /api/v1/help_requests) ---------------
@@ -1049,6 +1050,46 @@ export const RULE_ERROR_CODES: readonly RuleErrorCode[] = [
   "payer_only",
 ];
 
+/** What a dry run of `resetChatKey` answers: what the reset would touch. */
+export interface ChatKeyResetPlan {
+  devices: Array<LinkedDeviceRow & Record<string, unknown>>;
+  chats_affected?: number;
+  current_generation: number;
+  vault_version: number;
+  agents_to_rewrap?: AgentKeyToRewrap[];
+  [key: string]: unknown;
+}
+
+export interface ResetChatKeyParams {
+  /** The owner's login password. The reset needs it (the Devise gate and the vault lock): an explicit owner grant, never a bare token. */
+  password: string;
+  /** Only when the vault uses a separate lock password. */
+  vaultPassword?: string;
+  /** Which linked devices keep working (re-sealed): their ids, or "all" (the default). Every other linked device is unlinked. */
+  devices?: SaltId[] | "all";
+  /** Ask Salt what would change and touch nothing. */
+  dryRun?: boolean;
+  /** A human session (`Bearer <jwt>`), sent as `Authorization` beside the api-key. The reset is refused for a bare `sld_` token or an agent account. */
+  token?: string;
+  /** The owner's user id, when `GET /api/v1/account` does not carry it. */
+  userId?: SaltId;
+  idempotencyKey?: string;
+}
+
+export interface ResetChatKeyResult {
+  dryRun: boolean;
+  plan: ChatKeyResetPlan;
+  /** Salt's answer to the reset (new key row, `resealed`/`unlinked` ids, a fresh JWT). Absent on a dry run. */
+  response?: Record<string, unknown>;
+  /** The NEW recovery phrase: show it to the owner once. Salt never receives it. */
+  recoveryPhrase?: string;
+  newGeneration?: number;
+  /** Older generations that could not be opened with the current DEK (history stays unreadable). */
+  skippedGenerations?: number[];
+  /** Kept devices that held a generation we could not open: not re-sealed (they read "link this computer again"). */
+  notResealed?: SaltId[];
+}
+
 export class SaltApiError extends Error {
   status: number;
   body: unknown;
@@ -1248,6 +1289,47 @@ export function createSaltClient(options: SaltClientOptions) {
       return chat?.session?.users ?? [];
     },
 
+    /**
+     * Reset the owner's chat key (`POST /api/v1/userkeys/reset`, KEY_RESET_DESIGN.md sections 4 and 10): a fresh keypair
+     * and messages DEK, old history still readable by the owner, the owner's agent keys rewrapped, and every device in
+     * `devices` re-sealed (v2 payload, dual signature). Devices not named are unlinked. `dryRun` returns what would
+     * change and touches nothing. Needs the owner's login password: see ResetChatKeyParams. The new recovery phrase is
+     * returned once and never sent to Salt.
+     */
+    async resetChatKey(apiKey: string, params: ResetChatKeyParams): Promise<ResetChatKeyResult> {
+      const extraHeaders = params.token ? { Authorization: params.token.startsWith("Bearer ") ? params.token : `Bearer ${params.token}` } : undefined;
+      const idempotencyKey = params.idempotencyKey ?? randomUUID();
+      const call = <T,>(method: string, path: string, body?: unknown) => request<T>(method, path, apiKey, body, { extraHeaders, idempotencyKey: method === "POST" ? idempotencyKey : undefined });
+      const plan = await call<ChatKeyResetPlan>("POST", "/api/v1/userkeys/reset", { dry_run: true });
+      if (params.dryRun) return { dryRun: true, plan };
+
+      const [rawKeys, vault, devices, account] = await Promise.all([
+        call<UserKeysResponse | UserKeysResponse[]>("GET", "/api/v1/userkeys"),
+        call<VaultRow>("GET", "/api/v1/vault"),
+        call<{ linked_devices?: LinkedDeviceRow[] }>("GET", "/api/v1/linked_devices"),
+        params.userId ? Promise.resolve({ id: params.userId }) : call<{ id?: SaltId }>("GET", "/api/v1/account"),
+      ]);
+      const userKeys = Array.isArray(rawKeys) ? rawKeys[0] : rawKeys;
+      const userId = params.userId ?? account?.id;
+      if (userId === undefined || userId === null) throw new Error("resetChatKey: the owner's user id is unknown; pass userId.");
+      const linked = devices?.linked_devices ?? [];
+      const keepDeviceIds = params.devices === undefined || params.devices === "all" ? linked.map((d) => d.id) : params.devices;
+      const built = await buildChatKeyReset({
+        userKeys,
+        vault,
+        password: params.password,
+        vaultPassword: params.vaultPassword,
+        userId,
+        linkedDevices: linked,
+        keepDeviceIds,
+        agentKeys: plan.agents_to_rewrap,
+        expectedGeneration: plan.current_generation,
+        expectedVaultVersion: plan.vault_version,
+      });
+      const response = await call<Record<string, unknown>>("POST", "/api/v1/userkeys/reset", built.request);
+      return { dryRun: false, plan, response, recoveryPhrase: built.recoveryPhrase, newGeneration: built.newGeneration, skippedGenerations: built.skippedGenerations, notResealed: built.notResealed };
+    },
+
     /** Recent messages in a chat this identity is a member of (even as a silent observer). */
     async getChatMessages(apiKey: string, chatId: SaltId): Promise<unknown[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
@@ -1316,13 +1398,23 @@ export function createSaltClient(options: SaltClientOptions) {
       // answered (`reply_to_message_id`; salt-api drops an id from another
       // chat). A primitive: nothing defaults it here. `ctx.reply` supplies the
       // incoming message's id by default (webhook.ts).
-      opts?: { quiet?: boolean; replyTo?: SaltId }
+      opts?: {
+        quiet?: boolean;
+        replyTo?: SaltId;
+        // The server guard (KEY_RESET_DESIGN.md 7): the public fingerprint of every recipient key this message was
+        // encrypted to, by user id, and of the sender's own key. A mismatch is a 409 `stale_recipient_keys` carrying the
+        // current members; see `staleRecipientKeys`.
+        recipientFingerprints?: Record<string, string>;
+        senderFingerprint?: string;
+      }
     ): Promise<PostMessageResult> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
       if (opts?.replyTo !== undefined && opts.replyTo !== null) body.reply_to_message_id = opts.replyTo;
       if (delegations && delegations.length > 0) body.delegations = delegations;
       if (mentions && mentions.length > 0) body.mentions = mentions;
       if (opts?.quiet) body.quiet = true;
+      if (opts?.recipientFingerprints && Object.keys(opts.recipientFingerprints).length > 0) body.recipient_fingerprints = opts.recipientFingerprints;
+      if (opts?.senderFingerprint) body.sender_fingerprint = opts.senderFingerprint;
       return request("POST", "/api/v1/messages", apiKey, body);
     },
 
