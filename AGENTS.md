@@ -588,3 +588,11 @@ on its own answers the agent `failed` with the message.
 ## Publishing
 
 `salt-agent-sdk` is on npm (`npm install salt-agent-sdk`). 0.18.0 (2026-10-14) was the first release since 0.1.0 and carries everything in this repo up to it. Publish through the vault, never a personal login: `salt-deploy/scripts/vault.py with-secret --env NODE_AUTH_TOKEN npm token -- npm publish` after `npm test` and `npm run build`; bump `package.json` and move CHANGELOG's Unreleased under the new version in the same commit.
+
+## Decrypting with a keyring (key reset, Phase 1)
+
+`decrypt(message, key, passphrase)` also takes an array of armored private keys
+(active first, then retired generations from `GET /userkeys` `retired`; a
+missing `retired` is empty). Keys that cannot be read or unlocked are skipped;
+it throws only when none opens the message. Encrypting and signing stay on the
+active key. The single-key form is unchanged.

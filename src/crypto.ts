@@ -13,22 +13,53 @@ export interface GeneratedKeypair {
 }
 
 /**
- * Decrypt an armored PGP message with the agent's private key. Salt
- * encrypts each message to every chat member's public key, so the agent's
- * own key is among the recipients and can read the ciphertext directly.
+ * Decrypt an armored PGP message with the agent's private key, or with a
+ * keyring of several (the active key plus retired ones after a chat-key
+ * reset). Salt encrypts each message to every chat member's public key, so the
+ * agent's own key is among the recipients and can read the ciphertext
+ * directly. openpgp matches the message's recipient key ids itself. A key in
+ * the ring that cannot be read or unlocked is skipped; if none opens the
+ * message this throws.
+ *
+ * Single key: `decrypt(msg, armoredKey, passphrase)` (unchanged). Keyring:
+ * `decrypt(msg, [armoredActive, armoredRetired...], passphrase)`, or entries
+ * of `{ armoredKey, passphrase }` when keys have different passphrases.
  */
+export type DecryptionKeyInput = string | { armoredKey: string; passphrase?: string };
+
 export async function decrypt(
   armoredMessage: string,
-  armoredPrivateKey: string,
-  passphrase: string
+  armoredPrivateKey: DecryptionKeyInput | DecryptionKeyInput[],
+  passphrase: string = ""
 ): Promise<string> {
-  const privateKey = await openpgp.decryptKey({
-    privateKey: await openpgp.readPrivateKey({ armoredKey: armoredPrivateKey }),
-    passphrase,
-  });
+  if (!Array.isArray(armoredPrivateKey)) {
+    const single = typeof armoredPrivateKey === "string" ? armoredPrivateKey : armoredPrivateKey.armoredKey;
+    const pass = typeof armoredPrivateKey === "string" ? passphrase : armoredPrivateKey.passphrase ?? passphrase;
+    const privateKey = await openpgp.decryptKey({
+      privateKey: await openpgp.readPrivateKey({ armoredKey: single }),
+      passphrase: pass,
+    });
+    const { data } = await openpgp.decrypt({
+      message: await openpgp.readMessage({ armoredMessage }),
+      decryptionKeys: [privateKey],
+    });
+    return data as string;
+  }
+  const keys: openpgp.PrivateKey[] = [];
+  for (const entry of armoredPrivateKey) {
+    const armoredKey = typeof entry === "string" ? entry : entry.armoredKey;
+    const pass = typeof entry === "string" ? passphrase : entry.passphrase ?? passphrase;
+    try {
+      const key = await openpgp.readPrivateKey({ armoredKey });
+      keys.push(key.isDecrypted() ? key : await openpgp.decryptKey({ privateKey: key, passphrase: pass }));
+    } catch {
+      // an unreadable or unopenable generation is skipped, never fatal
+    }
+  }
+  if (keys.length === 0) throw new Error("No usable decryption key");
   const { data } = await openpgp.decrypt({
     message: await openpgp.readMessage({ armoredMessage }),
-    decryptionKeys: [privateKey],
+    decryptionKeys: keys,
   });
   return data as string;
 }
