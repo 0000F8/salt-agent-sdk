@@ -1069,8 +1069,6 @@ export interface ResetChatKeyParams {
   password: string;
   /** Only when the vault uses a separate lock password. */
   vaultPassword?: string;
-  /** Linked device ids to re-seal even without a valid key certification (default none: an uncertified device is left out and the server unlinks it). */
-  keepUncertified?: SaltId[];
   /** Which linked devices keep working (re-sealed): their ids, or "all" (the default). Every other linked device is unlinked. */
   devices?: SaltId[] | "all";
   /** Ask Salt what would change and touch nothing. */
@@ -1094,7 +1092,7 @@ export interface ResetChatKeyResult {
   skippedGenerations?: number[];
   /** Kept devices that held a generation we could not open: not re-sealed (they read "link this computer again"). */
   notResealed?: SaltId[];
-  /** Kept devices left out (so unlinked) because their key certification is missing or did not verify. */
+  /** Kept devices left out (so unlinked) because their key certification is missing or did not verify. There is no override: link each again by scan. */
   uncertified?: SaltId[];
 }
 
@@ -1352,7 +1350,6 @@ export function createSaltClient(options: SaltClientOptions) {
         keepDeviceIds,
         agentKeys,
         identitySections,
-        keepUncertified: params.keepUncertified,
         expectedGeneration: plan.current_generation ?? userKeys.generation,
         expectedVaultVersion: plan.vault_version,
       });

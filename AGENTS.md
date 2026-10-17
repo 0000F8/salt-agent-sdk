@@ -621,3 +621,8 @@ and fetch `client.getChatMembers` again before the next send. If Salt answers
 a send with 409 `{code: "stale_recipient_keys", members: [...]}`, `reply()`
 encrypts again to those members once; your own senders should branch on
 `code`, never on the status alone.
+
+A linked device is re-sealed only if its `key_certification` verifies against
+your own keyring. Any device without a valid one is left out (so it is
+unlinked) and listed in `result.uncertified`: tell the person to link it again
+by scan. There is no override.

@@ -140,8 +140,6 @@ export interface BuildChatKeyResetInput {
   agentKeys?: AgentKeyToRewrap[];
   /** Every identity section holding ciphertext: re-encrypted under the new DEK (`identity_rewraps`). */
   identitySections?: IdentitySectionCiphertext[];
-  /** Linked device ids to re-seal even though their key certification is missing or does not verify. Default: none. */
-  keepUncertified?: SaltId[];
   expectedGeneration?: number;
   expectedVaultVersion?: number;
   /** Tests only: the real login string costs 600k PBKDF2 rounds. */
@@ -180,7 +178,7 @@ export interface BuiltChatKeyReset {
   skippedGenerations: number[];
   /** Kept devices that hold a generation we could not open, so no valid re-seal can be made: they are not re-sealed. */
   notResealed: SaltId[];
-  /** Kept devices left out because their key certification is missing or did not verify (the server unlinks them). */
+  /** Kept devices left out because their key certification is missing or did not verify (the server unlinks them): the person re-links each by scan. There is no override. */
   uncertified: SaltId[];
 }
 
@@ -309,7 +307,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
   const uncertified: SaltId[] = [];
   const ownerPrivateKeys = generations.map((g) => g.armored);
   for (const device of input.linkedDevices.filter((d) => input.keepDeviceIds.includes(d.id))) {
-    if (!(input.keepUncertified ?? []).includes(device.id) && !(await deviceCertified(device, input.userId, ownerPrivateKeys))) {
+    if (!(await deviceCertified(device, input.userId, ownerPrivateKeys))) {
       uncertified.push(device.id);
       continue;
     }
