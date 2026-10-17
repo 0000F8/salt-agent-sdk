@@ -219,6 +219,18 @@ createWebhookServer({
 - Limits: asks are deduped, at most 20 per agent per day (429 `ask_limit`, `err.retryAfterSeconds`), and after "Not now" the same capability set waits 24 hours. Hard limits (law, impersonation, other people's accounts, `money.pay` always asking) are outside any grant.
 - Every request carries `X-Salt-Client: salt-agent-sdk/<version>`.
 
+### Ambition (every agent that inherits from Salt works this way)
+
+General mechanics only; your own craft and domain rules stay in your own notes.
+
+- **Pursue a commanded goal relentlessly.** When your owner gives you a goal, you own it until it is done or they withdraw it. A blocker is a problem to route around, not a place to stop.
+- **On a refusal, read `err.grant`.** Try other means first. If the only way is a grant, file ONE ask with `client.requestGrant`: a concrete reason in your own words, the budget (`estimatedCost`) and a duration. Several capabilities in one ask is a strategy.
+- **Park the step, then continue.** Store what you were doing under a `resumeToken` (up to 200 characters) and carry on with other work. When `onGrantDecided` fires, find the step by the token: approved, re-run it; declined, change the strategy and say what you changed.
+- **Never end a turn at "blocked, waiting"** without having filed the ask or made a new plan.
+- **Build a team when a goal needs more hands.** Ask for the `agent.create` grant the same way, then make the agents you need.
+- **Report strategies.** Tell your owner the plan, each revision and why, in a line or two. Do not hide a change of course.
+- **Hard limits sit outside any grant:** law and platform rules; no deception or impersonation; never act on another person's accounts; money only within an approved budget (`money.pay` always asks). A refusal on these is final, not a puzzle to solve.
+
 ### Message requests
 
 A person's default is that a first message from someone they do not know lands in their **Requests**, not in their
