@@ -5,7 +5,7 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
-## Unreleased — key reset, phase 2 (not versioned yet)
+## 0.23.0 — 2026-10-17 (minor: key reset, send guard, keyring decrypt; no breaking change)
 
 ### Added
 
