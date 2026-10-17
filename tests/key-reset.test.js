@@ -221,11 +221,12 @@ async function resetWorld({ lockMode = "login", vaultPassword } = {}) {
     { id: "dev-reader", kind: "reader", public_key: readerK.publicKey, sealed_key_generation: 1, key_certification: await certify(retiredK, "reader", readerK) },
     { id: "dev-lost", kind: "computer", public_key: lostK.publicKey, sealed_key_generation: 2, key_certification: null },
   ];
-  return { PASSWORD, phrase, vault, userKeys, devices, keys: { retiredK, activeK, agentK, computerK, readerK }, oldDek, kekPw, walletsRaw, certify, lostK, agent: { agent_id: "agent-1", public_fingerprint: agentK.fingerprint, encrypted_private_key: agentBlob } };
+  const identity = [{ id: "sec-1", key: "bio", ciphertext: await gcm(oldDek, te.encode(JSON.stringify("hello there")), "identity:bio") }, { id: "sec-2", key: "link", scope: "everyone", value: "x" }];
+  return { identity, PASSWORD, phrase, vault, userKeys, devices, keys: { retiredK, activeK, agentK, computerK, readerK }, oldDek, kekPw, walletsRaw, certify, lostK, agent: { agent_id: "agent-1", public_fingerprint: agentK.fingerprint, encrypted_private_key: agentBlob } };
 }
 
 const build = (w, extra = {}) =>
-  sdk.buildChatKeyReset({ userKeys: w.userKeys, vault: w.vault, password: w.PASSWORD, userId: "user-1", linkedDevices: w.devices, keepDeviceIds: ["dev-computer", "dev-reader"], agentKeys: [w.agent], authIterations: ITER, ...extra });
+  sdk.buildChatKeyReset({ userKeys: w.userKeys, vault: w.vault, password: w.PASSWORD, userId: "user-1", linkedDevices: w.devices, identitySections: w.identity.filter((i) => i.ciphertext), keepDeviceIds: ["dev-computer", "dev-reader"], agentKeys: [w.agent], authIterations: ITER, ...extra });
 
 test("reset request: a NEW DEK -- the old DEK opens none of the new wraps; the new DEK opens everything", async () => {
   const w = await resetWorld();
@@ -267,6 +268,10 @@ test("reset request: a NEW DEK -- the old DEK opens none of the new wraps; the n
   assert.equal(back[2], w.keys.activeK.privateKey);
   assert.equal(JSON.parse(td.decode(await open(newDek, r.vault.phrase_ciphertext, "recovery-phrase"))), out.recoveryPhrase);
   assert.equal(JSON.parse(td.decode(await open(newDek, r.agent_rewraps[0].encrypted_private_key, `agentkey:${w.keys.agentK.fingerprint}`))).private_key, w.keys.agentK.privateKey);
+
+  assert.deepEqual(r.identity_rewraps.map((x) => x.section_id), ["sec-1"]);
+  await assert.rejects(open(w.oldDek, r.identity_rewraps[0].ciphertext, "identity:bio"));
+  assert.equal(JSON.parse(td.decode(await open(newDek, r.identity_rewraps[0].ciphertext, "identity:bio"))), "hello there");
 
   // Wallets: same DEK, password and guardian wraps untouched, recovery wrap now follows the new phrase.
   assert.equal(r.vault.wrapped_deks.wallets.password, w.vault.wrapped_deks.wallets.password);
@@ -329,6 +334,7 @@ function resetFetch(w, calls) {
     if (p === "/api/v1/userkeys") return json(w.userKeys);
     if (p === "/api/v1/vault") return json(w.vault);
     if (p === "/api/v1/linked_devices") return json({ linked_devices: w.devices });
+    if (p === "/api/v1/identity") return json({ sections: w.identity });
     if (p === "/api/v1/account") return json({ id: "user-1" });
     return json({}, 404);
   };
@@ -388,4 +394,9 @@ test("a swapped device key is never sealed to; an uncertified device is excluded
   w3.devices[1].key_certification = await w3.certify(w3.keys.activeK, "computer", w3.keys.readerK);
   const bad = await build(w3);
   assert.deepEqual(bad.uncertified.sort(), ["dev-computer", "dev-reader"]);
+});
+
+test("a 429 carries Retry-After as retryAfterSeconds; the code survives for the other refusals", async () => {
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl: async () => new Response(JSON.stringify({ code: "too_many_attempts" }), { status: 429, headers: { "Retry-After": "30" } }) });
+  await assert.rejects(client.resetChatKey("k", { password: "p", dryRun: true }), (e) => e.code === "too_many_attempts" && e.retryAfterSeconds === 30);
 });

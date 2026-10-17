@@ -62,6 +62,8 @@ const importDek = (raw: Uint8Array) => subtle.importKey("raw", raw, { name: "AES
 // GCM's AAD check is byte-exact and the fingerprint's case has varied: as served, then both cases.
 const aadCandidates = (prefix: string, fingerprint: string): string[] => [...new Set([fingerprint, fingerprint.toLowerCase(), fingerprint.toUpperCase()])].map((f) => `${prefix}:${f}`);
 
+const gcmDecryptAny = gcmDecrypt;
+
 async function openWithAad(dek: webcrypto.CryptoKey, blob: string, prefix: string, fingerprint: string): Promise<Record<string, unknown>> {
   let last: unknown = new Error("could not open");
   for (const aad of aadCandidates(prefix, fingerprint)) {
@@ -117,6 +119,13 @@ export interface AgentKeyToRewrap {
   encrypted_private_key: string;
 }
 
+/** A hidden identity section as `GET /api/v1/identity` serves it (`id` is the row id): its value is sealed under the messages DEK with AAD `identity:<key>`. */
+export interface IdentitySectionCiphertext {
+  id: SaltId;
+  key: string;
+  ciphertext: string;
+}
+
 export interface BuildChatKeyResetInput {
   userKeys: UserKeysResponse;
   vault: VaultRow;
@@ -130,6 +139,8 @@ export interface BuildChatKeyResetInput {
   /** Ids of the devices that keep working (re-sealed). Every other linked device is unlinked by the server. */
   keepDeviceIds: SaltId[];
   agentKeys?: AgentKeyToRewrap[];
+  /** Every identity section holding ciphertext: re-encrypted under the new DEK (`identity_rewraps`). */
+  identitySections?: IdentitySectionCiphertext[];
   /** Linked device ids to re-seal even though their key certification is missing or does not verify. Default: none. */
   keepUncertified?: SaltId[];
   expectedGeneration?: number;
@@ -151,6 +162,7 @@ export interface ChatKeyResetRequest {
     phrase_ciphertext: string;
     wrapped_deks: Record<string, Record<string, string>>;
   };
+  identity_rewraps: Array<{ section_id: SaltId; ciphertext: string }>;
   agent_rewraps: Array<{ agent_id: SaltId; encrypted_private_key: string; fingerprint: string }>;
   expected_generation: number;
   expected_vault_version: number;
@@ -280,6 +292,13 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
     agent_rewraps.push({ agent_id: a.agent_id, fingerprint: a.public_fingerprint.toUpperCase(), encrypted_private_key: await gcmEncrypt(newDek, te.encode(JSON.stringify({ private_key: opened.private_key, revocation_cert: opened.revocation_cert ?? null })), aad) });
   }
 
+  // 4b. Hidden identity sections are sealed under the same messages DEK (salt-fe identityValues.js: AAD `identity:<key>`).
+  const identity_rewraps: ChatKeyResetRequest["identity_rewraps"] = [];
+  for (const sec of input.identitySections ?? []) {
+    const value = td.decode(await gcmDecryptAny(oldDek, sec.ciphertext, `identity:${sec.key}`));
+    identity_rewraps.push({ section_id: sec.id, ciphertext: await gcmEncrypt(newDek, te.encode(value), `identity:${sec.key}`) });
+  }
+
   // 5. Re-seal the keyring to every device that stays: v2, signed by the new key AND the generation the device holds.
   const keyring = [
     { private_key: generated.privateKey, fingerprint: newFingerprint, generation: newGeneration, active: true },
@@ -321,6 +340,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
       encrypted_private_key,
       retired_rewraps,
       vault: { salt_password: vault.salt_password, salt_recovery: saltRecovery, kdf_iterations: iterations, kdf_algo: vault.kdf_algo ?? "PBKDF2-SHA256", lock_mode: vault.lock_mode ?? "login", phrase_ciphertext, wrapped_deks },
+      identity_rewraps,
       agent_rewraps,
       expected_generation: activeGeneration,
       expected_vault_version: input.expectedVaultVersion ?? vault.version,

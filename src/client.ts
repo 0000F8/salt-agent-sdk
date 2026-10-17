@@ -16,7 +16,7 @@ import {
 } from "./identity.js";
 import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitation, type RecoveryRequestForGuardian } from "./recovery.js";
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
-import { buildChatKeyReset, type AgentKeyToRewrap, type LinkedDeviceRow, type UserKeysResponse, type VaultRow } from "./keyReset.js";
+import { buildChatKeyReset, type AgentKeyToRewrap, type IdentitySectionCiphertext, type LinkedDeviceRow, type UserKeysResponse, type VaultRow } from "./keyReset.js";
 import { encodeHelp, type HelpReason, type HelpRequest } from "./help.js";
 
 // --- Show Me: asking a person for help (help.ts, salt-api /api/v1/help_requests) ---------------
@@ -1103,6 +1103,8 @@ export class SaltApiError extends Error {
   body: unknown;
   /** Salt's machine-readable refusal code (`{error, code}`), when the body carries one. */
   code?: string;
+  /** Seconds to wait, from `Retry-After`, on a 429 (e.g. `too_many_attempts` from the password-gated reset). */
+  retryAfterSeconds?: number;
 
   constructor(method: string, url: string, status: number, body: unknown) {
     // Salt's refusals carry one plain sentence ({error: "..."}). Put it in
@@ -1199,7 +1201,10 @@ export function createSaltClient(options: SaltClientOptions) {
       if (res.status === 403 && (parsed as { code?: unknown } | undefined)?.code === RECIPIENT_CONTACTS_ONLY) {
         throw new RecipientContactsOnlyError(method, url, res.status, parsed);
       }
-      throw new SaltApiError(method, url, res.status, parsed);
+      const apiError = new SaltApiError(method, url, res.status, parsed);
+      const retryAfter = Number(res.headers?.get?.("Retry-After"));
+      if (res.status === 429 && Number.isFinite(retryAfter)) apiError.retryAfterSeconds = retryAfter;
+      throw apiError;
     }
     if (res.status === 204) return undefined as T;
     const parsed = (await res.json()) as unknown;
@@ -1330,6 +1335,14 @@ export function createSaltClient(options: SaltClientOptions) {
         if (!blob) throw new Error(`resetChatKey: agent ${a.handle ?? a.id} has no vault-wrapped key to rewrap.`);
         agentKeys.push({ agent_id: a.id, public_fingerprint: a.public_fingerprint, encrypted_private_key: blob });
       }
+      // Hidden identity sections move with the messages key: every row holding ciphertext must be re-encrypted.
+      const identity = await call<{ sections?: Array<{ id?: SaltId; key: string; ciphertext?: string | null }> }>("GET", "/api/v1/identity");
+      const identitySections: IdentitySectionCiphertext[] = [];
+      for (const sec of identity?.sections ?? []) {
+        if (!sec.ciphertext) continue;
+        if (sec.id === undefined || sec.id === null) throw new Error(`resetChatKey: identity section "${sec.key}" holds ciphertext but GET /api/v1/identity gave no row id for it.`);
+        identitySections.push({ id: sec.id, key: sec.key, ciphertext: sec.ciphertext });
+      }
       const built = await buildChatKeyReset({
         userKeys,
         vault,
@@ -1339,6 +1352,7 @@ export function createSaltClient(options: SaltClientOptions) {
         linkedDevices: linked,
         keepDeviceIds,
         agentKeys,
+        identitySections,
         keepUncertified: params.keepUncertified,
         expectedGeneration: plan.current_generation ?? userKeys.generation,
         expectedVaultVersion: plan.vault_version,
