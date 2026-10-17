@@ -108,7 +108,7 @@ export interface LinkedDeviceRow {
   sealed_key_generation?: number | null;
 }
 
-/** An agent key wrapped under the owner's messages DEK that must move to the new DEK (dry run's `agents_to_rewrap`). */
+/** An agent key wrapped under the owner's messages DEK that must move to the new DEK. The dry run names the agent (`{id, handle, public_fingerprint}`); the wrapped key is read from `GET /api/v1/agents/:id/admin` (`userkeys.encrypted_private_key`), as the web does. */
 export interface AgentKeyToRewrap {
   agent_id: SaltId;
   public_fingerprint: string;
@@ -137,7 +137,7 @@ export interface BuildChatKeyResetInput {
 export interface ChatKeyResetRequest {
   public_key: string;
   encrypted_private_key: string;
-  retired_rewraps: Array<{ generation: number; public_fingerprint: string; encrypted_private_key: string }>;
+  retired_rewraps: Array<{ generation: number; encrypted_private_key: string }>;
   vault: {
     salt_password: string;
     salt_recovery: string;
@@ -147,7 +147,7 @@ export interface ChatKeyResetRequest {
     phrase_ciphertext: string;
     wrapped_deks: Record<string, Record<string, string>>;
   };
-  agent_rewraps: Array<{ agent_id: SaltId; encrypted_private_key: string }>;
+  agent_rewraps: Array<{ agent_id: SaltId; encrypted_private_key: string; fingerprint: string }>;
   expected_generation: number;
   expected_vault_version: number;
   current_password: string;
@@ -234,7 +234,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
   const wrapKey = (g: { armored: string }, fingerprint: string) => gcmEncrypt(newDek, te.encode(JSON.stringify({ private_key: g.armored })), `userkey:${fingerprint}`);
   const encrypted_private_key = await wrapKey({ armored: generated.privateKey }, newFingerprint);
   const retired_rewraps: ChatKeyResetRequest["retired_rewraps"] = [];
-  for (const g of generations) retired_rewraps.push({ generation: g.generation, public_fingerprint: g.fingerprint, encrypted_private_key: await wrapKey(g, g.fingerprint) });
+  for (const g of generations) retired_rewraps.push({ generation: g.generation, encrypted_private_key: await wrapKey(g, g.fingerprint) });
 
   // 4. The owner's vault-scheme agent keys move to the new DEK; each must still be the key its fingerprint names.
   const agent_rewraps: ChatKeyResetRequest["agent_rewraps"] = [];
@@ -243,7 +243,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
     const fpr = (await openpgp.readPrivateKey({ armoredKey: String(opened.private_key) })).getFingerprint().toUpperCase();
     if (fpr !== a.public_fingerprint.toUpperCase()) throw new Error(`agent ${a.agent_id}: the stored key is not the one its fingerprint names; refusing to rewrap.`);
     const aad = `agentkey:${a.public_fingerprint.toUpperCase()}`;
-    agent_rewraps.push({ agent_id: a.agent_id, encrypted_private_key: await gcmEncrypt(newDek, te.encode(JSON.stringify({ private_key: opened.private_key, revocation_cert: opened.revocation_cert ?? null })), aad) });
+    agent_rewraps.push({ agent_id: a.agent_id, fingerprint: a.public_fingerprint.toUpperCase(), encrypted_private_key: await gcmEncrypt(newDek, te.encode(JSON.stringify({ private_key: opened.private_key, revocation_cert: opened.revocation_cert ?? null })), aad) });
   }
 
   // 5. Re-seal the keyring to every device that stays: v2, signed by the new key AND the generation the device holds.

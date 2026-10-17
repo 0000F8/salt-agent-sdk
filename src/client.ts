@@ -1053,10 +1053,14 @@ export const RULE_ERROR_CODES: readonly RuleErrorCode[] = [
 /** What a dry run of `resetChatKey` answers: what the reset would touch. */
 export interface ChatKeyResetPlan {
   devices: Array<LinkedDeviceRow & Record<string, unknown>>;
+  linked_set?: SaltId[];
   chats_affected?: number;
+  members_notified?: number;
   current_generation: number;
   vault_version: number;
-  agents_to_rewrap?: AgentKeyToRewrap[];
+  agents_to_rewrap?: Array<{ id: SaltId; handle?: string; public_fingerprint: string }>;
+  retired_generations?: unknown;
+  live_location_sessions?: number;
   [key: string]: unknown;
 }
 
@@ -1314,6 +1318,14 @@ export function createSaltClient(options: SaltClientOptions) {
       if (userId === undefined || userId === null) throw new Error("resetChatKey: the owner's user id is unknown; pass userId.");
       const linked = devices?.linked_devices ?? [];
       const keepDeviceIds = params.devices === undefined || params.devices === "all" ? linked.map((d) => d.id) : params.devices;
+      // The dry run names each agent; its wrapped key is read the way the web does (the owner's agent admin view).
+      const agentKeys: AgentKeyToRewrap[] = [];
+      for (const a of plan.agents_to_rewrap ?? []) {
+        const admin = await call<{ userkeys?: { encrypted_private_key?: string } }>("GET", `/api/v1/agents/${encodeURIComponent(String(a.id))}/admin`);
+        const blob = admin?.userkeys?.encrypted_private_key;
+        if (!blob) throw new Error(`resetChatKey: agent ${a.handle ?? a.id} has no vault-wrapped key to rewrap.`);
+        agentKeys.push({ agent_id: a.id, public_fingerprint: a.public_fingerprint, encrypted_private_key: blob });
+      }
       const built = await buildChatKeyReset({
         userKeys,
         vault,
@@ -1322,8 +1334,8 @@ export function createSaltClient(options: SaltClientOptions) {
         userId,
         linkedDevices: linked,
         keepDeviceIds,
-        agentKeys: plan.agents_to_rewrap,
-        expectedGeneration: plan.current_generation,
+        agentKeys,
+        expectedGeneration: plan.current_generation ?? userKeys.generation,
         expectedVaultVersion: plan.vault_version,
       });
       const response = await call<Record<string, unknown>>("POST", "/api/v1/userkeys/reset", built.request);
