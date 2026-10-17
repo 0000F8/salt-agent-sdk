@@ -934,6 +934,72 @@ export interface ProposeMandateParams {
   expires_at?: string;
   parent_id?: SaltId;
   chat_id?: SaltId;
+  reason?: string;
+  estimated_cost?: GrantEstimatedCost;
+  resume_token?: string;
+}
+
+/** Capabilities an agent can ask its owner for. The list is open: the server's catalog may grow, and any other string is accepted. */
+export type GrantCapability =
+  | "profile.post"
+  | "wake.repeat"
+  | "room.create"
+  | "outreach.request"
+  | "agent.spending"
+  | "credential.borrow"
+  | "mcp.call"
+  | "money.pay"
+  | "money.request"
+  | (string & {});
+
+/** The grant a refusal names: what would unlock the refused call. `mode` is the mode the server suggests. */
+export interface GrantNeeded {
+  capability: GrantCapability;
+  selector: Record<string, unknown>;
+  mode: MandateCapabilityMode;
+  constraints?: Record<string, unknown>;
+}
+
+/** A ready-made request that files the ask: `POST /api/v1/mandates` with `body` (send it through `client.requestGrant`). */
+export interface GrantAsk {
+  method: "POST";
+  path: string;
+  body: {
+    grantor_id: SaltId;
+    capabilities: MandateCapabilityInput[];
+    label?: string;
+    reason?: string | null;
+    expires_at?: string | null;
+  };
+}
+
+/** A budget the agent expects to spend (for `agent.spending` / `money.*` asks). */
+export interface GrantEstimatedCost {
+  amount: number | string;
+  currency: string;
+  period?: string;
+}
+
+export interface RequestGrantParams {
+  /** The account that decides, usually your owner. */
+  grantorId: SaltId;
+  capabilities: MandateCapabilityInput[];
+  /** Your own words, shown to the owner as yours (up to 1000 characters). */
+  reason?: string;
+  durationDays?: number;
+  estimatedCost?: GrantEstimatedCost;
+  /** Opaque (up to 200 characters), echoed back on `onGrantDecided` so you can resume the exact parked step. */
+  resumeToken?: string;
+  chatId?: SaltId;
+  label?: string;
+}
+
+/** `GET /api/v1/mandates/check?capability=...` */
+export interface GrantCheck {
+  allowed: boolean;
+  mandate_id?: SaltId;
+  mode?: MandateCapabilityMode;
+  constraints?: Record<string, unknown>;
 }
 
 export interface UpdateMandateParams {
@@ -1103,6 +1169,10 @@ export class SaltApiError extends Error {
   code?: string;
   /** Seconds to wait, from `Retry-After`, on a 429 (e.g. `too_many_attempts` from the password-gated reset). */
   retryAfterSeconds?: number;
+  /** The grant that would unlock a refused call, when the refusal names one (missing authority for an agent caller). */
+  grant?: GrantNeeded;
+  /** A ready request that files the ask for `grant`. Pass `err.ask.body` to `client.requestGrant`, adding `reason`. Absent when the call is the owner's to decide alone (e.g. a spending freeze). */
+  ask?: GrantAsk;
 
   constructor(method: string, url: string, status: number, body: unknown) {
     // Salt's refusals carry one plain sentence ({error: "..."}). Put it in
@@ -1118,6 +1188,9 @@ export class SaltApiError extends Error {
     this.status = status;
     this.body = body;
     if (typeof (b as { code?: unknown } | undefined)?.code === "string") this.code = (b as { code: string }).code;
+    const env = body && typeof body === "object" ? (body as { grant?: unknown; ask?: unknown }) : undefined;
+    if (env?.grant && typeof env.grant === "object" && typeof (env.grant as { capability?: unknown }).capability === "string") this.grant = env.grant as GrantNeeded;
+    if (env?.ask && typeof env.ask === "object" && typeof (env.ask as { path?: unknown }).path === "string") this.ask = env.ask as GrantAsk;
   }
 }
 
@@ -1169,6 +1242,10 @@ type RequestFn = <T>(
   opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
 ) => Promise<T>;
 
+/** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
+export const SDK_VERSION = "0.24.0";
+const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
+
 export function createSaltClient(options: SaltClientOptions) {
   const host = options.host.replace(/\/$/, "");
   const doFetch = options.fetchImpl ?? fetch;
@@ -1181,7 +1258,7 @@ export function createSaltClient(options: SaltClientOptions) {
     opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
   ): Promise<T> {
     const url = `${host}${path}`;
-    const headers: Record<string, string> = { "api-key": apiKey, ...opts?.extraHeaders };
+    const headers: Record<string, string> = { "api-key": apiKey, "X-Salt-Client": CLIENT_HEADER, ...opts?.extraHeaders };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (opts?.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
     const res = await doFetch(url, {
@@ -1392,7 +1469,7 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Download an attachment's ciphertext bytes. Decrypt separately (see crypto.ts). */
     async getAttachment(apiKey: string, messageId: SaltId): Promise<Buffer> {
       const url = `${host}/api/v1/messages/${messageId}/attachment`;
-      const res = await doFetch(url, { headers: { "api-key": apiKey } });
+      const res = await doFetch(url, { headers: { "api-key": apiKey, "X-Salt-Client": CLIENT_HEADER } });
       if (!res.ok) throw new SaltApiError("GET", url, res.status, await res.text().catch(() => undefined));
       return Buffer.from(await res.arrayBuffer());
     },
@@ -2470,6 +2547,32 @@ export function createSaltClient(options: SaltClientOptions) {
         note: params.note,
         chat_id: params.chatId,
       });
+    },
+
+    // --- Ask for what's required ---
+    /**
+     * File ONE ask with the account that decides (usually your owner): the capabilities you need, your reason,
+     * a budget and a duration. Several capabilities in one call is a "strategy". The owner sees one card.
+     * Start from a refusal: `err.ask.body` is ready to use (`requestGrant(key, {grantorId: body.grantor_id, capabilities: body.capabilities, reason})`).
+     * Pass a `resumeToken` of your own and it comes back on `onGrantDecided`. A 429 `ask_limit` carries `retryAfterSeconds`.
+     */
+    async requestGrant(apiKey: string, params: RequestGrantParams): Promise<Mandate> {
+      const body: ProposeMandateParams = {
+        grantor_id: params.grantorId,
+        capabilities: params.capabilities,
+      };
+      if (params.label !== undefined) body.label = params.label;
+      if (params.reason !== undefined) body.reason = params.reason;
+      if (params.estimatedCost !== undefined) body.estimated_cost = params.estimatedCost;
+      if (params.resumeToken !== undefined) body.resume_token = params.resumeToken;
+      if (params.chatId !== undefined) body.chat_id = params.chatId;
+      if (params.durationDays !== undefined) body.expires_at = new Date(Date.now() + params.durationDays * 86_400_000).toISOString();
+      return request("POST", "/api/v1/mandates", apiKey, body);
+    },
+
+    /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */
+    async checkGrant(apiKey: string, capability: GrantCapability): Promise<GrantCheck> {
+      return request("GET", `/api/v1/mandates/check?capability=${encodeURIComponent(capability)}`, apiKey);
     },
 
     // --- Mandates ("Acting for you") management -- always as yourself, never through actFor ---

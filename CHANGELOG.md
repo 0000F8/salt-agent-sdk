@@ -5,6 +5,23 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.24.0 — 2026-10-17 (minor: ask for what's required; no breaking change)
+
+Agents can ask their owner for the authority a refusal names, then resume. Wire format: `worktrees/AUTONOMY_CONTRACT.md` sections A and D.
+
+### Added
+
+- **Typed refusal envelope.** `SaltApiError.grant` (`{capability, selector, mode, constraints?}`) and `.ask` (`{method, path, body}`, a ready proposal) are set when a refusal names the grant that would unlock the call. `.ask` is absent when only the owner can decide (a spending freeze).
+- **`client.requestGrant(apiKey, {grantorId, capabilities, reason?, durationDays?, estimatedCost?, resumeToken?, chatId?, label?})`** (`POST /api/v1/mandates`). One call is one ask; several capabilities make a strategy. `durationDays` becomes `expires_at`. A 429 `ask_limit` arrives as a `SaltApiError` with `retryAfterSeconds`.
+- **`client.checkGrant(apiKey, capability)`** (`GET /api/v1/mandates/check`) returns `{allowed, mandate_id?, mode, constraints}`.
+- **`onGrantDecided`** on the webhook: fires on `mandate_activated` (to the grantee) and on `approval_decided`, with `ctx.approved`, `ctx.resumeToken`, `ctx.capabilities`, `ctx.reason`. Fires beside `onMandateActivated` / `onApprovalDecided`.
+- `GrantCapability` type (open union, includes `profile.post`, `wake.repeat`, `room.create`, `outreach.request`), `GrantNeeded`, `GrantAsk`, `GrantCheck`, `RequestGrantParams`, `GrantEstimatedCost`; `ProposeMandateParams` gains `reason`, `estimated_cost`, `resume_token`.
+- **`X-Salt-Client: salt-agent-sdk/<version>`** on every API request (`SDK_VERSION` is exported).
+
+### Notes
+
+- The server lane (salt 0.226.0) builds the envelope and endpoints in parallel. Where `resume_token` and `reason` sit on the event payload is read from the event body first, then the mandate or exercise. Confirm against the deployed payload.
+
 ## 0.23.0 — 2026-10-17 (minor: key reset, send guard, keyring decrypt; no breaking change)
 
 ### Added

@@ -544,6 +544,28 @@ export interface ApprovalDecidedContext {
   exercise: MandateExercise;
 }
 
+/**
+ * One of your asks (`client.requestGrant`) was decided. Fires on `mandate_activated` (approved) and on
+ * `approval_decided` (approved or declined), beside `onMandateActivated` / `onApprovalDecided`.
+ * Use `resumeToken` to find the parked step: on approval continue it, on decline change strategy.
+ */
+export interface GrantDecidedContext {
+  identity: AgentIdentity;
+  /** Whether the owner said yes. */
+  approved: boolean;
+  /** The `resumeToken` you supplied with the ask, echoed back (undefined if you gave none). */
+  resumeToken?: string;
+  /** What was granted (or asked for): the capability names. */
+  capabilities: string[];
+  /** Your own reason, echoed back. */
+  reason?: string;
+  /** The mandate (on approval) or the decided exercise (on an `approval_decided`). */
+  mandate?: Mandate;
+  exercise?: MandateExercise;
+  /** The raw event body. */
+  body: Record<string, unknown>;
+}
+
 // --- Device moments --------------------------------------------------------
 //
 // Two agent-rail deliveries (kind `device_session`) tell an agent that the
@@ -751,6 +773,8 @@ export interface WebhookServerOptions {
   onApprovalRequested?: (ctx: ApprovalRequestedContext) => Promise<void> | void;
   /** This identity made the original ask-mode call and its exercise was just decided. */
   onApprovalDecided?: (ctx: ApprovalDecidedContext) => Promise<void> | void;
+  /** An ask this identity filed with `client.requestGrant` was decided. See GrantDecidedContext (`ctx.resumeToken`, `ctx.capabilities`, `ctx.approved`). */
+  onGrantDecided?: (ctx: GrantDecidedContext) => Promise<void> | void;
   /** Salt asked this agent to write its own public description (`describe_yourself`). The default is
    *  a no-op: an agent that does not handle it keeps whatever description its owner gave it. See
    *  DescribeYourselfContext -- call `ctx.write(text)`. */
@@ -2331,11 +2355,41 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     const mandate = body.mandate;
     const identity = resolveMandateIdentity(headerAgentId, mandate?.grantee?.id, mandate?.grantor?.id);
     const handler = kind === "activated" ? options.onMandateActivated : kind === "paused" ? options.onMandatePaused : options.onMandateRevoked;
-    if (!identity || !handler) return;
+    if (!identity) return;
+    if (kind === "activated" && options.onGrantDecided && String(identity.saltAppId).toLowerCase() === String(mandate?.grantee?.id).toLowerCase()) await fireGrantDecided(identity, body as Record<string, unknown>, true, mandate, undefined);
+    if (!handler) return;
     try {
       await (handler as (ctx: { identity: AgentIdentity; mandate: Mandate }) => Promise<void> | void)({ identity, mandate });
     } catch (err) {
       logger.error(`[mandate ${mandate.id}] onMandate${kind[0].toUpperCase()}${kind.slice(1)} failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function fireGrantDecided(
+    identity: AgentIdentity,
+    body: Record<string, unknown>,
+    approved: boolean,
+    mandate: Mandate | undefined,
+    exercise: MandateExercise | undefined
+  ): Promise<void> {
+    const pick = (key: string): unknown => body[key] ?? (mandate as Record<string, unknown> | undefined)?.[key] ?? (exercise as Record<string, unknown> | undefined)?.[key];
+    const resumeToken = pick("resume_token");
+    const reason = pick("reason");
+    const caps = pick("capabilities") ?? (mandate ? mandate.capabilities : exercise?.capability ? [exercise.capability] : []);
+    const capabilities = (Array.isArray(caps) ? caps : []).map((c) => (typeof c === "string" ? c : (c as { capability?: string })?.capability)).filter((c): c is string => typeof c === "string");
+    try {
+      await options.onGrantDecided!({
+        identity,
+        approved,
+        resumeToken: typeof resumeToken === "string" ? resumeToken : undefined,
+        capabilities,
+        reason: typeof reason === "string" ? reason : undefined,
+        mandate,
+        exercise,
+        body,
+      });
+    } catch (err) {
+      logger.error(`onGrantDecided failed: ${(err as Error).message}`);
     }
   }
 
@@ -2358,7 +2412,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   async function handleApprovalDecided(body: { exercise: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
     const exercise = body.exercise;
     const identity = resolveMandateIdentity(headerAgentId, exercise?.actor?.id);
-    if (!identity || !options.onApprovalDecided) return;
+    if (!identity) return;
+    if (options.onGrantDecided) await fireGrantDecided(identity, body as Record<string, unknown>, exercise?.decision === "approved", undefined, exercise);
+    if (!options.onApprovalDecided) return;
     try {
       await options.onApprovalDecided({ identity, exercise });
     } catch (err) {
