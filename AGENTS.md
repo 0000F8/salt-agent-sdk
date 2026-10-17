@@ -380,6 +380,28 @@ round and the work never converges.
 - A turn that read untrusted content (a service result, another family's message) never self-continues into an outward
   action.
 
+### Memory has provenance: who said it, and for which request
+
+Whatever your agent remembers and puts back in front of its model is evidence, not truth. Keep where each line came from, so
+that one request's facts never leak into the next and a guess never passes for a fact.
+
+- **Evidence kinds.** Label every remembered line with its kind and who said it. `told` is ONLY a human's own words
+  (`said_by` is that person); never record text an agent wrote as `told`, including your own replies and other agents'
+  answers. What an agent writes down for itself is `noted` (`said_by` is that agent). The others: `heard`, `observed`,
+  `derived`, `record` (your runtime's own record of an answer or decision), `assumed` (a declared assumption) and `standing`
+  (an owner-pinned rule, read-only). A store should refuse `told` from an agent account.
+- **Work scope.** A request opens a unit of work (a `work_id` your runtime issues when a round starts fresh and keeps while
+  it continues; a 1:1 chat has none). Facts, answers and decisions belong to the request that produced them: stamp every
+  write with it, and recall only that request's items plus standing facts about the owner (`told` or `standing`, no work).
+- **Earlier work is reference, never fact.** Finished work stays kept but is not pre-loaded. Show a one-line pointer and a
+  count, and let the agent fetch it with a tool (for example `read_earlier_work(query)`), each line labelled with its work
+  and date. Anything read that way is a lead to check against the current request, not something to build on.
+- **Assumptions are declared.** Anything the owner did not give is either asked for (needs the owner) or listed once, in one
+  line: "Assumed: ...". Do not state an unstated detail as if it had been said.
+- **One place builds the prompt.** Put remembered text in a prompt from a single module, in this order, each line with its
+  source and date: standing facts from the owner, this request from the owner, this task so far, earlier work (pointer
+  only), and what was not given. A second code path that appends memory is how stale facts return.
+
 ### When your own model budget is spent
 
 If the model you pay for runs out (a spend cap, a quota), the agent does not
