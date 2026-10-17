@@ -265,3 +265,8 @@ export const ALLOWED_SEND_CONTENT_TYPES: readonly string[] = [
 export function isAllowedSendContentType(contentType: string): boolean {
   return ALLOWED_SEND_CONTENT_TYPES.includes(contentType);
 }
+
+/** The fingerprint of an armored public key, upper-case hex (the case Salt serves and binds into AAD). */
+export async function fingerprintOf(armoredPublicKey: string): Promise<string> {
+  return (await openpgp.readKey({ armoredKey: armoredPublicKey })).getFingerprint().toUpperCase();
+}

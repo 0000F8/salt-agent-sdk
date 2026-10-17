@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import type { AskForHelpParams, Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
+import { SaltApiError, type AskForHelpParams, type Mandate, type MandateExercise, type ReactionSummary, type SaltClient } from "./client";
 import type { HelpRequest } from "./help.js";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
@@ -495,6 +495,32 @@ export interface MandatePausedContext {
   mandate: Mandate;
 }
 
+/** The members a 409 `stale_recipient_keys` refusal names (`members:[{id, public_key, public_fingerprint}]`), or null for any other error. */
+function staleRecipientMembers(err: unknown): Array<{ id: SaltId; public_key?: string; public_fingerprint?: string }> | null {
+  if (!(err instanceof SaltApiError) || err.status !== 409 || err.code !== "stale_recipient_keys") return null;
+  const members = (err.body as { members?: unknown } | undefined)?.members;
+  return Array.isArray(members) ? (members as Array<{ id: SaltId; public_key?: string; public_fingerprint?: string }>) : null;
+}
+
+/**
+ * The owner of a chat key you may be writing to reset it (`member_key_changed`): everyone who shares a chat with that
+ * person, and their agents, hear it. The SDK holds NO cache of recipient keys -- every `reply()`, attachment and action
+ * resolves the chat's members fresh at send time -- so there is nothing here to invalidate for the SDK itself; this is
+ * for a cache of your own (a map of user id to public key, a stored "recipients" list). Drop the entry for `userId`, or
+ * compare `publicFingerprint` with what you hold, and fetch `client.getChatMembers` again before the next send.
+ */
+export interface MemberKeyChangedContext {
+  identity: AgentIdentity;
+  /** The member whose chat key changed. */
+  userId: SaltId;
+  /** Their new key generation (1 is the first key ever). */
+  keyGeneration: number;
+  /** The fingerprint of their new active key: what the server expects you to have encrypted to. */
+  publicFingerprint: string;
+  /** The raw event body. */
+  body: Record<string, unknown>;
+}
+
 export interface MandateRevokedContext {
   identity: AgentIdentity;
   mandate: Mandate;
@@ -707,6 +733,8 @@ export interface WebhookServerOptions {
   onAppAction?: (ctx: AppActionContext) => Promise<void> | void;
   onInvoicePaid?: (ctx: InvoicePaidContext) => Promise<void> | void;
   onChatOpened?: (ctx: ChatOpenedContext) => Promise<void> | void;
+  /** A member of a chat you share reset their chat key (`member_key_changed`). See MemberKeyChangedContext. */
+  onMemberKeyChanged?: (ctx: MemberKeyChangedContext) => Promise<void> | void;
   onHandoffConfirmed?: (ctx: HandoffConfirmedContext) => Promise<void> | void;
   onHandoffReceived?: (ctx: HandoffReceivedContext) => Promise<void> | void;
   /** A mandate was offered to this identity and is waiting to be accepted. See
@@ -1340,16 +1368,23 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         opts && Object.prototype.hasOwnProperty.call(opts, "replyTo") ? opts.replyTo ?? undefined : defaultReplyTo;
       const startedAt = Date.now();
       let recipientKeys: string[];
+      let recipientFingerprints: Record<string, string> | undefined;
       let memberCount = 0;
+      // Keys are resolved from the chat's members at send time, every time (never cached).
+      const keysOf = (members: Array<{ id: SaltId; public_key?: string; public_fingerprint?: string }>) => {
+        // Everyone but ourselves. parseInt made both sides NaN, and
+        // `NaN !== NaN` is true, so the sender's own key was left in the
+        // recipient list rather than filtered out of it.
+        const others = members.filter((u) => !sameId(u.id, identity.saltAppId) && u.public_key);
+        const prints = Object.fromEntries(others.filter((u) => u.public_fingerprint).map((u) => [String(u.id), String(u.public_fingerprint).toUpperCase()]));
+        return { keys: others.map((u) => u.public_key as string), prints: Object.keys(prints).length === others.length && others.length > 0 ? prints : undefined };
+      };
       try {
         const members = await client.getChatMembers(identity.apiKey, chatId);
         memberCount = members.length;
-        recipientKeys = members
-          // Everyone but ourselves. parseInt made both sides NaN, and
-          // `NaN !== NaN` is true, so the sender's own key was left in the
-          // recipient list rather than filtered out of it.
-          .filter((u) => !sameId(u.id, identity.saltAppId) && u.public_key)
-          .map((u) => u.public_key as string);
+        const resolved = keysOf(members);
+        recipientKeys = resolved.keys;
+        recipientFingerprints = resolved.prints;
       } catch (err) {
         logger.error(`[chat ${chatId}] fetching members failed: ${(err as Error).message}`);
         return;
@@ -1377,20 +1412,28 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       // in the body is invisible to it and notifies nobody by itself.
       const mentions = explicitMentions ?? (addressHandle ? [addressee!.id] : undefined);
 
-      let encryptedMessage: string, senderMessage: string;
-      try {
-        encryptedMessage = await pgp.encryptFor(outgoing, recipientKeys);
-        senderMessage = await pgp.encryptFor(outgoing, [identity.publicKey]);
-      } catch (err) {
-        logger.error(`[chat ${chatId}] encryption failed: ${(err as Error).message}`);
-        return;
-      }
-
       const trail = delegations.drainTrail(identity.saltAppId, chatId);
-      try {
+      // Encrypt and post. On a 409 `stale_recipient_keys` (a member reset their chat key since the members were read)
+      // the refusal carries the current members: encrypt again to those and send once more.
+      const encryptAndPost = async (keys: string[], prints: Record<string, string> | undefined): Promise<void> => {
+        const encryptedMessage = await pgp.encryptFor(outgoing, keys);
+        const senderMessage = await pgp.encryptFor(outgoing, [identity.publicKey]);
         await client.postMessage(identity.apiKey, chatId, encryptedMessage, senderMessage, trail, mentions, {
           replyTo,
+          recipientFingerprints: prints,
+          senderFingerprint: prints ? await pgp.fingerprintOf(identity.publicKey) : undefined,
         });
+      };
+      try {
+        try {
+          await encryptAndPost(recipientKeys, recipientFingerprints);
+        } catch (err) {
+          const stale = staleRecipientMembers(err);
+          if (!stale) throw err;
+          const fresh = keysOf(stale);
+          if (fresh.keys.length === 0) throw err;
+          await encryptAndPost(fresh.keys, fresh.prints);
+        }
       } catch (err) {
         logger.error(`[chat ${chatId}] posting reply failed: ${(err as Error).message}`);
         return;
@@ -2093,6 +2136,26 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function handleMemberKeyChanged(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onMemberKeyChanged) return;
+    const all = identities.all();
+    const identity = (headerAgentId != null ? identities.get(String(headerAgentId)) : undefined) ?? (all.length === 1 ? all[0] : undefined);
+    if (!identity) return;
+    const userId = body.user_id as SaltId | undefined;
+    if (userId === undefined || userId === null) return;
+    try {
+      await options.onMemberKeyChanged({
+        identity,
+        userId,
+        keyGeneration: Number(body.key_generation),
+        publicFingerprint: String(body.public_fingerprint ?? ""),
+        body,
+      });
+    } catch (err) {
+      logger.error(`[user ${userId}] onMemberKeyChanged failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleHandoffConfirmed(body: { from_agent_id: SaltId; chat_id: SaltId; reason?: string }): Promise<void> {
     const identity = identities.get(String(body.from_agent_id));
     if (!identity || !options.onHandoffConfirmed) return;
@@ -2482,6 +2545,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "app_action") return handleAppAction(body as never, headerAgentId);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);
     if (body?.type === "chat_opened") return handleChatOpened(body as never);
+    if (body?.type === "member_key_changed") return handleMemberKeyChanged(body, headerAgentId);
     if (body?.type === "handoff_confirmed") return handleHandoffConfirmed(body as never);
     if (body?.type === "handoff_received") return handleHandoffReceived(body as never);
     if (body?.type === "mandate_offered") return handleMandateOffered(body as never, headerAgentId);

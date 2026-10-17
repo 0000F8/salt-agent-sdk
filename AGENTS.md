@@ -596,3 +596,28 @@ on its own answers the agent `failed` with the message.
 missing `retired` is empty). Keys that cannot be read or unlocked are skipped;
 it throws only when none opens the message. Encrypting and signing stay on the
 active key. The single-key form is unchanged.
+
+## Resetting the owner's chat key (key reset, Phase 2)
+
+`client.resetChatKey(apiKey, {password, ...})` is the agent path for "Reset
+your chat key" (design: `worktrees/KEY_RESET_DESIGN.md` sections 4 and 10).
+It needs the owner's login password (and `vaultPassword` for a separate
+lock): an explicit owner grant, never a bare `sld_` token or api-key, and the
+server refuses an agent account. Pass the owner's human session as `token`
+(`Bearer <jwt>`) when the api-key alone is not enough. `dryRun: true` returns
+`{devices, chats_affected, current_generation, vault_version, agents_to_rewrap}`
+and changes nothing; always do that first and show the person which devices
+will be unlinked (`devices` names the ones that keep working, the rest are
+unlinked). The result carries the NEW recovery phrase: show it to the owner
+once and never log it. `notResealed` lists kept devices that held a key
+generation we could not open; they will read "Link this computer again".
+Guardians' shares were of the old key: ask each to re-share.
+
+`onMemberKeyChanged({identity, userId, keyGeneration, publicFingerprint})`
+fires when someone you share a chat with resets their key. The SDK caches no
+recipient keys (`reply()`, attachments and actions all read the chat's members
+fresh at send time), so this is for a cache of your own: drop that user's key
+and fetch `client.getChatMembers` again before the next send. If Salt answers
+a send with 409 `{code: "stale_recipient_keys", members: [...]}`, `reply()`
+encrypts again to those members once; your own senders should branch on
+`code`, never on the status alone.
