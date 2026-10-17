@@ -106,6 +106,8 @@ export interface LinkedDeviceRow {
   kind?: string;
   public_key: string;
   sealed_key_generation?: number | null;
+  /** Armored PGP signed message (data: canonical JSON {v:1,user_id,kind,device_fingerprint}) made by an owner key when the device was approved; null for a device linked before certification. */
+  key_certification?: string | null;
 }
 
 /** An agent key wrapped under the owner's messages DEK that must move to the new DEK. The dry run names the agent (`{id, handle, public_fingerprint}`); the wrapped key is read from `GET /api/v1/agents/:id/admin` (`userkeys.encrypted_private_key`), as the web does. */
@@ -128,6 +130,8 @@ export interface BuildChatKeyResetInput {
   /** Ids of the devices that keep working (re-sealed). Every other linked device is unlinked by the server. */
   keepDeviceIds: SaltId[];
   agentKeys?: AgentKeyToRewrap[];
+  /** Linked device ids to re-seal even though their key certification is missing or does not verify. Default: none. */
+  keepUncertified?: SaltId[];
   expectedGeneration?: number;
   expectedVaultVersion?: number;
   /** Tests only: the real login string costs 600k PBKDF2 rounds. */
@@ -165,12 +169,42 @@ export interface BuiltChatKeyReset {
   skippedGenerations: number[];
   /** Kept devices that hold a generation we could not open, so no valid re-seal can be made: they are not re-sealed. */
   notResealed: SaltId[];
+  /** Kept devices left out because their key certification is missing or did not verify (the server unlinks them). */
+  uncertified: SaltId[];
 }
 
 interface Generation {
   generation: number;
   fingerprint: string;
   armored: string;
+}
+
+
+/**
+ * Is `device.public_key` the key the owner approved? The certification is checked against public keys derived from the
+ * caller's LOCAL keyring -- never a server-served public key, which is the thing being defended against -- and must name
+ * this user, this kind and this key's fingerprint.
+ */
+async function deviceCertified(device: LinkedDeviceRow, userId: SaltId, ownerPrivateKeys: string[]): Promise<boolean> {
+  if (!device.key_certification) return false;
+  try {
+    const verificationKeys = await Promise.all(ownerPrivateKeys.map(async (armoredKey) => (await openpgp.readPrivateKey({ armoredKey })).toPublic()));
+    const { data, signatures } = await openpgp.verify({ message: await openpgp.readMessage({ armoredMessage: device.key_certification }), verificationKeys });
+    let signed = false;
+    for (const sig of signatures) {
+      try {
+        if (await sig.verified) signed = true;
+      } catch {
+        // a bad signature does not count
+      }
+    }
+    if (!signed) return false;
+    const cert = JSON.parse(String(data)) as { v?: unknown; user_id?: unknown; kind?: unknown; device_fingerprint?: unknown };
+    const actual = (await fingerprintOf(device.public_key)).toLowerCase();
+    return cert.v === 1 && String(cert.user_id) === String(userId) && cert.kind === device.kind && String(cert.device_fingerprint).toLowerCase() === actual;
+  } catch {
+    return false;
+  }
 }
 
 /** Builds the whole reset request. Pure apart from randomness and PBKDF2; touches no network. */
@@ -254,7 +288,13 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
   const newSigner = await openpgp.readPrivateKey({ armoredKey: generated.privateKey });
   const reseals: ChatKeyResetRequest["reseals"] = [];
   const notResealed: SaltId[] = [];
+  const uncertified: SaltId[] = [];
+  const ownerPrivateKeys = generations.map((g) => g.armored);
   for (const device of input.linkedDevices.filter((d) => input.keepDeviceIds.includes(d.id))) {
+    if (!(input.keepUncertified ?? []).includes(device.id) && !(await deviceCertified(device, input.userId, ownerPrivateKeys))) {
+      uncertified.push(device.id);
+      continue;
+    }
     const heldGeneration = device.sealed_key_generation ?? activeGeneration;
     const held = generations.find((g) => g.generation === heldGeneration);
     if (!held) {
@@ -275,6 +315,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
     newFingerprint,
     skippedGenerations,
     notResealed,
+    uncertified,
     request: {
       public_key: generated.publicKey,
       encrypted_private_key,

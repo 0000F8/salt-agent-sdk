@@ -213,12 +213,15 @@ async function resetWorld({ lockMode = "login", vaultPassword } = {}) {
     retired: [{ generation: 1, public_fingerprint: retiredK.fingerprint, encrypted_private_key: await wrapKey(retiredK, `userkey:${retiredK.fingerprint}`) }],
   };
   const agentBlob = await gcm(oldDek, te.encode(JSON.stringify({ private_key: agentK.privateKey, revocation_cert: null })), `agentkey:${agentK.fingerprint}`);
+  const certify = async (signer, kind, device, uid = "user-1") =>
+    openpgp.sign({ message: await openpgp.createMessage({ text: JSON.stringify({ v: 1, user_id: uid, kind, device_fingerprint: device.fingerprint.toLowerCase() }) }), signingKeys: await openpgp.readPrivateKey({ armoredKey: signer.privateKey }) });
+  const lostK = await pgpPair("lost");
   const devices = [
-    { id: "dev-computer", kind: "computer", public_key: computerK.publicKey, sealed_key_generation: 2 },
-    { id: "dev-reader", kind: "reader", public_key: readerK.publicKey, sealed_key_generation: 1 },
-    { id: "dev-lost", kind: "computer", public_key: (await pgpPair("lost")).publicKey, sealed_key_generation: 2 },
+    { id: "dev-computer", kind: "computer", public_key: computerK.publicKey, sealed_key_generation: 2, key_certification: await certify(activeK, "computer", computerK) },
+    { id: "dev-reader", kind: "reader", public_key: readerK.publicKey, sealed_key_generation: 1, key_certification: await certify(retiredK, "reader", readerK) },
+    { id: "dev-lost", kind: "computer", public_key: lostK.publicKey, sealed_key_generation: 2, key_certification: null },
   ];
-  return { PASSWORD, phrase, vault, userKeys, devices, keys: { retiredK, activeK, agentK, computerK, readerK }, oldDek, kekPw, walletsRaw, agent: { agent_id: "agent-1", public_fingerprint: agentK.fingerprint, encrypted_private_key: agentBlob } };
+  return { PASSWORD, phrase, vault, userKeys, devices, keys: { retiredK, activeK, agentK, computerK, readerK }, oldDek, kekPw, walletsRaw, certify, lostK, agent: { agent_id: "agent-1", public_fingerprint: agentK.fingerprint, encrypted_private_key: agentBlob } };
 }
 
 const build = (w, extra = {}) =>
@@ -296,6 +299,7 @@ test("reseals: v2 keyring signed by BOTH the new key and the generation that dev
 test("a kept device that holds a generation we cannot open is reported, not given a payload nobody can verify", async () => {
   const w = await resetWorld();
   w.userKeys.retired[0].encrypted_private_key = "AAAA"; // the DEK minted by "start fresh": this row cannot be opened
+  w.devices[1].key_certification = await w.certify(w.keys.activeK, "reader", w.keys.readerK);
   const out = await build(w);
   assert.deepEqual(out.skippedGenerations, [1]);
   assert.deepEqual(out.notResealed, ["dev-reader"]);
@@ -357,4 +361,31 @@ test("client.resetChatKey: dry run touches nothing; the real run posts the built
   assert.equal(done.newGeneration, 3);
   assert.equal(done.recoveryPhrase.split(" ").length, 12);
   assert.deepEqual(done.response.unlinked, ["dev-lost"]);
+});
+
+test("a swapped device key is never sealed to; an uncertified device is excluded by default and kept only by explicit id", async () => {
+  const w = await resetWorld();
+  const attacker = await pgpPair("attacker");
+  // Salt serves the attacker's key under a certified device's id: the certification names the REAL key's fingerprint.
+  w.devices[0] = { ...w.devices[0], public_key: attacker.publicKey };
+  // A certification signed by a key the owner does not hold, for the attacker key, must not count either.
+  const stranger = await pgpPair("stranger");
+  w.devices[1] = { ...w.devices[1], key_certification: await w.certify(stranger, "reader", w.keys.readerK) };
+  const out = await build(w, { keepDeviceIds: ["dev-computer", "dev-reader", "dev-lost"] });
+  assert.deepEqual(out.request.reseals, []);
+  assert.deepEqual(out.uncertified.sort(), ["dev-computer", "dev-lost", "dev-reader"]);
+
+  const w2 = await resetWorld();
+  const none = await build(w2, { keepDeviceIds: ["dev-computer", "dev-reader", "dev-lost"] });
+  assert.deepEqual(none.request.reseals.map((x) => x.linked_device_id), ["dev-computer", "dev-reader"], "certified by the local keyring (any generation)");
+  assert.deepEqual(none.uncertified, ["dev-lost"]);
+  const kept = await build(w2, { keepDeviceIds: ["dev-lost"], keepUncertified: ["dev-lost"] });
+  assert.deepEqual(kept.request.reseals.map((x) => x.linked_device_id), ["dev-lost"]);
+
+  // Wrong user or wrong kind is not certified.
+  const w3 = await resetWorld();
+  w3.devices[0].key_certification = await w3.certify(w3.keys.activeK, "computer", w3.keys.computerK, "someone-else");
+  w3.devices[1].key_certification = await w3.certify(w3.keys.activeK, "computer", w3.keys.readerK);
+  const bad = await build(w3);
+  assert.deepEqual(bad.uncertified.sort(), ["dev-computer", "dev-reader"]);
 });

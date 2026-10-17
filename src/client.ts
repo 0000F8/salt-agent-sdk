@@ -1069,6 +1069,8 @@ export interface ResetChatKeyParams {
   password: string;
   /** Only when the vault uses a separate lock password. */
   vaultPassword?: string;
+  /** Linked device ids to re-seal even without a valid key certification (default none: an uncertified device is left out and the server unlinks it). */
+  keepUncertified?: SaltId[];
   /** Which linked devices keep working (re-sealed): their ids, or "all" (the default). Every other linked device is unlinked. */
   devices?: SaltId[] | "all";
   /** Ask Salt what would change and touch nothing. */
@@ -1092,6 +1094,8 @@ export interface ResetChatKeyResult {
   skippedGenerations?: number[];
   /** Kept devices that held a generation we could not open: not re-sealed (they read "link this computer again"). */
   notResealed?: SaltId[];
+  /** Kept devices left out (so unlinked) because their key certification is missing or did not verify. */
+  uncertified?: SaltId[];
 }
 
 export class SaltApiError extends Error {
@@ -1335,11 +1339,12 @@ export function createSaltClient(options: SaltClientOptions) {
         linkedDevices: linked,
         keepDeviceIds,
         agentKeys,
+        keepUncertified: params.keepUncertified,
         expectedGeneration: plan.current_generation ?? userKeys.generation,
         expectedVaultVersion: plan.vault_version,
       });
       const response = await call<Record<string, unknown>>("POST", "/api/v1/userkeys/reset", built.request);
-      return { dryRun: false, plan, response, recoveryPhrase: built.recoveryPhrase, newGeneration: built.newGeneration, skippedGenerations: built.skippedGenerations, notResealed: built.notResealed };
+      return { dryRun: false, plan, response, recoveryPhrase: built.recoveryPhrase, newGeneration: built.newGeneration, skippedGenerations: built.skippedGenerations, notResealed: built.notResealed, uncertified: built.uncertified };
     },
 
     /** Recent messages in a chat this identity is a member of (even as a silent observer). */
