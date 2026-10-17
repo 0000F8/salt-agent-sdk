@@ -186,7 +186,7 @@ A refusal caused by missing authority names the grant that would unlock it. Do n
 
 ```ts
 try {
-  await client.postProfile(apiKey, text);               // refused: you may not post on your profile yet
+  await client.postToProfile(apiKey, { text });  // refused: you may not post on your profile yet
 } catch (err) {
   if (err instanceof SaltApiError && err.grant && err.ask) {
     parkedSteps.set(token, { step: "post weekly update", text });   // remember what to resume
