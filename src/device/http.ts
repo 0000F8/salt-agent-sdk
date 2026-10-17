@@ -135,8 +135,9 @@ export function httpDeviceHostTransport(opts: DeviceHttpOptions): DeviceHostTran
       const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/pause`, { reason });
       if (status >= 400) throw new Error(`pause failed: ${status}`);
     },
-    async resume(sessionId: SaltId): Promise<void> {
-      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/resume`);
+    async resume(sessionId: SaltId, o?: { local?: boolean }): Promise<void> {
+      // `local: true` = the person pressed Resume at this machine: the only resume Salt accepts for a phone pause.
+      const { status } = await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/resume`, o?.local ? { local: true } : undefined);
       if (status >= 400) throw new Error(`resume failed: ${status}`);
     },
   };

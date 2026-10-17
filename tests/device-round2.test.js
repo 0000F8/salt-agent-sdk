@@ -169,7 +169,7 @@ function wired({ hostNow } = {}) {
     const dm = sdk.decodeDeviceMessage(p);
     if (dm.header.op === "cancel") return;
     await host2.handleCommand(p);
-    while (raw.length) client.handleLaneMessage(raw.shift());
+    while (raw.length) client.handleLaneMessage(raw.shift(), "d");
   };
   client = sdk.createDeviceClient(tr, { deviceId: "d" }, { commandTimeoutMs: 2000 });
   return { client, h, raw };

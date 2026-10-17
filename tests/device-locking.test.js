@@ -278,7 +278,7 @@ async function activeClient(t, opts) {
 function reply(c, sent, op, body, id) {
   return c.handleLaneMessage(
     sdk.encodeDeviceMessage({ v: 1, id: id ?? "r" + sent.header.id + Math.random(), seq: sent.header.seq, op, session: "sess-1", re: sent.header.id }, body)
-  );
+  , "d");
 }
 
 test("client: concurrent callers are serialised; each command has a uuid-ish id, seq and exp", async () => {
@@ -510,7 +510,7 @@ test("end to end: client against a host through a loop-back lane", async () => {
     async postCommand(plaintext) {
       await dh.handleCommand(plaintext);
       for (const r of ht.results.splice(0)) {
-        c.handleLaneMessage(sdk.encodeDeviceMessage(r.header, r.body));
+        c.handleLaneMessage(sdk.encodeDeviceMessage(r.header, r.body), "d");
       }
     },
   });
@@ -527,7 +527,7 @@ test("end to end: client against a host through a loop-back lane", async () => {
   const ct2 = clientTransport({
     async postCommand(plaintext) {
       await dh2.handleCommand(plaintext);
-      for (const r of ht2.results.splice(0)) c2.handleLaneMessage(sdk.encodeDeviceMessage(r.header, r.body));
+      for (const r of ht2.results.splice(0)) c2.handleLaneMessage(sdk.encodeDeviceMessage(r.header, r.body), "d");
     },
   });
   c2 = await activeClient(ct2); // client believes seq 0; host expects 2
