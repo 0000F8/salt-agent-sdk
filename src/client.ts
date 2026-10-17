@@ -16,6 +16,30 @@ import {
 } from "./identity.js";
 import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitation, type RecoveryRequestForGuardian } from "./recovery.js";
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
+import { encodeHelp, type HelpReason, type HelpRequest } from "./help.js";
+
+// --- Show Me: asking a person for help (help.ts, salt-api /api/v1/help_requests) ---------------
+
+/** What `client.askForHelp` / `ctx.askForHelp` take. The question rides end-to-end encrypted in the 1:1; Salt learns only the reason. */
+export interface AskForHelpParams {
+  /** The 1:1 with the person. Exactly two non-observer members, else the call is refused before anything is sent. */
+  chatId: SaltId;
+  /** In plain words, at most 500 characters. */
+  question: string;
+  reason: HelpReason;
+  /** The live device session this question is about; the person's phone then shows the computer's screen. */
+  deviceSessionId?: SaltId;
+  /** This agent's own account id, when the caller already knows it (saves a `whoAmI` call). */
+  selfId?: SaltId;
+}
+
+/** `GET /api/v1/help_requests` filters. */
+export interface ListHelpRequestsParams {
+  state?: "open" | "all";
+  chatId?: SaltId;
+  /** Return rows older than this help request id. */
+  before?: SaltId;
+}
 
 // --- Identity disclosures (R3, identityShare.ts) --------------------------
 //
@@ -1381,6 +1405,42 @@ export function createSaltClient(options: SaltClientOptions) {
     },
 
     /**
+     * Show Me: ask the person in a 1:1 for help. Posts the question as an ordinary end-to-end
+     * encrypted message (`[[SALT-HELP reason=...]]` + the question, help.ts) and then opens the
+     * help request on Salt (`POST /api/v1/help_requests`), which rings the person's phone and,
+     * with `deviceSessionId`, tells the computer to start sending stills. Returns the help request.
+     * Throws before sending anything when the chat is not an encrypted 1:1, the question is empty
+     * or over 500 characters, or no one in it has a usable key. A 422 from Salt (a rate limit of 6
+     * an hour per chat, or a device session that is not yours) surfaces as a SaltApiError with
+     * the server's sentence, after the question was already posted: the message stays in the chat.
+     */
+    async askForHelp(apiKey: string, params: AskForHelpParams): Promise<HelpRequest> {
+      const plaintext = encodeHelp({ reason: params.reason, question: params.question });
+      const chat = await request<SaltChat>("GET", `/api/v1/chats/${params.chatId}?_=${Date.now()}`, apiKey);
+      if (chat?.session?.encrypted === false) throw new Error("Help calls are for encrypted 1:1 chats.");
+      const users = chat?.session?.users ?? [];
+      const selfId = params.selfId ?? (await whoAmI(apiKey))?.agent_id;
+      const others = users.filter((u) => !sameId(u.id, selfId) && !(u as { observer?: boolean }).observer);
+      if (others.length !== 1) throw new Error("Help calls are for 1:1 chats.");
+      const me = users.find((u) => sameId(u.id, selfId));
+      const recipientKeys = users.filter((u) => !sameId(u.id, selfId)).map((u) => u.public_key).filter((k): k is string => Boolean(k));
+      if (!others[0].public_key || recipientKeys.length === 0) throw new Error(`chat ${params.chatId}: the person has no usable public key; not asking.`);
+      if (!me?.public_key) throw new Error(`chat ${params.chatId}: this account is not a member with a public key; not asking.`);
+      const [message, senderMessage] = await Promise.all([encryptFor(plaintext, recipientKeys), encryptFor(plaintext, [me.public_key])]);
+      const posted = (await request<Record<string, unknown>>("POST", "/api/v1/messages", apiKey, {
+        chat_id: params.chatId,
+        message,
+        sender_message: senderMessage,
+      })) as { message_id?: SaltId; id?: SaltId; message?: { id?: SaltId } } | null;
+      const messageId = posted?.message_id ?? posted?.id ?? posted?.message?.id;
+      if (messageId == null) throw new Error("Salt did not return the id of the help message.");
+      const body: Record<string, unknown> = { chat_id: params.chatId, message_id: messageId, reason: params.reason };
+      if (params.deviceSessionId !== undefined) body.device_session_id = params.deviceSessionId;
+      const res = await request<{ help_request?: HelpRequest } & Partial<HelpRequest>>("POST", "/api/v1/help_requests", apiKey, body);
+      return (res?.help_request ?? res) as HelpRequest;
+    },
+
+    /**
      * Open rooms (0.6x): declares what this identity wants delivered from
      * a chat it isn't necessarily addressed in every message of --
      * `"addressed"` (only a direct reply/@mention, the closest analogue to
@@ -2421,6 +2481,29 @@ export function createSaltClient(options: SaltClientOptions) {
       /** "I made this team": counted once per installer. */
       async installed(apiKey: string, idOrSlug: string): Promise<{ install_count: number; counted: boolean }> {
         return request("POST", `/api/v1/team_templates/${encodeURIComponent(idOrSlug)}/installed`, apiKey, {});
+      },
+    },
+
+    // --- Show Me: help requests (CONTRACT.md section 2). The asker or the recipient may read; only the asker closes. ---
+    helpRequests: {
+      /** Newest first, at most 50; `state` defaults to `open` on the server. */
+      async list(apiKey: string, params: ListHelpRequestsParams = {}): Promise<HelpRequest[]> {
+        const q = new URLSearchParams();
+        if (params.state) q.set("state", params.state);
+        if (params.chatId) q.set("chat_id", String(params.chatId));
+        if (params.before) q.set("before", String(params.before));
+        const qs = q.toString();
+        const res = await request<{ help_requests?: HelpRequest[] } | HelpRequest[]>("GET", `/api/v1/help_requests${qs ? `?${qs}` : ""}`, apiKey);
+        return Array.isArray(res) ? res : (res?.help_requests ?? []);
+      },
+      async get(apiKey: string, id: SaltId): Promise<HelpRequest> {
+        const res = await request<{ help_request?: HelpRequest } & Partial<HelpRequest>>("GET", `/api/v1/help_requests/${encodeURIComponent(String(id))}`, apiKey);
+        return (res?.help_request ?? res) as HelpRequest;
+      },
+      /** Close a request you asked: `answered` (you have what you need) or `withdrawn`. Stops the computer's stills. */
+      async close(apiKey: string, id: SaltId, status: "answered" | "withdrawn"): Promise<HelpRequest> {
+        const res = await request<{ help_request?: HelpRequest } & Partial<HelpRequest>>("PATCH", `/api/v1/help_requests/${encodeURIComponent(String(id))}`, apiKey, { status });
+        return (res?.help_request ?? res) as HelpRequest;
       },
     },
 

@@ -20,7 +20,10 @@ import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type Wor
 import { createIdentitySharer } from "./identityShare.js";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
+import { HELP_REASONS, type HelpReason } from "./help.js";
 import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, MAX_CAPABILITIES, type AgentClaimSectionKey, type CardSection, type Capability, type IdentityClaims } from "./identity.js";
+
+const ID_RE_TRANSFER = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type JsonSchema = Record<string, unknown>;
 
@@ -556,7 +559,7 @@ export function createActions(options: ActionsOptions) {
     }
 
     const id = input.id && /^[A-Za-z0-9_-]{1,64}$/.test(input.id) ? input.id : newWorkId();
-    const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail });
+    const reported = await reportWork(caller, ctx, { id, status: input.status, kind: "task", title, detail: input.detail, ...(transferId && ID_RE_TRANSFER.test(transferId) ? { transfer: transferId } : {}) });
     return reported
       ? { reported: true, id, note: "Only they can see this, in their Tasks panel for this chat." }
       : { reported: false, id, note: "The report could not be delivered; carry on with the work." };
@@ -947,6 +950,47 @@ export function createActions(options: ActionsOptions) {
       recipients: rows.length,
       note: "Stops it being served again and sends a notice into the chat -- cannot reach a copy already read on someone's device.",
     };
+  }
+
+  // --- ask_for_help / close_help_request (Show Me) -----------------------
+
+  async function askForHelpAction(
+    caller: AgentIdentity,
+    input: { question?: unknown; reason?: unknown; device_session_id?: unknown; chat_id?: unknown },
+    ctx: ActionContext
+  ) {
+    const chatId = (typeof input.chat_id === "string" && input.chat_id) || ctx.mainChatId;
+    if (chatId == null) throw new Error("ask_for_help needs a chat_id, or must be called while replying in a chat.");
+    const question = typeof input.question === "string" ? input.question.trim() : "";
+    if (!question) throw new Error("question is required: say in plain words what you need.");
+    const reason = typeof input.reason === "string" ? input.reason : "";
+    if (!(HELP_REASONS as readonly string[]).includes(reason)) throw new Error(`reason must be one of ${HELP_REASONS.join(", ")}.`);
+    const deviceSessionId = typeof input.device_session_id === "string" && input.device_session_id ? input.device_session_id : undefined;
+    const hr = await client.askForHelp(caller.apiKey, {
+      chatId,
+      question,
+      reason: reason as HelpReason,
+      deviceSessionId,
+      selfId: caller.saltAppId,
+    });
+    return {
+      asked: true,
+      help_request_id: hr.id,
+      status: hr.status,
+      device_session_id: hr.device_session_id ?? null,
+      note:
+        "Their phone is ringing. They may answer in the chat" +
+        (hr.device_session_id ? ", or look at the computer's screen and point at it; a point arrives as a `pointed` result on the device lane" : "") +
+        ". Close the request with close_help_request once you have what you need. Asking again withdraws this one; six asks an hour per chat is the limit.",
+    };
+  }
+
+  async function closeHelpRequestAction(caller: AgentIdentity, input: { help_request_id?: unknown; status?: unknown }) {
+    const id = typeof input.help_request_id === "string" ? input.help_request_id.trim() : "";
+    if (!id) throw new Error("help_request_id is required -- the id ask_for_help returned.");
+    const status = input.status === "withdrawn" ? "withdrawn" : "answered";
+    const hr = await client.helpRequests.close(caller.apiKey, id, status);
+    return { closed: true, help_request_id: id, status: hr?.status ?? status };
   }
 
   const definitions: ActionDefinition[] = [
@@ -1427,6 +1471,39 @@ export function createActions(options: ActionsOptions) {
         required: ["id"],
       },
       execute: identityRevokeAction,
+    },
+    {
+      name: "ask_for_help",
+      description:
+        "Ask the person you are talking to for help, when you are stuck, cannot tell which of several things they mean, " +
+        "find the request unclear, or need them to look at something. Posts your question into this 1:1 and rings " +
+        "their phone. With device_session_id (a live session on their computer) their phone also shows the computer's " +
+        "screen, and they can point at it. Only works in an encrypted 1:1 with exactly one other person. At most six " +
+        "asks an hour per chat; asking again withdraws the open one. Close it with close_help_request when you have what you need.",
+      schema: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "Your question in plain words, at most 500 characters." },
+          reason: { type: "string", enum: [...HELP_REASONS], description: "stuck: you cannot proceed. which: several things could be meant. unclear: the request is vague. look: you want them to see the screen." },
+          device_session_id: { type: "string", description: "Optional: the live device session this is about." },
+          chat_id: { type: "string", description: "Optional: defaults to the current chat." },
+        },
+        required: ["question", "reason"],
+      },
+      execute: askForHelpAction,
+    },
+    {
+      name: "close_help_request",
+      description: "Close a help request you opened with ask_for_help: answered (you have what you need) or withdrawn. Stops the computer sending the screen.",
+      schema: {
+        type: "object",
+        properties: {
+          help_request_id: { type: "string", description: "The id ask_for_help returned." },
+          status: { type: "string", enum: ["answered", "withdrawn"], description: "Default answered." },
+        },
+        required: ["help_request_id"],
+      },
+      execute: closeHelpRequestAction,
     },
   ];
 

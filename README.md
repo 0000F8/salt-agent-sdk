@@ -882,9 +882,11 @@ either side beyond exposing both tools.
 | `webhook.ts` | `createWebhookServer(options)`, `createDispatcher(options)` | `createDispatcher` is everything about the Salt protocol itself: signature verification, payload routing, dedup, GACM/mediator silence rules, loop capping (including the consult lane's own, higher cap), header-preferred identity routing, session load/persist. `createWebhookServer` wraps it in an Express POST route; `socket.ts`'s `createSocketClient` wraps the SAME dispatcher around a websocket push connection instead. |
 | `ask.ts` | `ask(client, caller, chatId, question, opts)`, `approve(...)`, `resolveCardInteraction`, `resolveMessage` | `ctx.ask`/`ctx.approve`'s implementation -- a card-backed inline question (buttons carry `restricted_to: [answererId]`), resolved by a tap or a plain reply from that ONE named answerer only. Keyed by (identity, chat). The `resolve*` functions are wired into `createDispatcher` and aren't normally called directly. |
 | `socket.ts` | `createSocketClient(options)`, `MemoryCursorStore()`/`FileCursorStore(dir)`, `MemoryDedupeStore()`/`FileDedupeStore(dir)` | K2 socket mode: stays connected to `AgentUpdatesChannel` over Action Cable for an agent with no public URL (no polling -- backfill/ack HTTP calls are event-triggered only), verifying and dispatching through the same `createDispatcher` a webhook server uses. Cursor + delivery-id dedupe default to files under `~/.salt/agents/<agentId>/`. See **Socket mode**, above. |
-| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 22 Salt-platform actions, provider-agnostic. |
+| `actions.ts` | `createActions(options)`, `toAnthropicTools`, `toOpenAITools` | The 25 Salt-platform actions, provider-agnostic. |
 | `identity.ts` | `AGENT_CLAIM_SECTION_KEYS`, `PROOF_SECTION_KEYS`, `canonicalizeJcs`, `verifySignedCard`, `IdentityCardInvalidError` | The Identity card vocabulary (claim vs. proof sections), a narrow RFC 8785 (JCS) canonicalizer matching salt-api's `Jcs.rb`, and the Ed25519/JWS signature check `client.card()` uses -- see **Identity**, above. |
 | `identityShare.ts` | `createIdentitySharer(client, pgpPassphrase)`, `parseIdentityMarker`, `formatIdentityAsk`/`formatIdentitySlice`/`formatIdentityDecline`/`formatIdentityRevoke`, `IDENTITY_MARKER_PREFIX` | R3/R4: sending a signed SLICE of your own identity sections into a chat, asking someone for one of theirs, and revoking a disclosure -- the `[[SALT-IDENTITY-*]]` wire protocol and the `onIdentityAsk`/`onIdentityShared` webhook.ts events it's wired into. See **Identity: share, ask, revoke**, above. |
+| `help.ts` | `encodeHelp`, `decodeHelp`, `isHelpMessage`, `HELP_REASONS` | The `[[SALT-HELP]]` marker an agent asks a person for help with, and the `HelpRequest` record. See **Show Me**, above. |
+| `callBundle.ts` | `signAndEncrypt`, `decryptAndVerify`, `isBundleFresh`, `fingerprintsMatch`, `buildCallBundle` | Calls v1 crypto binding (sign then encrypt the SDP bundle, pin DTLS fingerprints), byte-compatible with salt-fe. |
 | `config.ts` | `loadSaltAgentConfig(env?)`, `validateSaltAgentConfig(config)` | Reads/validates the generic Salt env vars. Your own model config (API key, model name, system prompt) stays in your own code. |
 
 ## Webhook event types
@@ -1141,7 +1143,7 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
 - **Queue.** `open()` against a device another agent controls is answered 202 `queued`;
   it resolves when a `device_session` delivery (`promoted`, then approval) makes the
   session `active`. Feed deliveries in with `device.handleDelivery("device_session", body)`
-  (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext)`.
+  (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext, senderId)` (from `onMessage`: `ctx.text`, `ctx.senderId`); only the device's own account is accepted, so nobody else posting in the lane can forge a result, a still or a `pointed`.
 - **Reattach.** If this agent already has a live session (409 `session_live`) `open()`
   calls `POST /device_sessions/:id/reattach` and continues at `last_seq + 1`.
 - **One command in flight.** Commands carry `id`, `seq` and `exp` (epoch ms, now + 30 s).
@@ -1163,7 +1165,8 @@ Device side:
 const host = createDeviceHost(snapshot, handlers, httpDeviceHostTransport({ host, apiKey }), callbacks);
 host.start();
 await host.pause("person_active");  // refuses commands with `paused`; tells Salt (POST .../pause)
-await host.resume();                 // POST .../resume
+await host.resume();                 // POST .../resume (never clears a phone pause)
+await host.resume({ local: true });  // the person pressed Resume at the machine: also clears a phone pause
 ```
 
 The host runs one command at a time per session, keeps the last 64 results by `id`
@@ -1171,6 +1174,26 @@ The host runs one command at a time per session, keeps the last 64 results by `i
 commands, and holds ONE device-wide mutex around `click/type/key/scroll/focus_app`
 shared by every host in the process (`sharedDeviceLock`, or pass `{deviceLock}`).
 Constants (`COMMAND_TTL_MS`, `RESULT_CACHE_SIZE`, `MUTATING_OPS`) live in `device/protocol.ts`.
+
+### Show Me: asking for help, stills and points
+
+A stuck agent can ask the person in its 1:1 for help, optionally about a live session on their computer.
+The question is an ordinary end-to-end encrypted message (`[[SALT-HELP reason=stuck|which|unclear|look]]`
+plus the question); Salt learns only the ids, the reason and the status.
+
+```ts
+const hr = await client.askForHelp(apiKey, { chatId, question: "Which Q3 file do you mean?", reason: "which", deviceSessionId });
+// in a handler: await ctx.askForHelp({ question, reason: "look", deviceSessionId });
+device.onStill((still) => { /* a downscaled picture the person is looking at: still.obs, still.image_b64 */ });
+device.onPointed((p, pointId) => { /* p.app, p.element?.name, p.refused: what is under the spot they tapped */ });
+await client.helpRequests.close(apiKey, hr.id, "answered");
+```
+
+On the computer, `host.handleDelivery(type, body)` (from `onDeviceDelivery`) tells the app a request opened,
+is being looked at or closed (`callbacks.onHelpOpened / onHelpViewing / onHelpClosed`); the app calls
+`host.postStill(body)` (2 s apart, 30 a minute, none during a secure field) and feeds lane messages to
+`host.handleLaneMessage(text, senderId)`, which answers a `[[SALT-POINT]]` from a person over the device
+through `handlers.resolvePoint`. A device account answers a live watch call with `onDeviceCall` and `callBundle.ts`.
 
 ## Reference implementations
 

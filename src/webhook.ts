@@ -17,7 +17,8 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import type { Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
+import type { AskForHelpParams, Mandate, MandateExercise, ReactionSummary, SaltClient } from "./client";
+import type { HelpRequest } from "./help.js";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
 import * as identityShare from "./identityShare.js";
@@ -90,6 +91,41 @@ export interface DeviceLaneMessage {
   /** The decrypted lane message (a device-protocol line). */
   text: string;
   chatMeta?: RawChatMeta;
+}
+
+/** The four call events salt-api mirrors to a call participant's delivery rail (CallWebhookJob). */
+export type DeviceCallEvent = "call.offer" | "call.answer" | "call.signal" | "call.end";
+
+/** What `onDeviceCall` receives. */
+export interface DeviceCallContext {
+  /** The identity the delivery was addressed to (the device's own account). */
+  identity: AgentIdentity;
+  event: DeviceCallEvent;
+  /** Salt's id for the call (the routing id for /api/v1/calls/:id/answer|signal|hangup). */
+  callId: SaltId;
+  chatId: SaltId | null;
+  /** The call record on offer/answer/end (`id`, `chat_id`, `caller_id`, `kind`, `device_id`, `answered_by_id`, ...). Absent on `call.signal`. */
+  call?: Record<string, unknown>;
+  /** The opaque armored PGP bundle (call.offer / call.answer / call.signal): decrypt it with callBundle.ts. */
+  payload?: string;
+  /** The account that placed the call (`from_user_id`, else the call's `caller_id`). */
+  fromUserId?: SaltId;
+  /** A watch call's device (`call.device_id`); null for an ordinary call. */
+  deviceId: SaltId | null;
+  /** The whole delivery body, for anything not lifted above. */
+  body: Record<string, unknown>;
+}
+
+/** What `onWatchEvent` receives: a device started or stopped showing its screen live to the person. */
+export interface WatchEventContext {
+  identity: AgentIdentity;
+  event: "call.watch_started" | "call.watch_ended";
+  callId: SaltId;
+  deviceId: SaltId | null;
+  /** The person watching. */
+  viewerId: SaltId | null;
+  chatId: SaltId | null;
+  body: Record<string, unknown>;
 }
 
 export interface RawSender {
@@ -224,6 +260,8 @@ export interface MessageContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** Shares `keys` from this identity's own card into `chatId` -- one signed SLICE to every non-observer member (see identityShare.ts's share()). */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 /** An incoming `[[SALT-WORK-CANCEL id=...]]` (work.ts) -- the person
@@ -316,6 +354,8 @@ export interface InvoicePaidContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface ChatOpenedChat {
@@ -370,6 +410,8 @@ export interface ChatOpenedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface HandoffConfirmedContext {
@@ -395,6 +437,8 @@ export interface HandoffConfirmedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 export interface HandoffReceivedContext {
@@ -417,6 +461,8 @@ export interface HandoffReceivedContext {
   approve(summary: string, opts?: { timeoutMs?: number }): Promise<{ approved: boolean; by: SaltId; via: "button" | "message" }>;
   /** See MessageContext.shareIdentity. */
   shareIdentity(keys: string[], opts?: identityShare.ShareOptions): Promise<identityShare.ShareResult>;
+  /** Show Me: asks the person for help in THIS chat (a 1:1 with them) -- see client.ts's askForHelp. */
+  askForHelp(opts: Omit<AskForHelpParams, "chatId" | "selfId">): Promise<HelpRequest>;
 }
 
 // --- Mandate rail events (R2) ----------------------------------------------
@@ -739,7 +785,8 @@ export interface WebhookServerOptions {
    * carries `device_queue`, `device_grants_changed`, `device_owner_changed` and
    * `device_ask_answered` (`{ask_id, decision, device_id, session_id}`: the person's
    * phone answered a command or session ask; the answer is authenticated as the
-   * person by Salt). See src/device/.
+   * person by Salt) and, from Show Me (0.22.0), `help_request_opened|viewing|closed`
+   * (`{help_request, viewer?}`): feed those to `host.handleDelivery`. See src/device/.
    */
   onDeviceDelivery?: (type: string, body: Record<string, unknown>) => Promise<void> | void;
   /**
@@ -756,6 +803,20 @@ export interface WebhookServerOptions {
    * any other chat (the controlling AGENT reads results through `onMessage`).
    */
   onDeviceLaneMessage?: (ctx: DeviceLaneMessage) => Promise<void> | void;
+  /**
+   * Show Me (0.22.0): a call delivery (`call.offer` | `call.answer` | `call.signal` | `call.end`) for a
+   * DEVICE account. A watch call (CONTRACT.md section 5) delivers its `call.offer` only to the device;
+   * the device answers with a signed bundle (callBundle.ts) via POST /api/v1/calls/:id/answer. These are
+   * not chat messages and never reach `onMessage`. Awaited, in arrival order: a `call.signal` must not
+   * overtake the `call.offer` that creates its session. Ignored (dropped) while unset, as before.
+   */
+  onDeviceCall?: (ctx: DeviceCallContext) => Promise<void> | void;
+  /**
+   * Show Me (0.22.0): the controlling AGENT hears that a device began (`call.watch_started`) or ended
+   * (`call.watch_ended`) showing its screen live to a person. Metadata only (call, device, viewer ids);
+   * the picture never passes through the agent.
+   */
+  onWatchEvent?: (ctx: WatchEventContext) => Promise<void> | void;
   /** Extra fields to merge into the /health JSON response (e.g. which model is configured). */
   healthExtra?: () => Record<string, unknown>;
 }
@@ -1382,6 +1443,11 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     return (keys: string[], opts?: identityShare.ShareOptions) => identitySharer.share(identity, chatId, keys, opts);
   }
 
+  // ctx.askForHelp (client.ts) -- bound to one (identity, chatId) like the others.
+  function makeAskForHelp(identity: AgentIdentity, chatId: SaltId): (opts: Omit<AskForHelpParams, "chatId" | "selfId">) => Promise<HelpRequest> {
+    return (opts) => client.askForHelp(identity.apiKey, { ...opts, chatId, selfId: identity.saltAppId });
+  }
+
   // True when `chatId` has at least one human (account_type !== "Agent")
   // member who is NOT a silent observer. A consult lane's human -- the
   // delegation chain's auditor added per actions.ts's delegation-
@@ -1794,6 +1860,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
       approve: makeApprove(identity, chatId, senderRaw.account_type !== "Agent" ? senderId : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onMessage!(ctx)));
@@ -1949,6 +2016,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
       approve: makeApprove(identity, chatId, body.buyer.account_type !== "Agent" ? body.buyer.id : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onInvoicePaid!(ctx)));
@@ -2015,6 +2083,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
       approve: makeApprove(identity, chatId, (body.opened_by as RawSender)?.account_type !== "Agent" ? (body.opened_by as RawSender)?.id : undefined),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onChatOpened!(ctx)));
@@ -2073,6 +2142,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffConfirmed!(ctx)));
@@ -2146,6 +2216,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       ask: makeAsk(identity, chatId),
       approve: makeApprove(identity, chatId),
       shareIdentity: makeShareIdentity(identity, chatId),
+      askForHelp: makeAskForHelp(identity, chatId),
     };
     try {
       await withTypingHeartbeat(identity, chatId, () => Promise.resolve(options.onHandoffReceived!(ctx)));
@@ -2360,6 +2431,52 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     return asks.resolveMessage(identity.saltAppId, chatId, senderId, senderRaw.account_type !== "Agent", caption);
   }
 
+  // Show Me: call.* deliveries. A device account gets call.offer/answer/signal/end; the agent that controls
+  // a watched device gets call.watch_started/ended. Identity comes from X-Salt-Agent-Id (the body never names
+  // the recipient), exactly like the mandate and app_action rails.
+  async function handleCall(body: Record<string, any>, headerAgentId?: SaltId): Promise<void> {
+    const identity = headerAgentId != null ? identities.get(String(headerAgentId)) : undefined;
+    if (!identity) return;
+    const event = String(body.event);
+    const call = body.call && typeof body.call === "object" ? (body.call as Record<string, unknown>) : undefined;
+    const callId = (call?.id ?? body.call_id) as SaltId | undefined;
+    const chatId = ((call?.chat_id ?? body.chat_id ?? (body.chat as { id?: SaltId } | undefined)?.id) ?? null) as SaltId | null;
+    if (callId == null) return;
+    if (event === "call.watch_started" || event === "call.watch_ended") {
+      if (!options.onWatchEvent) return;
+      try {
+        await options.onWatchEvent({
+          identity,
+          event,
+          callId,
+          deviceId: (body.device_id ?? call?.device_id ?? null) as SaltId | null,
+          viewerId: (body.viewer_id ?? call?.caller_id ?? body.from_user_id ?? null) as SaltId | null,
+          chatId,
+          body,
+        });
+      } catch (err) {
+        logger.error(`[call ${callId}] onWatchEvent failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+    if (!options.onDeviceCall) return;
+    try {
+      await options.onDeviceCall({
+        identity,
+        event: event as DeviceCallEvent,
+        callId,
+        chatId,
+        call,
+        payload: typeof body.payload === "string" ? body.payload : undefined,
+        fromUserId: (body.from_user_id ?? call?.caller_id) as SaltId | undefined,
+        deviceId: (call?.device_id ?? body.device_id ?? null) as SaltId | null,
+        body,
+      });
+    } catch (err) {
+      logger.error(`[call ${callId}] onDeviceCall failed: ${(err as Error).message}`);
+    }
+  }
+
   async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "app_action") return handleAppAction(body as never, headerAgentId);
@@ -2385,10 +2502,11 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
       return;
     }
     if (body?.type === "device_back") return handleDeviceBack(body as never, headerAgentId);
-    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed" || body.type === "device_ask_answered")) {
+    if (typeof body?.type === "string" && (body.type.startsWith("device_session") || body.type === "device_queue" || body.type === "device_grants_changed" || body.type === "device_owner_changed" || body.type === "device_ask_answered" || body.type === "help_request_opened" || body.type === "help_request_viewing" || body.type === "help_request_closed")) {
       await options.onDeviceDelivery?.(body.type, body);
       return;
     }
+    if (typeof body?.event === "string" && /^call\.(offer|answer|signal|end|watch_started|watch_ended)$/.test(body.event)) return handleCall(body as never, headerAgentId);
     if (body?.message) return handleMessage(body as never, headerAgentId);
   }
 

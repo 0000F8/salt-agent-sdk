@@ -32,7 +32,7 @@ Run from the repo root. All verified directly in this repo, 2026-09-27.
   websocket instead of an HTTP route.
 - `src/socket.ts` — `createSocketClient`: socket mode for an agent with no
   public URL, no polling loop, over `AgentUpdatesChannel`.
-- `src/actions.ts` — `createActions()`: 22 Salt-platform actions as
+- `src/actions.ts` — `createActions()`: 25 Salt-platform actions as
   provider-agnostic JSON Schema tools (`toAnthropicTools`/`toOpenAITools`).
 - `src/sessions.ts` — per-(identity, chat) memory (`MemorySessionStore`/
   `FileSessionStore`, transcript tail, hand-off session-note format).
