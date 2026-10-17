@@ -119,9 +119,8 @@ export interface AgentKeyToRewrap {
   encrypted_private_key: string;
 }
 
-/** A hidden identity section as `GET /api/v1/identity` serves it (`id` is the row id): its value is sealed under the messages DEK with AAD `identity:<key>`. */
+/** A hidden identity section as `GET /api/v1/identity` serves it: its value is sealed under the messages DEK with AAD `identity:<key>`. */
 export interface IdentitySectionCiphertext {
-  id: SaltId;
   key: string;
   ciphertext: string;
 }
@@ -162,7 +161,7 @@ export interface ChatKeyResetRequest {
     phrase_ciphertext: string;
     wrapped_deks: Record<string, Record<string, string>>;
   };
-  identity_rewraps: Array<{ section_id: SaltId; ciphertext: string }>;
+  identity_rewraps: Array<{ key: string; ciphertext: string }>;
   agent_rewraps: Array<{ agent_id: SaltId; encrypted_private_key: string; fingerprint: string }>;
   expected_generation: number;
   expected_vault_version: number;
@@ -296,7 +295,7 @@ export async function buildChatKeyReset(input: BuildChatKeyResetInput): Promise<
   const identity_rewraps: ChatKeyResetRequest["identity_rewraps"] = [];
   for (const sec of input.identitySections ?? []) {
     const value = td.decode(await gcmDecryptAny(oldDek, sec.ciphertext, `identity:${sec.key}`));
-    identity_rewraps.push({ section_id: sec.id, ciphertext: await gcmEncrypt(newDek, te.encode(value), `identity:${sec.key}`) });
+    identity_rewraps.push({ key: sec.key, ciphertext: await gcmEncrypt(newDek, te.encode(value), `identity:${sec.key}`) });
   }
 
   // 5. Re-seal the keyring to every device that stays: v2, signed by the new key AND the generation the device holds.
