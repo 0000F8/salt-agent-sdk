@@ -369,7 +369,7 @@ test("client.resetChatKey: dry run touches nothing; the real run posts the built
   assert.deepEqual(done.response.unlinked, ["dev-lost"]);
 });
 
-test("a swapped device key is never sealed to; an uncertified device is excluded by default and kept only by explicit id", async () => {
+test("a swapped device key is never sealed to; an uncertified device is never sealed (there is no override)", async () => {
   const w = await resetWorld();
   const attacker = await pgpPair("attacker");
   // Salt serves the attacker's key under a certified device's id: the certification names the REAL key's fingerprint.
@@ -385,8 +385,8 @@ test("a swapped device key is never sealed to; an uncertified device is excluded
   const none = await build(w2, { keepDeviceIds: ["dev-computer", "dev-reader", "dev-lost"] });
   assert.deepEqual(none.request.reseals.map((x) => x.linked_device_id), ["dev-computer", "dev-reader"], "certified by the local keyring (any generation)");
   assert.deepEqual(none.uncertified, ["dev-lost"]);
-  const kept = await build(w2, { keepDeviceIds: ["dev-lost"], keepUncertified: ["dev-lost"] });
-  assert.deepEqual(kept.request.reseals.map((x) => x.linked_device_id), ["dev-lost"]);
+  const forced = await build(w2, { keepDeviceIds: ["dev-lost"], keepUncertified: ["dev-lost"] });
+  assert.deepEqual(forced.request.reseals, [], "no override exists");
 
   // Wrong user or wrong kind is not certified.
   const w3 = await resetWorld();
