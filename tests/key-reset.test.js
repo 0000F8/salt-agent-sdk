@@ -238,7 +238,8 @@ test("reset request: a NEW DEK -- the old DEK opens none of the new wraps; the n
   // The old DEK opens nothing the request carries.
   const newFp = out.newFingerprint;
   await assert.rejects(open(w.oldDek, r.encrypted_private_key, `userkey:${newFp}`));
-  for (const rw of r.retired_rewraps) await assert.rejects(open(w.oldDek, rw.encrypted_private_key, `userkey:${rw.public_fingerprint}`));
+  const fpOf = (g) => ({ 1: w.keys.retiredK.fingerprint, 2: w.keys.activeK.fingerprint })[g];
+  for (const rw of r.retired_rewraps) await assert.rejects(open(w.oldDek, rw.encrypted_private_key, `userkey:${fpOf(rw.generation)}`));
   await assert.rejects(open(w.oldDek, r.vault.phrase_ciphertext, "recovery-phrase"));
   await assert.rejects(open(w.oldDek, r.agent_rewraps[0].encrypted_private_key, `agentkey:${w.keys.agentK.fingerprint}`));
 
@@ -258,7 +259,7 @@ test("reset request: a NEW DEK -- the old DEK opens none of the new wraps; the n
   assert.equal((await openpgp.readKey({ armoredKey: r.public_key })).getFingerprint().toUpperCase(), newFp);
   assert.deepEqual(r.retired_rewraps.map((x) => x.generation).sort(), [1, 2]);
   const back = {};
-  for (const rw of r.retired_rewraps) back[rw.generation] = JSON.parse(td.decode(await open(newDek, rw.encrypted_private_key, `userkey:${rw.public_fingerprint}`))).private_key;
+  for (const rw of r.retired_rewraps) back[rw.generation] = JSON.parse(td.decode(await open(newDek, rw.encrypted_private_key, `userkey:${fpOf(rw.generation)}`))).private_key;
   assert.equal(back[1], w.keys.retiredK.privateKey);
   assert.equal(back[2], w.keys.activeK.privateKey);
   assert.equal(JSON.parse(td.decode(await open(newDek, r.vault.phrase_ciphertext, "recovery-phrase"))), out.recoveryPhrase);
@@ -318,7 +319,8 @@ function resetFetch(w, calls) {
     const body = init.body ? JSON.parse(init.body) : undefined;
     calls.push({ method: init.method, path: p, body, headers: init.headers });
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { "Content-Type": "application/json" } });
-    if (p === "/api/v1/userkeys/reset" && body?.dry_run) return json({ devices: w.devices, chats_affected: 4, current_generation: 2, vault_version: 4, agents_to_rewrap: [w.agent] });
+    if (p === "/api/v1/userkeys/reset" && body?.dry_run) return json({ devices: w.devices, chats_affected: 4, current_generation: 2, vault_version: 4, agents_to_rewrap: [{ id: "agent-1", handle: "bot", public_fingerprint: w.agent.public_fingerprint }] });
+    if (p === "/api/v1/agents/agent-1/admin") return json({ userkeys: { encrypted_private_key: w.agent.encrypted_private_key } });
     if (p === "/api/v1/userkeys/reset") return json({ ok: true, resealed: ["dev-computer", "dev-reader"], unlinked: ["dev-lost"] });
     if (p === "/api/v1/userkeys") return json(w.userKeys);
     if (p === "/api/v1/vault") return json(w.vault);
@@ -350,6 +352,8 @@ test("client.resetChatKey: dry run touches nothing; the real run posts the built
   assert.deepEqual(post[0].body.reseals.map((x) => x.linked_device_id), ["dev-computer", "dev-reader"]);
   assert.deepEqual(post[0].body.linked_set, ["dev-computer", "dev-reader", "dev-lost"]);
   assert.equal(post[0].body.agent_rewraps[0].agent_id, "agent-1");
+  assert.equal(post[0].body.agent_rewraps[0].fingerprint, w.agent.public_fingerprint);
+  assert.deepEqual(Object.keys(post[0].body.retired_rewraps[0]).sort(), ["encrypted_private_key", "generation"]);
   assert.equal(done.newGeneration, 3);
   assert.equal(done.recoveryPhrase.split(" ").length, 12);
   assert.deepEqual(done.response.unlinked, ["dev-lost"]);
