@@ -221,7 +221,7 @@ async function resetWorld({ lockMode = "login", vaultPassword } = {}) {
     { id: "dev-reader", kind: "reader", public_key: readerK.publicKey, sealed_key_generation: 1, key_certification: await certify(retiredK, "reader", readerK) },
     { id: "dev-lost", kind: "computer", public_key: lostK.publicKey, sealed_key_generation: 2, key_certification: null },
   ];
-  const identity = [{ id: "sec-1", key: "bio", ciphertext: await gcm(oldDek, te.encode(JSON.stringify("hello there")), "identity:bio") }, { id: "sec-2", key: "link", scope: "everyone", value: "x" }];
+  const identity = [{ key: "bio", ciphertext: await gcm(oldDek, te.encode(JSON.stringify("hello there")), "identity:bio") }, { key: "link", scope: "everyone", value: "x" }];
   return { identity, PASSWORD, phrase, vault, userKeys, devices, keys: { retiredK, activeK, agentK, computerK, readerK }, oldDek, kekPw, walletsRaw, certify, lostK, agent: { agent_id: "agent-1", public_fingerprint: agentK.fingerprint, encrypted_private_key: agentBlob } };
 }
 
@@ -269,7 +269,7 @@ test("reset request: a NEW DEK -- the old DEK opens none of the new wraps; the n
   assert.equal(JSON.parse(td.decode(await open(newDek, r.vault.phrase_ciphertext, "recovery-phrase"))), out.recoveryPhrase);
   assert.equal(JSON.parse(td.decode(await open(newDek, r.agent_rewraps[0].encrypted_private_key, `agentkey:${w.keys.agentK.fingerprint}`))).private_key, w.keys.agentK.privateKey);
 
-  assert.deepEqual(r.identity_rewraps.map((x) => x.section_id), ["sec-1"]);
+  assert.deepEqual(r.identity_rewraps.map((x) => x.key), ["bio"]);
   await assert.rejects(open(w.oldDek, r.identity_rewraps[0].ciphertext, "identity:bio"));
   assert.equal(JSON.parse(td.decode(await open(newDek, r.identity_rewraps[0].ciphertext, "identity:bio"))), "hello there");
 

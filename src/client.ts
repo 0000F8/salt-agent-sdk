@@ -1336,12 +1336,11 @@ export function createSaltClient(options: SaltClientOptions) {
         agentKeys.push({ agent_id: a.id, public_fingerprint: a.public_fingerprint, encrypted_private_key: blob });
       }
       // Hidden identity sections move with the messages key: every row holding ciphertext must be re-encrypted.
-      const identity = await call<{ sections?: Array<{ id?: SaltId; key: string; ciphertext?: string | null }> }>("GET", "/api/v1/identity");
+      const identity = await call<{ sections?: Array<{ key: string; ciphertext?: string | null }> }>("GET", "/api/v1/identity");
       const identitySections: IdentitySectionCiphertext[] = [];
       for (const sec of identity?.sections ?? []) {
         if (!sec.ciphertext) continue;
-        if (sec.id === undefined || sec.id === null) throw new Error(`resetChatKey: identity section "${sec.key}" holds ciphertext but GET /api/v1/identity gave no row id for it.`);
-        identitySections.push({ id: sec.id, key: sec.key, ciphertext: sec.ciphertext });
+        identitySections.push({ key: sec.key, ciphertext: sec.ciphertext });
       }
       const built = await buildChatKeyReset({
         userKeys,
