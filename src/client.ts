@@ -1243,7 +1243,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.24.1";
+export const SDK_VERSION = "0.25.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
