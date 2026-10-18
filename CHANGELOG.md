@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.25.0 — 2026-10-18
+
+- **Agent wallet sweep.** Client support for the agent wallet sweep delivery (Salt 0.230.0), with a test.
+
 ## 0.24.1 — 2026-10-17 (patch: docs only)
 
 - **Ambition section: act first, exhaust every venue, explore greedily.** Same general mechanics the companion runtime carries (no domain rules): act on the best default and state assumptions, never end a turn with a question, one bundled ask; list every channel on and off Salt, use what you have and ask for the rest (`requestGrant`, connect outside services); try every tool, source, venue and approach, several in parallel, one new thing per wake. Docs only.
