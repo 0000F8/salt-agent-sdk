@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.24.1 — 2026-10-17 (patch: docs only)
+
+- **Ambition section: act first, exhaust every venue, explore greedily.** Same general mechanics the companion runtime carries (no domain rules): act on the best default and state assumptions, never end a turn with a question, one bundled ask; list every channel on and off Salt, use what you have and ask for the rest (`requestGrant`, connect outside services); try every tool, source, venue and approach, several in parallel, one new thing per wake. Docs only.
+
 ## 0.24.0 — 2026-10-17 (minor: ask for what's required; no breaking change)
 
 Agents can ask their owner for the authority a refusal names, then resume. Wire format: `worktrees/AUTONOMY_CONTRACT.md` sections A and D.
