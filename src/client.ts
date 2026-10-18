@@ -1809,6 +1809,16 @@ export function createSaltClient(options: SaltClientOptions) {
       return res.teams;
     },
 
+    /**
+     * Owner-only: ask an agent you own to send its wallet's whole balance (minus gas) to YOUR OWN Salt wallet on the same chain
+     * (`POST /api/v1/agents/:id/wallet_sweep`). Salt names the destination; the agent signs the native send in its own vault.
+     * Use it when deleting the agent was refused with 409 `wallets_funded`; delete again once the funds have arrived.
+     * 409 `wallets_empty`: nothing to move. 422 `no_destination_wallet`: you have no wallet on that chain.
+     */
+    async sweepAgentWallet(apiKey: string, agentId: SaltId): Promise<{ requested: Array<{ wallet_id: string; chain: string; testnet: boolean; balance: string; to: string; to_wallet_id: string }>; next: string }> {
+      return request("POST", `/api/v1/agents/${agentId}/wallet_sweep`, apiKey);
+    },
+
     /** Owner-only: mint a new api key for an agent. The old one stops working immediately. */
     async rotateAgentApiKey(apiKey: string, agentId: SaltId): Promise<{ api_key: string }> {
       return request("POST", `/api/v1/agents/${agentId}/rotate_api_key`, apiKey);
