@@ -31,7 +31,11 @@
 // phase 1): what has been shown to work, `{"edges":[{"label","edge","n"}],
 // "open":[],"settled":[],"testing":[],"kept":[],"dropped":[],"explore":0.2}`,
 // at most 8 edges sorted by edge, 4000 characters (formatAdvantage drops the
-// lowest-n edges until it fits). Phase 1 fills `edges` and `explore` only.
+// lowest-n edges, then the oldest rows, until it fits). Phase 2 fills the
+// lists: open [{q, by}], settled [{q, verdict, lift}], testing and kept
+// [{id, text, lift}], dropped [{text, lift, why}]; an edge may carry its
+// `arm_key` and a lens its `id` so the owner's taps can name them (see
+// formatAdvantageTap below).
 // salt-fe reads it in `parseAdvantage`; Grains writes the same line into the
 // reports it makes.
 //
@@ -71,19 +75,36 @@ export interface AdvantageEdge {
   edge: number;
   /** Moves behind it. */
   n: number;
+  /** The kind of move's key; lets "Never this" (SALT-ADV-NEVER kind=arm) name it. */
+  arm_key?: string;
 }
+
+export type AdvantageVerdict = "supported" | "refuted" | "inconclusive";
+
+/** An open question: what is being asked and by when it will be answered. */
+export interface AdvantageQuestion { q: string; by?: string }
+/** A settled question and what the test said. */
+export interface AdvantageSettled { q: string; verdict: AdvantageVerdict; lift?: number }
+/** A way of thinking being tried or kept; `id` lets the taps name it. */
+export interface AdvantageLens { id?: string; text: string; lift?: number }
+/** A dropped way of thinking and why. */
+export interface AdvantageDropped { text: string; lift?: number; why?: string }
 
 export interface Advantage {
   edges: AdvantageEdge[];
-  /** Phase 2 keys: written empty today, kept as sent when read. */
-  open?: unknown[];
-  settled?: unknown[];
-  testing?: unknown[];
-  kept?: unknown[];
-  dropped?: unknown[];
+  open?: AdvantageQuestion[];
+  settled?: AdvantageSettled[];
+  testing?: AdvantageLens[];
+  kept?: AdvantageLens[];
+  dropped?: AdvantageDropped[];
   /** Share of effort spent trying new things, 0 to 1. */
   explore?: number;
 }
+
+const ADVANTAGE_LISTS = ["open", "settled", "testing", "kept", "dropped"] as const;
+const ADVANTAGE_LIST_MAX = 10;
+const ADV_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const ADV_VERDICTS: readonly string[] = ["supported", "refuted", "inconclusive"];
 
 export interface WorkReport {
   id: string;
@@ -117,32 +138,69 @@ export function newWorkId(): string {
 const oneLine = (text: string | undefined, max: number): string =>
   (text || "").replace(/\s+/g, " ").trim().slice(0, max);
 
+const posNum = (v: unknown): number | undefined => {
+  const n = Number(v);
+  return v != null && Number.isFinite(n) && n > 0 ? n : undefined;
+};
+const advId = (v: unknown): string | undefined => (typeof v === "string" && ADV_ID_RE.test(v) ? v : undefined);
+
+// One normaliser for both directions: bad rows dropped, text one line and capped, lists capped.
+function normaliseAdvantage(raw: any): Advantage | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.edges)) return null;
+  const list = (v: unknown): any[] => (Array.isArray(v) ? v.slice(0, ADVANTAGE_LIST_MAX) : []);
+  const edges: AdvantageEdge[] = raw.edges
+    .map((e: any) => {
+      const edge: AdvantageEdge = { label: oneLine(e && e.label, 120), edge: Number(e && e.edge), n: Number(e && e.n) };
+      const key = advId(e && e.arm_key);
+      if (key) edge.arm_key = key;
+      return edge;
+    })
+    .filter((e: AdvantageEdge) => e.label && Number.isFinite(e.edge) && e.edge > 0 && Number.isFinite(e.n) && e.n >= 0);
+  const lens = (x: any): AdvantageLens => {
+    const out: AdvantageLens = { text: oneLine(x && (x.text || x.label), 160) };
+    const id = advId(x && x.id);
+    if (id) out.id = id;
+    const lift = posNum(x && x.lift);
+    if (lift !== undefined) out.lift = lift;
+    return out;
+  };
+  const advantage: Advantage = {
+    edges,
+    open: list(raw.open).map((x) => ({ q: oneLine(x && x.q, 200), by: oneLine(x && x.by, 40) || undefined })).filter((x) => x.q),
+    settled: list(raw.settled)
+      .map((x) => ({ q: oneLine(x && x.q, 200), verdict: x && x.verdict, lift: posNum(x && x.lift) }))
+      .filter((x) => x.q && ADV_VERDICTS.includes(x.verdict)),
+    testing: list(raw.testing).map(lens).filter((x) => x.text),
+    kept: list(raw.kept).map(lens).filter((x) => x.text),
+    dropped: list(raw.dropped)
+      .map((x) => ({ text: oneLine(x && (x.text || x.label), 160), lift: posNum(x && x.lift), why: oneLine(x && x.why, 200) || undefined }))
+      .filter((x) => x.text),
+  };
+  const explore = Number(raw.explore);
+  if (raw.explore != null && Number.isFinite(explore)) advantage.explore = explore;
+  return advantage;
+}
+
 /** The `advantage:` JSON for a report: edges sorted by edge (highest first),
- *  at most 8, the lowest-n edge dropped until it fits 4000 characters, the
- *  phase 2 keys present and empty. Null when the input has no usable shape. */
+ *  at most 8, every list present (empty when unused), and 4000 characters at
+ *  most -- when it runs over, the lowest-n edge goes first, then the oldest
+ *  row of the longest other list. Null when the input has no usable shape. */
 export function formatAdvantage(advantage: Advantage | null | undefined): string | null {
-  if (!advantage || !Array.isArray(advantage.edges)) return null;
-  const edges = advantage.edges
-    .map((e) => ({ label: oneLine(e && e.label, 120), edge: Number(e && e.edge), n: Number(e && e.n) }))
-    .filter((e) => e.label && Number.isFinite(e.edge) && e.edge > 0 && Number.isFinite(e.n) && e.n >= 0)
-    .sort((a, b) => b.edge - a.edge)
-    .slice(0, MAX_ADVANTAGE_EDGES);
-  const explore = Number(advantage.explore);
-  const build = () =>
-    JSON.stringify({
-      edges,
-      open: [],
-      settled: [],
-      testing: [],
-      kept: [],
-      dropped: [],
-      explore: Number.isFinite(explore) ? explore : 0,
-    });
+  const a = normaliseAdvantage(advantage);
+  if (!a) return null;
+  a.edges = a.edges.sort((x, y) => y.edge - x.edge).slice(0, MAX_ADVANTAGE_EDGES);
+  const build = () => JSON.stringify({ ...a, explore: a.explore ?? 0 });
   let json = build();
-  while (json.length > MAX_ADVANTAGE_CHARS && edges.length) {
-    let lowest = 0;
-    edges.forEach((e, i) => { if (e.n < edges[lowest].n) lowest = i; });
-    edges.splice(lowest, 1);
+  while (json.length > MAX_ADVANTAGE_CHARS) {
+    if (a.edges.length) {
+      let lowest = 0;
+      a.edges.forEach((e, i) => { if (e.n < a.edges[lowest].n) lowest = i; });
+      a.edges.splice(lowest, 1);
+    } else {
+      const longest = ADVANTAGE_LISTS.reduce((best, k) => ((a[k] as unknown[]).length > (a[best] as unknown[]).length ? k : best), ADVANTAGE_LISTS[0]);
+      if (!(a[longest] as unknown[]).length) break;
+      (a[longest] as unknown[]).shift();
+    }
     json = build();
   }
   return json.length > MAX_ADVANTAGE_CHARS ? null : json;
@@ -153,18 +211,39 @@ export function parseAdvantage(value: string): Advantage | null {
   if (!value || value.length > MAX_ADVANTAGE_CHARS) return null;
   let raw: any;
   try { raw = JSON.parse(value); } catch { return null; }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.edges)) return null;
-  const edges: AdvantageEdge[] = raw.edges
-    .map((e: any) => ({ label: oneLine(e && e.label, 120), edge: Number(e && e.edge), n: Number(e && e.n) }))
-    .filter((e: AdvantageEdge) => e.label && Number.isFinite(e.edge) && e.edge > 0 && Number.isFinite(e.n) && e.n >= 0)
-    .slice(0, MAX_ADVANTAGE_EDGES);
-  const advantage: Advantage = { edges };
-  for (const key of ["open", "settled", "testing", "kept", "dropped"] as const) {
-    if (Array.isArray(raw[key])) advantage[key] = raw[key];
-  }
-  const explore = Number(raw.explore);
-  if (raw.explore != null && Number.isFinite(explore)) advantage.explore = explore;
+  const advantage = normaliseAdvantage(raw);
+  if (advantage) advantage.edges = advantage.edges.slice(0, MAX_ADVANTAGE_EDGES);
   return advantage;
+}
+
+// The person's two taps on What's working (ADVANTAGE_P2_CONTRACT flow C): a
+// whole message from the person, one exact token, sent into the lane the
+// plan's reports come from. The runtime acts only when the speaker is the
+// owner (or the person the plan serves).
+//   [[SALT-ADV-NEVER kind=arm key=<arm_key>]]    never this kind of move
+//   [[SALT-ADV-NEVER kind=lens id=<lens_id>]]    never this way of thinking
+//   [[SALT-ADV-KEEP kind=lens id=<lens_id>]]     keep going with it
+export type AdvantageTapAction = "never" | "keep";
+export type AdvantageTapKind = "arm" | "lens";
+export interface AdvantageTap { action: AdvantageTapAction; kind: AdvantageTapKind; ref: string }
+
+const ADV_TAP_RE = /^\[\[SALT-ADV-(NEVER|KEEP) kind=(arm key|lens id)=([A-Za-z0-9_-]{1,64})\]\]$/;
+
+/** The wire message for a tap. Throws on a combination the protocol does not have (keep goes with a lens only) or a bad ref. */
+export function formatAdvantageTap(tap: AdvantageTap): string {
+  if (!ADV_ID_RE.test(tap.ref || "")) throw new Error("A tap needs a key or id of letters, digits, _ or -.");
+  if (tap.action !== "never" && tap.action !== "keep") throw new Error("action must be never or keep.");
+  if (tap.kind !== "arm" && tap.kind !== "lens") throw new Error("kind must be arm or lens.");
+  if (tap.action === "keep" && tap.kind !== "lens") throw new Error("Keep going names a lens.");
+  return `[[SALT-ADV-${tap.action.toUpperCase()} kind=${tap.kind} ${tap.kind === "arm" ? "key" : "id"}=${tap.ref}]]`;
+}
+
+/** The tap in a whole message, or null when the text is not exactly one. */
+export function parseAdvantageTap(plaintext: string): AdvantageTap | null {
+  const m = ADV_TAP_RE.exec((plaintext || "").trim());
+  if (!m) return null;
+  const tap = { action: m[1].toLowerCase() as AdvantageTapAction, kind: m[2].split(" ")[0] as AdvantageTapKind, ref: m[3] };
+  return tap.action === "keep" && tap.kind !== "lens" ? null : tap;
 }
 
 const ADVANTAGE_LINE_RE = /^advantage:[ \t]*(.*)$/;
