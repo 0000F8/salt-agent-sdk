@@ -209,3 +209,52 @@ test("a handler failure is caught and logged, never thrown out of dispatch", asy
   await dispatcher.dispatch({ type: "mandate_activated", mandate: baseMandate({ status: "active" }) }, "agent-1");
   assert.ok(errors.some((m) => m.includes("onMandateActivated failed") && m.includes("boom")));
 });
+
+test("strategy_tuned reaches onStrategyTuned with the changes, the whole strategy and the version; no handler is a quiet no-op", async () => {
+  const agent = { saltAppId: "agent-1", username: "helper", apiKey: "agent-key", publicKey: "x", privateKey: "y" };
+  const seen = [];
+  const body = {
+    ...baseMandate({ status: "active", version: 4 }),
+    type: "strategy_tuned",
+    strategy_id: "strat_1",
+    changes: { pace: "careful", explore: 0.3 },
+    strategy: { strategy_id: "strat_1", goal: "Reach 100", pace: "careful", explore: 0.3, goal_kind: "other" },
+    version: 4,
+  };
+  const dispatcher = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent]), pgpPassphrase: "x", logger: silent, onStrategyTuned: (ctx) => void seen.push(ctx) });
+  await dispatcher.dispatch(body, "agent-1");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].identity.saltAppId, "agent-1");
+  assert.equal(seen[0].mandateId, "mandate-1");
+  assert.equal(seen[0].strategyId, "strat_1");
+  assert.deepStrictEqual(seen[0].changes, { pace: "careful", explore: 0.3 });
+  assert.equal(seen[0].strategy.goal, "Reach 100");
+  assert.equal(seen[0].version, 4);
+
+  // a process hosting one identity needs no header
+  await dispatcher.dispatch(body);
+  assert.equal(seen.length, 2);
+  // unknown identity: dropped
+  const two = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent, { ...agent, saltAppId: "agent-2" }]), pgpPassphrase: "x", logger: silent, onStrategyTuned: (ctx) => void seen.push(ctx) });
+  await two.dispatch(body, "someone-else");
+  assert.equal(seen.length, 2);
+
+  const quiet = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent]), pgpPassphrase: "x", logger: silent });
+  await quiet.dispatch(body, "agent-1");
+});
+
+test("tuneStrategy sends a PATCH with snake_case keys and the version, and only the keys given", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, method: opts?.method, body: JSON.parse(opts.body) });
+    return { ok: true, status: 200, headers: { get: () => undefined }, json: async () => ({ id: "mandate-1", version: 5 }), text: async () => "{}" };
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+  const out = await client.tuneStrategy("agent-key", "mandate-1", { goalKind: "growth", pace: "careful", explore: 0.3 }, { version: 4 });
+  assert.equal(out.version, 5);
+  await client.tuneStrategy("agent-key", "mandate-1", { pace: "aggressive" }, { version: 5 });
+  assert.equal(calls[0].method, "PATCH");
+  assert.ok(calls[0].url.endsWith("/api/v1/mandates/mandate-1"));
+  assert.deepStrictEqual(calls[0].body, { version: 4, strategy: { goal_kind: "growth", pace: "careful", explore: 0.3 } });
+  assert.deepStrictEqual(calls[1].body, { version: 5, strategy: { pace: "aggressive" } });
+});

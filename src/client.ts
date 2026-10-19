@@ -1009,6 +1009,19 @@ export interface UpdateMandateParams {
   capabilities?: MandateCapabilityInput[];
   standing?: boolean;
   expires_at?: string;
+  /** Tune a running strategy: `explore`, `goal_kind`, `pace` only (see `client.tuneStrategy`). */
+  strategy?: Record<string, unknown>;
+}
+
+export type StrategyPace = "careful" | "balanced" | "aggressive";
+export type StrategyGoalKind = "growth" | "sales" | "support" | "research" | "content" | "scheduling" | "other";
+
+/** What the plan's grantor may change on a RUNNING strategy, no new approval: they only tune effort. */
+export interface StrategyTuning {
+  /** Share of effort spent on open questions, 0.05 to 0.5. */
+  explore?: number;
+  goalKind?: StrategyGoalKind;
+  pace?: StrategyPace;
 }
 
 /**
@@ -1243,7 +1256,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.27.0";
+export const SDK_VERSION = "0.28.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -2578,6 +2591,21 @@ export function createSaltClient(options: SaltClientOptions) {
       if (params.chatId !== undefined) body.chat_id = params.chatId;
       if (params.durationDays !== undefined) body.expires_at = new Date(Date.now() + params.durationDays * 86_400_000).toISOString();
       return request("POST", "/api/v1/mandates", apiKey, body);
+    },
+
+    /**
+     * Change the pace, exploring or kind of goal of a RUNNING plan (an active strategy mandate). Only the plan's
+     * grantor may (a person or the account that granted it), and `version` is the mandate's current one: a 409
+     * means it changed under you, so `mandates.get` and retry. Any other strategy key is refused (422
+     * `strategy_not_editable`); a value that already holds changes nothing and bumps no version. The agent that
+     * runs the plan hears `strategy_tuned` (`onStrategyTuned`).
+     */
+    async tuneStrategy(apiKey: string, mandateId: SaltId, tuning: StrategyTuning, opts: { version: number }): Promise<Mandate> {
+      const strategy: Record<string, unknown> = {};
+      if (tuning.explore !== undefined) strategy.explore = tuning.explore;
+      if (tuning.goalKind !== undefined) strategy.goal_kind = tuning.goalKind;
+      if (tuning.pace !== undefined) strategy.pace = tuning.pace;
+      return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, { version: opts.version, strategy });
     },
 
     /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */

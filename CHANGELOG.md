@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.28.0 — 2026-10-19
+
+- **Tune a running plan.** The person (the plan's grantor) can change pace, exploring and the kind of goal on a plan that is already running, with no new approval (Salt 0.235.0, DYNAMIC_ADVANTAGE ADVANTAGE_P2_TUNE_CONTRACT). `client.tuneStrategy(apiKey, mandateId, {explore?, goalKind?, pace?}, {version})` sends `PATCH /api/v1/mandates/:id` with snake_case keys (any other strategy key is refused by the API, 422 `strategy_not_editable`). The agent that runs the plan hears `strategy_tuned`: new `onStrategyTuned(ctx)` with `ctx.mandateId` (the payload is the mandate JSON plus `type`, `changes`, `strategy_id`, `version`), `ctx.strategyId`, `ctx.changes` (`{explore?, goal_kind?, pace?}`), the whole `ctx.strategy` and `ctx.version`, on the webhook and the socket alike. Types `StrategyTuning`, `StrategyPace`, `StrategyGoalKind`, `StrategyTunedContext`. Tests in `tests/mandate-events.test.js`.
+
 ## 0.27.0 — 2026-10-19
 
 - **Phase 2 of the `advantage:` line, and the owner's taps.** DYNAMIC_ADVANTAGE ADVANTAGE_P2_CONTRACT. `Advantage` is typed for `open` [{q, by}], `settled` [{q, verdict, lift}], `testing` / `kept` [{id, text, lift}] and `dropped` [{text, lift, why}], with an edge's `arm_key`; `formatAdvantage` writes them and `parseAdvantage` reads them (bad rows dropped, a phase 1 line still reads). Over 4000 characters the lowest-n edges go first, then the oldest rows. `formatAdvantageTap` / `parseAdvantageTap` write and detect the three whole-message markers `[[SALT-ADV-NEVER kind=arm key=…]]`, `[[SALT-ADV-NEVER kind=lens id=…]]` and `[[SALT-ADV-KEEP kind=lens id=…]]`. Tests in `tests/work.test.js`.
