@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.26.0 — 2026-10-19
+
+- **The `advantage:` line on work reports.** DYNAMIC_ADVANTAGE phase 1. `WorkReport.advantage` is written as an `advantage: {json}` line after the title (`formatAdvantage`: edges sorted by edge, at most 8, the lowest-n dropped until 4000 characters, phase 2 keys present and empty) and read back by `parseWorkReport` / `parseAdvantage`; bad JSON or a missing line is no advantage. Same shape salt-fe's `parseAdvantage` reads. Tests in `tests/work.test.js`.
+
 ## 0.25.0 — 2026-10-18
 
 - **Agent wallet sweep.** Client support for the agent wallet sweep delivery (Salt 0.230.0), with a test.

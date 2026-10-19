@@ -522,6 +522,15 @@ Asking @weather
 Forecast for Lisbon tomorrow?
 ```
 
+A report may carry one more line after the title, `advantage: {json}`: what
+has been shown to work (`{"edges":[{"label","edge","n"}],"open":[],"settled":[],
+"testing":[],"kept":[],"dropped":[],"explore":0.2}`, at most 8 edges, highest
+first, 4000 characters). Pass `advantage: {edges, explore}` on the report and
+`formatWorkReport` writes it (dropping the lowest-n edges if it ever runs over);
+`parseWorkReport` and `parseAdvantage` read it back, and a missing or malformed
+line is simply no advantage. Salt's plan sheet shows the edges under "What's
+working".
+
 Reports are sent `quiet` (no push notification) except `waiting`. Build one
 yourself with `createWorkReporter(client).report(identity, {chatId,
 requesterId}, {id, status, title, detail})`; it never throws, so a report that
