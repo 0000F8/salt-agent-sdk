@@ -27,6 +27,14 @@
 // after is detail. The web app's parser lives in salt-fe
 // `src/utilities/work.js`; keep the two in step.
 //
+// An optional `advantage: {json}` line may follow the title (DYNAMIC_ADVANTAGE
+// phase 1): what has been shown to work, `{"edges":[{"label","edge","n"}],
+// "open":[],"settled":[],"testing":[],"kept":[],"dropped":[],"explore":0.2}`,
+// at most 8 edges sorted by edge, 4000 characters (formatAdvantage drops the
+// lowest-n edges until it fits). Phase 1 fills `edges` and `explore` only.
+// salt-fe reads it in `parseAdvantage`; Grains writes the same line into the
+// reports it makes.
+//
 // Cancel (person -> agent), a WHOLE message on its own, sent into the same
 // lane a `scheduled` report came from:
 //
@@ -53,6 +61,30 @@ export const WORK_REPEATS: readonly WorkRepeat[] = ["hourly", "daily", "weekdays
 export const MAX_WORK_TITLE = 140;
 export const MAX_WORK_DETAIL = 500;
 
+export const MAX_ADVANTAGE_CHARS = 4000;
+export const MAX_ADVANTAGE_EDGES = 8;
+
+export interface AdvantageEdge {
+  /** The kind of move, in words or snake_case labels ("post_to_profile · hacker_news · founders"). */
+  label: string;
+  /** How many times the agent's average result it earns (1.8 = 1.8x). */
+  edge: number;
+  /** Moves behind it. */
+  n: number;
+}
+
+export interface Advantage {
+  edges: AdvantageEdge[];
+  /** Phase 2 keys: written empty today, kept as sent when read. */
+  open?: unknown[];
+  settled?: unknown[];
+  testing?: unknown[];
+  kept?: unknown[];
+  dropped?: unknown[];
+  /** Share of effort spent trying new things, 0 to 1. */
+  explore?: number;
+}
+
 export interface WorkReport {
   id: string;
   status: WorkStatus;
@@ -67,6 +99,8 @@ export interface WorkReport {
   repeat?: WorkRepeat;
   /** The confirmed transfer behind money work (`transfer=<id>`); salt-fe reads the receipt row from it. */
   transfer?: string;
+  /** What has been shown to work, as the `advantage:` line after the title. */
+  advantage?: Advantage;
 }
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -83,6 +117,58 @@ export function newWorkId(): string {
 const oneLine = (text: string | undefined, max: number): string =>
   (text || "").replace(/\s+/g, " ").trim().slice(0, max);
 
+/** The `advantage:` JSON for a report: edges sorted by edge (highest first),
+ *  at most 8, the lowest-n edge dropped until it fits 4000 characters, the
+ *  phase 2 keys present and empty. Null when the input has no usable shape. */
+export function formatAdvantage(advantage: Advantage | null | undefined): string | null {
+  if (!advantage || !Array.isArray(advantage.edges)) return null;
+  const edges = advantage.edges
+    .map((e) => ({ label: oneLine(e && e.label, 120), edge: Number(e && e.edge), n: Number(e && e.n) }))
+    .filter((e) => e.label && Number.isFinite(e.edge) && e.edge > 0 && Number.isFinite(e.n) && e.n >= 0)
+    .sort((a, b) => b.edge - a.edge)
+    .slice(0, MAX_ADVANTAGE_EDGES);
+  const explore = Number(advantage.explore);
+  const build = () =>
+    JSON.stringify({
+      edges,
+      open: [],
+      settled: [],
+      testing: [],
+      kept: [],
+      dropped: [],
+      explore: Number.isFinite(explore) ? explore : 0,
+    });
+  let json = build();
+  while (json.length > MAX_ADVANTAGE_CHARS && edges.length) {
+    let lowest = 0;
+    edges.forEach((e, i) => { if (e.n < edges[lowest].n) lowest = i; });
+    edges.splice(lowest, 1);
+    json = build();
+  }
+  return json.length > MAX_ADVANTAGE_CHARS ? null : json;
+}
+
+/** The value of an `advantage:` line, as an Advantage, or null (bad JSON, wrong shape, over the cap). */
+export function parseAdvantage(value: string): Advantage | null {
+  if (!value || value.length > MAX_ADVANTAGE_CHARS) return null;
+  let raw: any;
+  try { raw = JSON.parse(value); } catch { return null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !Array.isArray(raw.edges)) return null;
+  const edges: AdvantageEdge[] = raw.edges
+    .map((e: any) => ({ label: oneLine(e && e.label, 120), edge: Number(e && e.edge), n: Number(e && e.n) }))
+    .filter((e: AdvantageEdge) => e.label && Number.isFinite(e.edge) && e.edge > 0 && Number.isFinite(e.n) && e.n >= 0)
+    .slice(0, MAX_ADVANTAGE_EDGES);
+  const advantage: Advantage = { edges };
+  for (const key of ["open", "settled", "testing", "kept", "dropped"] as const) {
+    if (Array.isArray(raw[key])) advantage[key] = raw[key];
+  }
+  const explore = Number(raw.explore);
+  if (raw.explore != null && Number.isFinite(explore)) advantage.explore = explore;
+  return advantage;
+}
+
+const ADVANTAGE_LINE_RE = /^advantage:[ \t]*(.*)$/;
+
 /** The plaintext of one report. Throws on a malformed id or status. */
 export function formatWorkReport(report: WorkReport): string {
   if (!ID_RE.test(report.id || "")) throw new Error("A work report needs an id of letters, digits, _ or -.");
@@ -97,7 +183,8 @@ export function formatWorkReport(report: WorkReport): string {
   const title = oneLine(report.title, MAX_WORK_TITLE);
   if (!title) throw new Error("A work report needs a title.");
   const detail = (report.detail || "").trim().slice(0, MAX_WORK_DETAIL);
-  return `[[SALT-WORK ${attrs.join(" ")}]]\n${title}${detail ? `\n${detail}` : ""}`;
+  const advantage = formatAdvantage(report.advantage);
+  return `[[SALT-WORK ${attrs.join(" ")}]]\n${title}${advantage ? `\nadvantage: ${advantage}` : ""}${detail ? `\n${detail}` : ""}`;
 }
 
 /** The report in a plaintext, or null when it is not one. */
@@ -118,7 +205,14 @@ export function parseWorkReport(plaintext: string): WorkReport | null {
   if (attrs.due && DUE_RE.test(attrs.due) && !Number.isNaN(Date.parse(attrs.due))) report.due = attrs.due;
   if (WORK_REPEATS.includes(attrs.repeat as WorkRepeat)) report.repeat = attrs.repeat as WorkRepeat;
   if (attrs.transfer && ID_RE.test(attrs.transfer)) report.transfer = attrs.transfer;
-  const detail = rest.join("\n").trim();
+  const kept: string[] = [];
+  rest.forEach((line) => {
+    const m = ADVANTAGE_LINE_RE.exec(line.trim());
+    if (!m) { kept.push(line); return; }
+    const advantage = parseAdvantage(m[1].trim());
+    if (advantage) report.advantage = advantage;
+  });
+  const detail = kept.join("\n").trim();
   if (detail) report.detail = detail;
   return report;
 }

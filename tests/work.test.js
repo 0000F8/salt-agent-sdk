@@ -192,3 +192,45 @@ test("parseWorkCancel reads the person's [[SALT-WORK-CANCEL id=...]] and refuses
   assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK-CANCEL id=w_1]] extra text"), null, "a cancel is a WHOLE message, nothing riding alongside it");
   assert.strictEqual(sdk.parseWorkCancel("[[SALT-WORK id=w_1 status=cancelled]]\nx"), null, "a work REPORT of status cancelled is not the cancel marker");
 });
+
+// DYNAMIC_ADVANTAGE phase 1: the `advantage:` line after the title.
+test("an advantage line round-trips, edges sorted and capped, phase 2 keys empty", () => {
+  const edges = [
+    { label: "send_outreach · email · shops", edge: 1.2, n: 4 },
+    { label: "post_to_profile · hacker_news · founders", edge: 1.8, n: 12 },
+  ];
+  const text = sdk.formatWorkReport({ id: "w_1", status: "running", kind: "task", title: "Growing the list", detail: "Day 3", advantage: { edges, explore: 0.2 } });
+  const [marker, title, line, detail] = text.split("\n");
+  assert.match(marker, /^\[\[SALT-WORK /);
+  assert.strictEqual(title, "Growing the list");
+  const sent = JSON.parse(line.replace(/^advantage: /, ""));
+  assert.deepStrictEqual(sent.edges.map((e) => e.edge), [1.8, 1.2]);
+  assert.deepStrictEqual([sent.open, sent.settled, sent.testing, sent.kept, sent.dropped], [[], [], [], [], []]);
+  assert.strictEqual(sent.explore, 0.2);
+  assert.strictEqual(detail, "Day 3");
+  const back = sdk.parseWorkReport(text);
+  assert.strictEqual(back.detail, "Day 3");
+  assert.deepStrictEqual(back.advantage.edges, sent.edges);
+  assert.strictEqual(back.advantage.explore, 0.2);
+});
+
+test("an advantage line keeps at most 8 edges, highest first, and stays under 4000 characters", () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({ label: "z".repeat(300), edge: 1 + i / 100, n: i }));
+  const json = sdk.formatAdvantage({ edges: many });
+  const out = JSON.parse(json);
+  assert.strictEqual(out.edges.length, 8);
+  assert.strictEqual(out.edges[0].edge, 1.11);
+  assert.strictEqual(out.edges[0].label.length, 120);
+  assert.ok(json.length <= sdk.MAX_ADVANTAGE_CHARS);
+});
+
+test("a missing or malformed advantage line is no advantage, and the detail is untouched", () => {
+  assert.strictEqual(sdk.parseWorkReport("[[SALT-WORK id=w_1 status=done]]\nBooked").advantage, undefined);
+  const bad = sdk.parseWorkReport("[[SALT-WORK id=w_1 status=done]]\nBooked\nadvantage: {nope\nSee you there");
+  assert.strictEqual(bad.advantage, undefined);
+  assert.strictEqual(bad.detail, "See you there");
+  assert.strictEqual(sdk.parseAdvantage("[1]"), null);
+  assert.strictEqual(sdk.parseAdvantage('{"edges":"x"}'), null);
+  assert.strictEqual(sdk.formatAdvantage(null), null);
+  assert.strictEqual(sdk.formatWorkReport({ id: "w_1", status: "done", title: "x" }), "[[SALT-WORK id=w_1 status=done]]\nx");
+});
