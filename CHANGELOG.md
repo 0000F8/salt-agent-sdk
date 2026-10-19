@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.27.0 — 2026-10-19
+
+- **Phase 2 of the `advantage:` line, and the owner's taps.** DYNAMIC_ADVANTAGE ADVANTAGE_P2_CONTRACT. `Advantage` is typed for `open` [{q, by}], `settled` [{q, verdict, lift}], `testing` / `kept` [{id, text, lift}] and `dropped` [{text, lift, why}], with an edge's `arm_key`; `formatAdvantage` writes them and `parseAdvantage` reads them (bad rows dropped, a phase 1 line still reads). Over 4000 characters the lowest-n edges go first, then the oldest rows. `formatAdvantageTap` / `parseAdvantageTap` write and detect the three whole-message markers `[[SALT-ADV-NEVER kind=arm key=…]]`, `[[SALT-ADV-NEVER kind=lens id=…]]` and `[[SALT-ADV-KEEP kind=lens id=…]]`. Tests in `tests/work.test.js`.
+
 ## 0.26.0 — 2026-10-19
 
 - **The `advantage:` line on work reports.** DYNAMIC_ADVANTAGE phase 1. `WorkReport.advantage` is written as an `advantage: {json}` line after the title (`formatAdvantage`: edges sorted by edge, at most 8, the lowest-n dropped until 4000 characters, phase 2 keys present and empty) and read back by `parseWorkReport` / `parseAdvantage`; bad JSON or a missing line is no advantage. Same shape salt-fe's `parseAdvantage` reads. Tests in `tests/work.test.js`.

@@ -234,3 +234,57 @@ test("a missing or malformed advantage line is no advantage, and the detail is u
   assert.strictEqual(sdk.formatAdvantage(null), null);
   assert.strictEqual(sdk.formatWorkReport({ id: "w_1", status: "done", title: "x" }), "[[SALT-WORK id=w_1 status=done]]\nx");
 });
+
+// DYNAMIC_ADVANTAGE phase 2: questions, lenses, dropped-with-why, and the owner's taps.
+test("the phase 2 lists round-trip with ids, and bad rows are dropped", () => {
+  const advantage = {
+    edges: [{ label: "post_to_profile · hacker_news", edge: 1.8, n: 12, arm_key: "ab12cd34ef56ab12" }],
+    open: [{ q: "Do evening posts beat morning posts?", by: "2026-11-02" }],
+    settled: [{ q: "Does a short title help?", verdict: "supported", lift: 1.4 }, { q: "bad", verdict: "maybe" }],
+    testing: [{ id: "l_test1", text: "Lead with a question" }],
+    kept: [{ id: "l_kept1", text: "Show the result first", lift: 1.3 }],
+    dropped: [{ text: "Post three times a day", lift: 0.7, why: "People stopped replying" }],
+    explore: 0.2,
+  };
+  const text = sdk.formatWorkReport({ id: "w_1", status: "running", title: "Growing the list", advantage });
+  const back = sdk.parseWorkReport(text).advantage;
+  assert.strictEqual(back.edges[0].arm_key, "ab12cd34ef56ab12");
+  assert.deepStrictEqual(back.open, [{ q: "Do evening posts beat morning posts?", by: "2026-11-02" }]);
+  assert.deepStrictEqual(back.settled.map((x) => x.verdict), ["supported"]);
+  assert.strictEqual(back.testing[0].id, "l_test1");
+  assert.strictEqual(back.kept[0].lift, 1.3);
+  assert.strictEqual(back.dropped[0].why, "People stopped replying");
+  assert.strictEqual(back.explore, 0.2);
+  // A phase 1 line (lists empty or absent) still reads.
+  assert.deepStrictEqual(sdk.parseAdvantage('{"edges":[]}').open, []);
+});
+
+test("over the cap, the lowest-n edges go first and then the oldest rows", () => {
+  const long = (i) => `${"w".repeat(190)}${i}`;
+  const advantage = {
+    edges: [],
+    open: Array.from({ length: 10 }, (_, i) => ({ q: long(i) })),
+    testing: Array.from({ length: 10 }, (_, i) => ({ text: long(i) })),
+    kept: Array.from({ length: 10 }, (_, i) => ({ text: long(i) })),
+  };
+  const json = sdk.formatAdvantage(advantage);
+  assert.ok(json.length <= sdk.MAX_ADVANTAGE_CHARS);
+  const out = JSON.parse(json);
+  assert.ok(out.open.length + out.testing.length + out.kept.length < 30);
+  // Oldest first: what is left of a trimmed list is its newest rows.
+  assert.ok(out.open.length === 0 || out.open[out.open.length - 1].q.endsWith("9"));
+});
+
+test("the three tap markers write, read and refuse exactly", () => {
+  assert.strictEqual(sdk.formatAdvantageTap({ action: "never", kind: "arm", ref: "ab12" }), "[[SALT-ADV-NEVER kind=arm key=ab12]]");
+  assert.strictEqual(sdk.formatAdvantageTap({ action: "never", kind: "lens", ref: "l_1" }), "[[SALT-ADV-NEVER kind=lens id=l_1]]");
+  assert.strictEqual(sdk.formatAdvantageTap({ action: "keep", kind: "lens", ref: "l_1" }), "[[SALT-ADV-KEEP kind=lens id=l_1]]");
+  assert.throws(() => sdk.formatAdvantageTap({ action: "keep", kind: "arm", ref: "x" }));
+  assert.throws(() => sdk.formatAdvantageTap({ action: "never", kind: "lens", ref: "bad id" }));
+  assert.deepStrictEqual(sdk.parseAdvantageTap("[[SALT-ADV-KEEP kind=lens id=l_1]]"), { action: "keep", kind: "lens", ref: "l_1" });
+  assert.deepStrictEqual(sdk.parseAdvantageTap("[[SALT-ADV-NEVER kind=arm key=ab12]]"), { action: "never", kind: "arm", ref: "ab12" });
+  assert.strictEqual(sdk.parseAdvantageTap("please [[SALT-ADV-KEEP kind=lens id=l_1]]"), null);
+  assert.strictEqual(sdk.parseAdvantageTap("[[SALT-ADV-KEEP kind=arm key=x]]"), null);
+  assert.strictEqual(sdk.parseAdvantageTap("[[SALT-ADV-NEVER kind=lens key=l_1]]"), null);
+  assert.strictEqual(sdk.parseAdvantageTap(""), null);
+});

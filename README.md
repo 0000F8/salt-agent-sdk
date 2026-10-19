@@ -529,7 +529,14 @@ first, 4000 characters). Pass `advantage: {edges, explore}` on the report and
 `formatWorkReport` writes it (dropping the lowest-n edges if it ever runs over);
 `parseWorkReport` and `parseAdvantage` read it back, and a missing or malformed
 line is simply no advantage. Salt's plan sheet shows the edges under "What's
-working".
+working". From 0.27.0 the line also carries `open` (`{q, by}`), `settled`
+(`{q, verdict, lift}`), `testing` and `kept` (`{id, text, lift}`) and `dropped`
+(`{text, lift, why}`), and an edge may carry its `arm_key`. The owner's two taps
+in that sheet reach the agent as whole messages in the same lane, which
+`parseAdvantageTap` detects (`formatAdvantageTap` writes one):
+`[[SALT-ADV-NEVER kind=arm key=<arm_key>]]`, `[[SALT-ADV-NEVER kind=lens id=<lens_id>]]`
+and `[[SALT-ADV-KEEP kind=lens id=<lens_id>]]`. Act on a tap only when its sender
+is the owner or the person the plan serves, and never show the marker in a reply.
 
 Reports are sent `quiet` (no push notification) except `waiting`. Build one
 yourself with `createWorkReporter(client).report(identity, {chatId,
