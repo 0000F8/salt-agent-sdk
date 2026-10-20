@@ -866,7 +866,8 @@ export interface MandateCapabilityRow {
   /** e.g. `{chat_ids: [...]}`, `{wallet_ids: [...]}`, `{product_ids: [...]}`, or `{}` for "every one". */
   selector: Record<string, unknown>;
   mode: MandateCapabilityMode;
-  /** e.g. `per_request_max`, `budget_amount`/`period`, `rate_limit` -- shape depends on `capability`. */
+  /** e.g. `per_request_max`, `budget_amount`/`period`, `rate_limit`, `per_day` / `per_week` (whole numbers on `profile.post`, `wake.repeat`,
+   *  `room.create`, `outreach.request`; the stricter wins; 0 only for `outreach.request`; over the limit is 429 `rate_limit`) -- shape depends on `capability`. */
   constraints: Record<string, unknown>;
 }
 
@@ -927,6 +928,13 @@ export interface Mandate {
   tune_request?: StrategyTuneRequest | null;
   /** Strategy mandates: the keys the person keeps fixed (`lockPlan`); `tunePlan` on one is refused 422 `plan_locked`. Top level, not inside `strategy`. */
   locks?: PlanLock[];
+  /** Strategy mandates: who runs the plan. `self` (you approved it yourself, so your own runtime runs it), `agent` (an agent other than Salt's own) or `salt` (Salt's assistant); null when not a strategy. */
+  runner?: PlanRunner | null;
+  /** A plan you approved yourself: one sentence saying so and how to have Salt run it (give Salt the goal). Else null. */
+  note?: string | null;
+  /** Strategy mandates: what the running agent says it is testing, keeping and dropping (`putWorking`). Grantor and grantee only. */
+  working?: PlanWorking | null;
+  working_at?: string | null;
   /** Strategy mandates: when the plan first checks in (Allow time plus review cadence); null until Allowed. */
   first_check_in_at?: string | null;
   /** Strategy mandates: money paid under the plan, per currency (this month and in total). Measured, never estimated. */
@@ -965,6 +973,64 @@ export interface MandateExercise {
   [key: string]: unknown;
 }
 
+/** Who runs a plan: see `Mandate.runner`. */
+export type PlanRunner = "self" | "agent" | "salt";
+
+/** One thing a plan is testing (`PlanWorking.testing`). */
+export interface WorkingTesting {
+  id: string;
+  /** At most 280 characters. */
+  text: string;
+  since: string;
+  trials: number;
+  result?: string | number;
+}
+
+/** One thing a plan keeps. `decision`/`decided_at` are set by the person's `decideWorking`. */
+export interface WorkingKept {
+  id: string;
+  text: string;
+  kept_at: string;
+  lift?: string | number;
+  decision?: WorkingDecision;
+  decided_at?: string;
+}
+
+/** One thing a plan dropped, with the reason. */
+export interface WorkingDropped {
+  id: string;
+  text: string;
+  why: string;
+}
+
+/** What the plan's agent publishes with `putWorking`: at most 20 entries a list. */
+export interface PlanWorking {
+  testing: WorkingTesting[];
+  kept: WorkingKept[];
+  dropped: WorkingDropped[];
+}
+
+/** The person's two taps on an entry of what's working. */
+export type WorkingDecision = "keep" | "never";
+
+/** Answer of `giveGoal`: the request waits for Salt's assistant to file a plan. */
+export interface GoalRequest {
+  id: SaltId;
+  status: "waiting";
+  /** What to do next, in a sentence. */
+  next?: string;
+}
+
+/** `getGoalRequest`: `planned` carries the plan's `mandate_id` (read it, or wait for the person's Allow); `declined` is the person's Not now; `expired` is 24 hours with no plan. */
+export interface GoalRequestStatus {
+  id: SaltId;
+  status: "waiting" | "planned" | "declined" | "expired";
+  goal: string;
+  deadline: string | null;
+  mandate_id: SaltId | null;
+  created_at: string;
+}
+
 /** What a person can use, from `getReadiness`: counts and names only. */
 export interface Readiness {
   person_id: SaltId;
@@ -989,7 +1055,9 @@ export interface PlanSummaryTarget {
   actual_at?: string | null;
   reported: boolean;
   note?: string | null;
-  measured_by?: "agent";
+  /** Who counts it: `person` (a count they report), `salt` (Salt counts it and fills `actual`, `actual_unit`, `actual_at`) or `agent` (outside Salt: you report your own). */
+  measured_by?: "person" | "salt" | "agent";
+  actual_unit?: string | null;
   [key: string]: unknown;
 }
 
@@ -1013,8 +1081,12 @@ export interface PlanSummary {
   };
   tunings: Record<string, unknown>[];
   spend: Mandate["spend"];
-  ai: { model_budget_usd: number | null; spent_usd: number | null };
+  ai: { model_budget_usd: number | null; spent_usd: number | null; budget_from?: "plan" | "default"; paid_by?: "salt" | "grantor" | "grantee" };
   locks: PlanLock[];
+  /** Who runs the plan (see `Mandate.runner`), and what the running agent says is working (`putWorking`). */
+  runner?: PlanRunner | null;
+  working?: PlanWorking | null;
+  working_at?: string | null;
   [key: string]: unknown;
 }
 
@@ -1409,6 +1481,26 @@ export class RecipientContactsOnlyError extends SaltApiError {
   }
 }
 
+/** Refusals of a plan call that carry a sentence for the person and a `next` step: read the code, show the sentence. */
+export const GOAL_PLAN_ERROR_CODES = ["no_capability", "first_post_needs_post", "source_unavailable"] as const;
+export type GoalPlanErrorCode = (typeof GOAL_PLAN_ERROR_CODES)[number];
+
+/** 422 `no_capability` (an ask on a plan you approved yourself holds no permissions), 422 `first_post_needs_post` (a `first_post` with no
+ *  `profile.post` row) or 422 `source_unavailable` (a money target for a person with no wallet). `sentence` is the server's own words and
+ *  `next` its next step when it gives one (e.g. "To have Salt run it, give Salt the goal: POST /api/v1/goals."). Do not retry unchanged. */
+export class GoalPlanError extends SaltApiError {
+  sentence: string;
+  next?: string;
+
+  constructor(method: string, url: string, status: number, body: unknown) {
+    super(method, url, status, body);
+    this.name = "GoalPlanError";
+    const b = (body ?? {}) as { error?: unknown; next?: unknown };
+    this.sentence = typeof b.error === "string" ? b.error : "Salt refused this plan call.";
+    if (typeof b.next === "string") this.next = b.next;
+  }
+}
+
 export const APPROVE_FIRST = "approve_first";
 export const PLAN_REQUIRED = "plan_required";
 
@@ -1511,7 +1603,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.32.0";
+export const SDK_VERSION = "0.33.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -1549,6 +1641,7 @@ export function createSaltClient(options: SaltClientOptions) {
       const refusalCode = (parsed as { code?: unknown } | undefined)?.code;
       if (refusalCode === APPROVE_FIRST) throw new ApproveFirstError(method, url, res.status, parsed);
       if (refusalCode === PLAN_REQUIRED) throw new PlanRequiredError(method, url, res.status, parsed);
+      if (typeof refusalCode === "string" && (GOAL_PLAN_ERROR_CODES as readonly string[]).includes(refusalCode)) throw new GoalPlanError(method, url, res.status, parsed);
       const apiError = new SaltApiError(method, url, res.status, parsed);
       const retryAfter = Number(res.headers?.get?.("Retry-After"));
       if (res.status === 429 && Number.isFinite(retryAfter)) apiError.retryAfterSeconds = retryAfter;
@@ -3096,6 +3189,40 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async resumeAll(apiKey: string, opts?: { goalId?: SaltId | string }): Promise<ResumeAllResult> {
       return request("POST", "/api/v1/mandates/resume_all", apiKey, opts?.goalId !== undefined ? { goal_id: opts.goalId } : undefined);
+    },
+
+    /**
+     * Give Salt a goal when you have no runtime of your own (`POST /api/v1/goals`): the same as typing it to @salt. 201 `{id, status: "waiting", next}`;
+     * Salt's assistant files a plan to you (read `GET /api/v1/mandates?role=grantor&status=proposed`, or watch `getGoalRequest`), then Allow it
+     * with `mandates.accept`. `goal` is plain text, 1 to 2000 characters; `deadline` is `YYYY-MM-DD`; `chatId` is a chat you are in and becomes the
+     * plan's chat. 5 waiting and 20 a day (429 `too_many_waiting` / `goals_per_day`, `err.retryAfterSeconds`). Pass `idempotencyKey` and a retry files one request.
+     */
+    async giveGoal(apiKey: string, params: { goal: string; deadline?: string; chatId?: SaltId; idempotencyKey?: string }): Promise<GoalRequest> {
+      const body: Record<string, unknown> = { goal: params.goal };
+      if (params.deadline !== undefined) body.deadline = params.deadline;
+      if (params.chatId !== undefined) body.chat_id = params.chatId;
+      return request("POST", "/api/v1/goals", apiKey, body, params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined);
+    },
+
+    /** Where a goal you gave stands (`GET /api/v1/goals/:id`). Only the person who gave it can read it (404 otherwise). */
+    async getGoalRequest(apiKey: string, goalRequestId: SaltId): Promise<GoalRequestStatus> {
+      return request("GET", `/api/v1/goals/${goalRequestId}`, apiKey);
+    },
+
+    /**
+     * The agent running a plan publishes what it is testing, keeping and dropping (`PUT /api/v1/mandates/:id/working`). Replaces the lists;
+     * entries' `decision` stays when you publish again. Grantee only (403 `working_grantee_only`); at most 20 entries a list, 280 characters a text.
+     */
+    async putWorking(apiKey: string, mandateId: SaltId, working: Partial<PlanWorking>): Promise<{ mandate_id: SaltId; working: PlanWorking; working_at: string }> {
+      return request("PUT", `/api/v1/mandates/${mandateId}/working`, apiKey, { testing: working.testing ?? [], kept: working.kept ?? [], dropped: working.dropped ?? [] });
+    },
+
+    /**
+     * The plan's person decides on one entry (`POST /api/v1/mandates/:id/working/decide`): `keep` or `never`. Grantor only (403
+     * `working_grantor_only`); 422 `entry_not_found`. The agent hears `plan.working_decided` (`{mandate_id, id, decision}`).
+     */
+    async decideWorking(apiKey: string, mandateId: SaltId, entryId: string, decision: WorkingDecision): Promise<{ mandate_id: SaltId; id: string; decision: WorkingDecision; working: PlanWorking }> {
+      return request("POST", `/api/v1/mandates/${mandateId}/working/decide`, apiKey, { id: entryId, decision });
     },
 
     /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */
