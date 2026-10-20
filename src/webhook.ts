@@ -541,6 +541,12 @@ export interface StrategyTunedContext {
   strategy: Record<string, unknown>;
   /** The mandate's version after the change. */
   version: number;
+  /** Who changed it: `"person"` (the plan's grantor, including their Undo) or `"agent"` (your own `tunePlan`, 0.243.0). Absent on older Salt. */
+  by?: "person" | "agent";
+  /** The values before the change, by key (`{pace: "careful"}`), when Salt sends them. */
+  before?: Record<string, unknown>;
+  /** The id of the entry in `strategy.tunings[]` this change made, when Salt sends it. */
+  tuningId?: string;
   /** The raw event body. */
   body: Record<string, unknown>;
 }
@@ -2427,6 +2433,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
         changes: (body.changes ?? {}) as StrategyTunedContext["changes"],
         strategy,
         version: Number(body.version),
+        by: body.by === "person" || body.by === "agent" ? body.by : undefined,
+        before: body.before && typeof body.before === "object" ? (body.before as Record<string, unknown>) : undefined,
+        tuningId: body.tuning_id != null ? String(body.tuning_id) : undefined,
         body,
       });
     } catch (err) {
