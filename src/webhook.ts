@@ -545,6 +545,22 @@ export interface StrategyTunedContext {
   body: Record<string, unknown>;
 }
 
+/**
+ * The person (the plan's grantor) said "Not now" to a settings change you asked for with `requestStrategyTune`
+ * (`strategy_tune_declined`). Nothing changed: keep the plan's current settings. Delivered to you only.
+ */
+export interface StrategyTuneDeclinedContext {
+  identity: AgentIdentity;
+  mandateId: SaltId;
+  strategyId: string;
+  /** What you asked for (snake_case, as the API sends it). */
+  changes: { explore?: number; goal_kind?: string; pace?: string };
+  /** The mandate's version (unchanged by a decline). */
+  version: number;
+  /** The raw event body (the mandate JSON plus `type`, `changes`, `strategy_id`, `version`). */
+  body: Record<string, unknown>;
+}
+
 export interface ApprovalRequestedContext {
   identity: AgentIdentity;
   exercise: MandateExercise;
@@ -787,6 +803,8 @@ export interface WebhookServerOptions {
   onMandatePaused?: (ctx: MandatePausedContext) => Promise<void> | void;
   /** The person changed pace, exploring or kind of goal on a plan this identity runs. See StrategyTunedContext. */
   onStrategyTuned?: (ctx: StrategyTunedContext) => Promise<void> | void;
+  /** The person declined a settings change you asked for (`requestStrategyTune`); nothing changed. See StrategyTuneDeclinedContext. */
+  onStrategyTuneDeclined?: (ctx: StrategyTuneDeclinedContext) => Promise<void> | void;
   /** A mandate this identity is party to was revoked. */
   onMandateRevoked?: (ctx: MandateRevokedContext) => Promise<void> | void;
   /** This identity is the PRINCIPAL of an ask-mode call someone acting for it just made, and it's
@@ -2390,6 +2408,27 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function handleStrategyTuneDeclined(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onStrategyTuneDeclined) return;
+    const strategy = (body.strategy ?? {}) as Record<string, unknown>;
+    const all = identities.all();
+    const identity = resolveMandateIdentity(headerAgentId) ?? (all.length === 1 ? all[0] : undefined);
+    const mandateId = (body.id ?? body.mandate_id) as SaltId | undefined;
+    if (!identity || mandateId == null) return;
+    try {
+      await options.onStrategyTuneDeclined({
+        identity,
+        mandateId,
+        strategyId: String(body.strategy_id ?? strategy.strategy_id ?? ""),
+        changes: (body.changes ?? {}) as StrategyTuneDeclinedContext["changes"],
+        version: Number(body.version),
+        body,
+      });
+    } catch (err) {
+      logger.error(`[mandate ${String(mandateId)}] onStrategyTuneDeclined failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleMandateLifecycleEvent(
     kind: "activated" | "paused" | "revoked",
     body: { mandate: Mandate },
@@ -2652,6 +2691,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "mandate_paused") return handleMandateLifecycleEvent("paused", body as never, headerAgentId);
     if (body?.type === "mandate_revoked") return handleMandateLifecycleEvent("revoked", body as never, headerAgentId);
     if (body?.type === "strategy_tuned") return handleStrategyTuned(body, headerAgentId);
+    if (body?.type === "strategy_tune_declined") return handleStrategyTuneDeclined(body, headerAgentId);
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
     if (body?.type === "describe_yourself") return handleDescribeYourself(body, headerAgentId);
