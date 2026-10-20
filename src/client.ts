@@ -123,6 +123,30 @@ export interface PostMessageResult {
   [key: string]: unknown;
 }
 
+/** How often a subscriber gets an account's posts by email. */
+export type PostSubscriptionCadence = "instant" | "daily" | "weekly";
+
+/** `subscribeToPostsByEmail` result. 202 `check_your_email` always, for any well-formed email (it never says whether
+ *  the address was already subscribed); 201 `active` with the `cadence` when the caller is signed in and the email is
+ *  their own verified account email. */
+export type PostSubscribeResult =
+  | { status: "check_your_email" }
+  | { status: "active"; cadence: PostSubscriptionCadence };
+
+/** `GET /api/v1/me/post_subscribers`: active email subscribers to your posts, counts only, never addresses. */
+export interface PostSubscriberCount {
+  count: number;
+  by_cadence: { instant: number; daily: number; weekly: number };
+}
+
+/** One row of `GET /api/v1/me/post_subscriptions`: an account whose posts you get by email. */
+export interface MyPostSubscription {
+  id: SaltId;
+  cadence: PostSubscriptionCadence;
+  status: "pending" | "active" | "unsubscribed";
+  account: { username: string; display_name: string };
+}
+
 /** One row of `GET /api/v1/contacts/incoming`: an account that added the caller and that the caller has not
  *  added back. `added_at` is when they added you. */
 export interface IncomingContact {
@@ -1376,7 +1400,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.30.0";
+export const SDK_VERSION = "0.31.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -1391,7 +1415,9 @@ export function createSaltClient(options: SaltClientOptions) {
     opts?: { extraHeaders?: Record<string, string>; idempotencyKey?: string }
   ): Promise<T> {
     const url = `${host}${path}`;
-    const headers: Record<string, string> = { "api-key": apiKey, "X-Salt-Client": CLIENT_HEADER, ...opts?.extraHeaders };
+    const headers: Record<string, string> = { "X-Salt-Client": CLIENT_HEADER, ...opts?.extraHeaders };
+    // Signed-out calls (subscribing to an account's posts by email) pass an empty key and send no api-key header.
+    if (apiKey) headers["api-key"] = apiKey;
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (opts?.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
     const res = await doFetch(url, {
@@ -2301,6 +2327,35 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Dismiss an incoming contact without adding them back; they drop out of the incoming list and are not told. */
     async dismissIncomingContact(apiKey: string, userId: SaltId): Promise<void> {
       await request("POST", `/api/v1/contacts/incoming/${userId}/dismiss`, apiKey, {});
+    },
+
+    /** Get an account's posts by email (`POST /api/v1/users/:username/post_subscriptions`). No sign-in needed: leave
+     *  `apiKey` out. Always resolves `{status: "check_your_email"}` (202) for a well-formed email, whether or not it
+     *  was already subscribed; the person taps Confirm in the mail. Pass `apiKey` and your own VERIFIED account email
+     *  to activate at once: `{status: "active", cadence}` (201). A bad email or cadence rejects with `SaltApiError`
+     *  422 (`.body.error`); a hidden or banned account is 404. `timeZone` is an IANA name for the digest hour (default UTC). */
+    async subscribeToPostsByEmail(
+      username: string,
+      params: { email: string; cadence: PostSubscriptionCadence; timeZone?: string; apiKey?: string }
+    ): Promise<PostSubscribeResult> {
+      const body: Record<string, unknown> = { email: params.email, cadence: params.cadence };
+      if (params.timeZone !== undefined) body.time_zone = params.timeZone;
+      return request("POST", `/api/v1/users/${encodeURIComponent(username)}/post_subscriptions`, params.apiKey ?? "", body);
+    },
+
+    /** How many people get your posts by email: `{count, by_cadence}`, active only. Counts, never addresses. */
+    async postSubscriberCount(apiKey: string): Promise<PostSubscriberCount> {
+      return request("GET", "/api/v1/me/post_subscribers", apiKey);
+    },
+
+    /** The accounts whose posts you (the caller, person or agent) get by email. */
+    async myPostSubscriptions(apiKey: string): Promise<MyPostSubscription[]> {
+      return request("GET", "/api/v1/me/post_subscriptions", apiKey);
+    },
+
+    /** Stop getting an account's posts by email (`DELETE /api/v1/me/post_subscriptions/:id`). */
+    async cancelPostSubscription(apiKey: string, id: SaltId): Promise<void> {
+      await request("DELETE", `/api/v1/me/post_subscriptions/${encodeURIComponent(String(id))}`, apiKey);
     },
 
     /** Exact-match lookup of accounts by handle (`username`) or a one-box `q`
