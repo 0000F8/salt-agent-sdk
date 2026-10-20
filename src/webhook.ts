@@ -17,7 +17,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
 import type { AskOptions, AskResult } from "./ask.js";
-import { SaltApiError, type AskForHelpParams, type Mandate, type MandateExercise, type ReactionSummary, type SaltClient } from "./client";
+import { SaltApiError, type ApproveFirstCapability, type AskForHelpParams, type Mandate, type MandateExercise, type ReactionSummary, type SaltClient, type StrategyTuneChanges } from "./client";
 import type { HelpRequest } from "./help.js";
 import * as pgp from "./crypto";
 import * as delegations from "./delegations";
@@ -536,7 +536,7 @@ export interface StrategyTunedContext {
   mandateId: SaltId;
   strategyId: string;
   /** What changed, with the new value of each key (snake_case, as the API sends it). */
-  changes: { explore?: number; goal_kind?: string; pace?: string };
+  changes: StrategyTuneChanges;
   /** The whole strategy after the change. */
   strategy: Record<string, unknown>;
   /** The mandate's version after the change. */
@@ -554,7 +554,7 @@ export interface StrategyTuneDeclinedContext {
   mandateId: SaltId;
   strategyId: string;
   /** What you asked for (snake_case, as the API sends it). */
-  changes: { explore?: number; goal_kind?: string; pace?: string };
+  changes: StrategyTuneChanges;
   /** The mandate's version (unchanged by a decline). */
   version: number;
   /** The raw event body (the mandate JSON plus `type`, `changes`, `strategy_id`, `version`). */
@@ -577,6 +577,32 @@ export interface ApprovalDecidedContext {
    *  delegate that made the original ask-mode call can resume (or give up on) whatever it was
    *  doing. */
   exercise: MandateExercise;
+  /** True when the person approved (`exercise.decision === "approved"`). Anything else is a "no": drop the act. */
+  approved: boolean;
+  /** Approve-first (`requestAsk`): `exercise.id` is the `exerciseId` you got back. Set only when this decision is about one of those asks. */
+  ask?: ApprovalDecidedAsk;
+}
+
+/** The decision on an approve-first ask (`requestAsk`), typed from the exercise's `summary`. */
+export interface ApprovalDecidedAsk {
+  /** The id `requestAsk` returned (`exercise.id`). */
+  exerciseId: SaltId;
+  capability: ApproveFirstCapability;
+  /** Where the act goes, as you asked. */
+  where?: string;
+  /** The FINAL text to send (`summary.words`): what you asked, or the person's edit of it. For outreach it is the plaintext, decrypted
+   *  here from `wordsArmored` with your own key (undefined when that failed). Send exactly this. */
+  words?: string;
+  /** Outreach: the FINAL armored text (`summary.words_armored`), sealed to the person and to you. */
+  wordsArmored?: string;
+  /** True when the person edited your words: `words` is theirs, and `askedWords` / `askedWordsArmored` hold your original. */
+  edited: boolean;
+  /** Your original words when the person edited them (`summary.asked_words`), else undefined. */
+  askedWords?: string;
+  /** Your original armored words when the person edited them (`summary.asked_words_armored`), else undefined. */
+  askedWordsArmored?: string;
+  /** Salt's plain label for who or what the act goes to (`exercise.target_label`), when it sent one. */
+  targetLabel?: string;
 }
 
 /**
@@ -2491,6 +2517,34 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     }
   }
 
+  async function approvalDecidedAsk(identity: AgentIdentity, exercise: MandateExercise): Promise<ApprovalDecidedAsk | undefined> {
+    if (exercise?.action !== "mandates#ask") return undefined;
+    const sum = (exercise.summary ?? {}) as Record<string, unknown>;
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    let words = str(sum.words);
+    const wordsArmored = str(sum.words_armored);
+    if (words === undefined && wordsArmored && exercise.decision === "approved") {
+      try {
+        words = await pgp.decrypt(wordsArmored, identity.privateKey, pgpPassphrase);
+      } catch (err) {
+        logger.error(`[exercise ${exercise.id}] could not decrypt the approved words: ${(err as Error).message}`);
+      }
+    }
+    const askedWords = str(sum.asked_words);
+    const askedWordsArmored = str(sum.asked_words_armored);
+    return {
+      exerciseId: String(exercise.id),
+      capability: exercise.capability as ApproveFirstCapability,
+      where: str(sum.where),
+      words,
+      wordsArmored,
+      edited: askedWords !== undefined || askedWordsArmored !== undefined,
+      askedWords,
+      askedWordsArmored,
+      targetLabel: str(exercise.target_label),
+    };
+  }
+
   async function handleApprovalDecided(body: { exercise: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
     const exercise = body.exercise;
     const identity = resolveMandateIdentity(headerAgentId, exercise?.actor?.id);
@@ -2498,7 +2552,7 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (options.onGrantDecided) await fireGrantDecided(identity, body as Record<string, unknown>, exercise?.decision === "approved", undefined, exercise);
     if (!options.onApprovalDecided) return;
     try {
-      await options.onApprovalDecided({ identity, exercise });
+      await options.onApprovalDecided({ identity, exercise, approved: exercise?.decision === "approved", ask: await approvalDecidedAsk(identity, exercise) });
     } catch (err) {
       logger.error(`[exercise ${exercise.id}] onApprovalDecided failed: ${(err as Error).message}`);
     }
