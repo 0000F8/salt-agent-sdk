@@ -927,6 +927,8 @@ export interface Mandate {
   tune_request?: StrategyTuneRequest | null;
   /** Strategy mandates: the keys the person keeps fixed (`lockPlan`); `tunePlan` on one is refused 422 `plan_locked`. Top level, not inside `strategy`. */
   locks?: PlanLock[];
+  /** Strategy mandates: when the plan first checks in (Allow time plus review cadence); null until Allowed. */
+  first_check_in_at?: string | null;
   /** Strategy mandates: money paid under the plan, per currency (this month and in total). Measured, never estimated. */
   spend?: { money: { amount: string; currency: string }[]; money_month: { amount: string; currency: string }[]; payments: number; as_of: string } | null;
   [key: string]: unknown;
@@ -956,7 +958,91 @@ export interface MandateExercise {
   target_label?: string;
   /** One plain sentence for the act ("Posted on your profile"), derived on read. `summary` stays the structured hash. */
   summary_text?: string;
+  /** Plain words for where the act lands ("Your profile", "A public room", "Ravi (@ravi)"), never the agent's own text. */
+  where?: string | null;
+  /** `paid` is 0 USD for an act that spends nothing, the amount for a payment, null when unknown; `ai_usd` is null unless known. */
+  cost?: { ai_usd: number | null; paid: { amount: string; currency: string } | null };
   [key: string]: unknown;
+}
+
+/** What a person can use, from `getReadiness`: counts and names only. */
+export interface Readiness {
+  person_id: SaltId;
+  wallets: number;
+  shop: boolean;
+  /** Services connected now and not waiting to be reconnected. */
+  connections: { service: string; name: string }[];
+  followers: number;
+  contacts: number;
+  email_subscribers: number;
+}
+
+/** One target in a `PlanSummary`. `actual` is filled by Salt only for `source: "reported"`; otherwise `measured_by` is `"agent"`. */
+export interface PlanSummaryTarget {
+  metric: string;
+  target: number;
+  unit?: string | null;
+  deadline?: string | null;
+  source: string;
+  source_label?: string;
+  actual: number | null;
+  actual_at?: string | null;
+  reported: boolean;
+  note?: string | null;
+  measured_by?: "agent";
+  [key: string]: unknown;
+}
+
+/** The plan in one read (`getPlanSummary`). No message content. */
+export interface PlanSummary {
+  mandate_id: SaltId;
+  status: MandateStatus;
+  goal?: string | null;
+  label?: string | null;
+  first_check_in_at: string | null;
+  expires_at?: string | null;
+  accepted_at?: string | null;
+  version: number;
+  targets: PlanSummaryTarget[];
+  reported_counts: ReportedCount[];
+  exercises: {
+    count: number;
+    today_count: number;
+    last_at: string | null;
+    recent: { id: SaltId | number; at: string; text: string; capability: string; decision: MandateExerciseDecision; where: string | null; cost: MandateExercise["cost"]; target?: { type?: string; id?: SaltId } }[];
+  };
+  tunings: Record<string, unknown>[];
+  spend: Mandate["spend"];
+  ai: { model_budget_usd: number | null; spent_usd: number | null };
+  locks: PlanLock[];
+  [key: string]: unknown;
+}
+
+/** Answer of `pauseAll`: `paused` are newly paused, `already_paused` were already. Idempotent. */
+export interface PauseAllResult {
+  status: "paused";
+  paused: SaltId[];
+  already_paused: SaltId[];
+  count: number;
+}
+
+/** Answer of `resumeAll`: lifts only what `pauseAll` paused. */
+export interface ResumeAllResult {
+  status: "active" | "partly_paused";
+  resumed: SaltId[];
+  still_paused: SaltId[];
+}
+
+/** `event_type` of the plain-text lines Salt writes into a plan's chat. Chat events, not webhook events: never claim these in your own words. */
+export type PlanEventType = "plan_filed" | "plan_allowed" | "plan_acted" | "plan_paused" | "plan_resumed" | "plan_stopped" | "plan_tuned";
+
+/** The first post a plan carries, `strategy.first_post` (read it back after Allow for `posted`). */
+export interface PlanFirstPost {
+  words: string;
+  where?: "profile";
+  /** Your words, only when the person edited them before Allow. */
+  asked_words?: string;
+  posted?: { exercise_id: SaltId | number; message_id: SaltId; chat_id: SaltId; at: string };
 }
 
 export interface ProposeMandateParams {
@@ -2979,6 +3065,39 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("POST", `/api/v1/mandates/${mandateId}/reported_counts`, apiKey, body);
     },
 
+    /**
+     * What the person can use, before you propose a plan: `GET /api/v1/me/readiness`. No option reads the caller; `personId` a person you
+     * serve or work with; `planId` the grantor of a plan you are a party to. Anyone else gets 404. Name only the connections listed.
+     */
+    async getReadiness(apiKey: string, opts?: { personId?: SaltId; planId?: SaltId }): Promise<Readiness> {
+      const params = new URLSearchParams();
+      if (opts?.personId != null) params.set("person_id", String(opts.personId));
+      if (opts?.planId != null) params.set("plan_id", String(opts.planId));
+      const qs = params.toString();
+      return request("GET", `/api/v1/me/readiness${qs ? `?${qs}` : ""}`, apiKey);
+    },
+
+    /** The plan in one read (`GET /api/v1/mandates/:id/summary`): targets, reported counts, recent acts as sentences, tunings, spend, locks. Grantor and grantee only (404 otherwise). */
+    async getPlanSummary(apiKey: string, mandateId: SaltId): Promise<PlanSummary> {
+      return request("GET", `/api/v1/mandates/${mandateId}/summary`, apiKey);
+    },
+
+    /**
+     * Pause every live plan and grant you gave, or one goal's (`goalId` = a plan's mandate id or strategy_id). Idempotent. The plan's
+     * grantee may also call it, for the goal plans it holds only.
+     */
+    async pauseAll(apiKey: string, opts?: { goalId?: SaltId | string }): Promise<PauseAllResult> {
+      return request("POST", "/api/v1/mandates/pause_all", apiKey, opts?.goalId !== undefined ? { goal_id: opts.goalId } : undefined);
+    },
+
+    /**
+     * Lift exactly what `pauseAll` paused. Grantor only: a grantee gets 403 `resume_grantor_only` (`err.code`), "Tap Resume on the plan to
+     * start it again.", so tell the person instead.
+     */
+    async resumeAll(apiKey: string, opts?: { goalId?: SaltId | string }): Promise<ResumeAllResult> {
+      return request("POST", "/api/v1/mandates/resume_all", apiKey, opts?.goalId !== undefined ? { goal_id: opts.goalId } : undefined);
+    },
+
     /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */
     async checkGrant(apiKey: string, capability: GrantCapability): Promise<GrantCheck> {
       return request("GET", `/api/v1/mandates/check?capability=${encodeURIComponent(capability)}`, apiKey);
@@ -3014,8 +3133,11 @@ export function createSaltClient(options: SaltClientOptions) {
       /** Grantee accepts an offered mandate (binds its current key fingerprint), or the grantor
        *  activates one still `proposed` by the grantee. See `ctx.mandate.accept()` in webhook.ts,
        *  which calls this for an incoming `mandate_offered` event. */
-      async accept(apiKey: string, mandateId: SaltId): Promise<Mandate> {
-        return request("POST", `/api/v1/mandates/${mandateId}/accept`, apiKey);
+      async accept(apiKey: string, mandateId: SaltId, opts?: { version?: number; firstPostWords?: string }): Promise<Mandate & { first_post_result?: { exercise_id: SaltId | number; message_id: SaltId; chat_id: SaltId } }> {
+        const body: Record<string, unknown> = {};
+        if (opts?.version !== undefined) body.version = opts.version;
+        if (opts?.firstPostWords !== undefined) body.first_post_words = opts.firstPostWords;
+        return request("POST", `/api/v1/mandates/${mandateId}/accept`, apiKey, Object.keys(body).length ? body : undefined);
       },
 
       /** Standing mandates only: +90 days from now. */
