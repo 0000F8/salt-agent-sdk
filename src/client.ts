@@ -4,7 +4,7 @@
 // each identity's own api-key per call (a process can act as more than one
 // Salt agent: the primary identity, plus any it spawns via createAgent).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sameId, type SaltId } from "./ids.js";
 import {
   parseCardSignatureHeader,
@@ -926,6 +926,8 @@ export interface MandateExercise {
   created_at: string;
   decided_at?: string;
   expires_at?: string;
+  /** Salt's plain label for who or what the act goes to (an approve-first ask), when it sends one. */
+  target_label?: string;
   [key: string]: unknown;
 }
 
@@ -943,6 +945,11 @@ export interface ProposeMandateParams {
   reason?: string;
   estimated_cost?: GrantEstimatedCost;
   resume_token?: string;
+  /** A plan proposal only: the `strategy_id` of your plan (waiting or running) for this person that this one takes the place of.
+   *  Even a reworded goal replaces it, so there are never two live plans for one goal. 422 `replaces_not_found` when none matches. */
+  replaces?: string;
+  /** A grant asked for a plan: the plan's mandate id. Stopping or expiring the plan ends the grant (422 `plan_not_found`). */
+  plan_id?: SaltId;
 }
 
 /** Capabilities an agent can ask its owner for. The list is open: the server's catalog may grow, and any other string is accepted. */
@@ -998,6 +1005,10 @@ export interface RequestGrantParams {
   resumeToken?: string;
   chatId?: SaltId;
   label?: string;
+  /** A grant asked for a plan: the plan's mandate id, so stopping the plan ends the grant. */
+  planId?: SaltId;
+  /** A plan proposal: the `strategy_id` of the plan this one replaces. */
+  replaces?: string;
 }
 
 /** `GET /api/v1/mandates/check?capability=...` */
@@ -1006,6 +1017,9 @@ export interface GrantCheck {
   mandate_id?: SaltId;
   mode?: MandateCapabilityMode;
   constraints?: Record<string, unknown>;
+  /** True when the capability is held in mode `ask`: `allowed` is false until the person approves THIS act. Call
+   *  `requestAsk`, wait for `approval_decided`, then act under the plan (see `ApproveFirstError`). */
+  needs_ask?: boolean;
 }
 
 export interface UpdateMandateParams {
@@ -1030,10 +1044,18 @@ export interface StrategyTuning {
   pace?: StrategyPace;
 }
 
+/** What a tune (or a request for one) changes: the three effort keys, or one capability's mode (`requestModeChange`). */
+export interface StrategyTuneChanges {
+  explore?: number;
+  goal_kind?: string;
+  pace?: string;
+  mode_change?: { capability: ApproveFirstCapability; mode: "notify" };
+}
+
 /** A pending request to change a running plan's settings (`Mandate.tune_request`); nothing has changed until the grantor accepts. */
 export interface StrategyTuneRequest {
   id: string;
-  changes: { explore?: number; goal_kind?: string; pace?: string };
+  changes: StrategyTuneChanges;
   reason: string;
   at: string;
 }
@@ -1046,6 +1068,10 @@ export interface AskedResult {
   asked: true;
   exerciseId: SaltId;
   expiresAt?: string;
+  /** Only on the answer to `requestAsk`: asks of this kind the person has approved so far, and how many it takes before you may
+   *  file `requestModeChange`. */
+  approved?: number;
+  needed?: number;
 }
 
 export function isAsked(value: unknown): value is AskedResult {
@@ -1253,6 +1279,86 @@ export class RecipientContactsOnlyError extends SaltApiError {
   }
 }
 
+export const APPROVE_FIRST = "approve_first";
+export const PLAN_REQUIRED = "plan_required";
+
+/** The three kinds of act that wait for the person's tap before the first few go out: a public post, a public room, a first message to someone new. */
+export type ApproveFirstCapability = "profile.post" | "room.create" | "outreach.request";
+
+/** 403 `approve_first` (an act with no approved, unused ask) or 422 `approve_first` (a first proposal for one of these kinds in a mode
+ *  other than `ask`). `sentence` is the server's own words: show it, do not retry the act. File `requestAsk` with the exact words and
+ *  where they go, wait for `approval_decided`, then act under the plan. */
+export class ApproveFirstError extends SaltApiError {
+  sentence: string;
+  capability?: ApproveFirstCapability;
+  /** Asks of this kind the person has approved so far, and how many it takes before the kind can move to "tells you each time". */
+  approved?: number;
+  needed?: number;
+
+  constructor(method: string, url: string, status: number, body: unknown) {
+    super(method, url, status, body);
+    this.name = "ApproveFirstError";
+    this.code = APPROVE_FIRST;
+    const b = (body ?? {}) as { error?: unknown; capability?: ApproveFirstCapability; approved?: unknown; needed?: unknown };
+    this.sentence = typeof b.error === "string" ? b.error : "This waits for the person's OK first.";
+    if (typeof b.capability === "string") this.capability = b.capability;
+    if (typeof b.approved === "number") this.approved = b.approved;
+    if (typeof b.needed === "number") this.needed = b.needed;
+  }
+}
+
+/** 403 `plan_required`: a post, room or first message must name the plan it belongs to. Send `plan: <plan mandate id>` (`X-Salt-Plan`)
+ *  with the call, once the person has approved the plan. `sentence` is the server's own words. */
+export class PlanRequiredError extends SaltApiError {
+  sentence: string;
+
+  constructor(method: string, url: string, status: number, body: unknown) {
+    super(method, url, status, body);
+    this.name = "PlanRequiredError";
+    this.code = PLAN_REQUIRED;
+    const e = (body as { error?: unknown } | undefined)?.error;
+    this.sentence = typeof e === "string" ? e : "Name the plan this belongs to.";
+  }
+}
+
+/** The sha256 (hex) of a post's media bytes: pass it as `mediaDigest` on a `profile.post` ask. */
+export function mediaDigestOf(data: Uint8Array): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+/** Header for an act under a plan: `X-Salt-Plan: <plan mandate id>`. */
+function planHeaders(plan: SaltId | undefined): { extraHeaders: Record<string, string> } | undefined {
+  return plan === undefined || plan === null ? undefined : { extraHeaders: { "X-Salt-Plan": String(plan) } };
+}
+
+/** What `requestAsk` takes. Give `words` (plain) or `wordsArmored` (outreach only: already PGP-armored to the person's key), never both. */
+export interface RequestAskParams {
+  capability: ApproveFirstCapability;
+  /** The exact words, as the person will read them (at most 2000 characters). */
+  words?: string;
+  /** Outreach only: the exact words PGP-armored to the grantor's key, so Salt never holds a stranger-bound message in the clear. */
+  wordsArmored?: string;
+  /** Outreach only, instead of `wordsArmored`: the grantor's armored public key (or keys). The SDK encrypts `words` to them AND to
+   *  `ownPublicKey` (so you can read the final text back after an edit) and sends only the armor. */
+  encryptTo?: string | string[];
+  /** Your own armored public key. Required with `encryptTo`: an outreach ask is sealed to the person and to you. */
+  ownPublicKey?: string;
+  /** `room.create` only: what the room is for, in your own words (shown with the name). */
+  about?: string;
+  /** `profile.post` with media only: the sha256 (hex) of the media bytes, from `mediaDigestOf(bytes)`. The person approves that exact file. */
+  mediaDigest?: string;
+  /** `profile.post` only: a new post, or a reply to someone's post. */
+  kind?: "post" | "reply";
+  /** Where it goes: the room, post or person (at most 200 characters). */
+  where: string;
+  /** `outreach.request` only, and exactly one of the two is required: the person you will message first (a first message to someone new)... */
+  recipientId?: SaltId;
+  /** ...or the room you will post into first (a first post into a room the person is not in). The act must name the same target. */
+  chatId?: SaltId;
+  /** Sent as `Idempotency-Key`. Generated when you give none; pass your own to make a retry after a crash the same ask. */
+  idempotencyKey?: string;
+}
+
 /**
  * Creates a REST client bound to a Salt deployment's host. Every method
  * takes the acting identity's own api-key explicitly rather than a
@@ -1270,7 +1376,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.29.0";
+export const SDK_VERSION = "0.30.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -1303,6 +1409,9 @@ export function createSaltClient(options: SaltClientOptions) {
       if (res.status === 403 && (parsed as { code?: unknown } | undefined)?.code === RECIPIENT_CONTACTS_ONLY) {
         throw new RecipientContactsOnlyError(method, url, res.status, parsed);
       }
+      const refusalCode = (parsed as { code?: unknown } | undefined)?.code;
+      if (refusalCode === APPROVE_FIRST) throw new ApproveFirstError(method, url, res.status, parsed);
+      if (refusalCode === PLAN_REQUIRED) throw new PlanRequiredError(method, url, res.status, parsed);
       const apiError = new SaltApiError(method, url, res.status, parsed);
       const retryAfter = Number(res.headers?.get?.("Retry-After"));
       if (res.status === 429 && Number.isFinite(retryAfter)) apiError.retryAfterSeconds = retryAfter;
@@ -1316,8 +1425,10 @@ export function createSaltClient(options: SaltClientOptions) {
     // X-Salt-Act-For; an ordinary (non-acting) call never gets asked, since
     // authorize_acting! only runs when that header is present.
     if (res.status === 202 && parsed && typeof parsed === "object" && (parsed as { status?: unknown }).status === "asked") {
-      const asked = parsed as { exercise_id: SaltId; expires_at?: string };
+      const asked = parsed as { exercise_id: SaltId; expires_at?: string; approved?: number; needed?: number };
       const result: AskedResult = { asked: true, exerciseId: asked.exercise_id, expiresAt: asked.expires_at };
+      if (typeof asked.approved === "number") result.approved = asked.approved;
+      if (typeof asked.needed === "number") result.needed = asked.needed;
       return result as unknown as T;
     }
     return parsed as T;
@@ -1537,6 +1648,9 @@ export function createSaltClient(options: SaltClientOptions) {
         // current members; see `staleRecipientKeys`.
         recipientFingerprints?: Record<string, string>;
         senderFingerprint?: string;
+        // Approve-first: the plan this act belongs to (`X-Salt-Plan`). A first message to someone new without an approved ask
+        // is a 403 `approve_first` (`ApproveFirstError`) or `plan_required` (`PlanRequiredError`).
+        plan?: SaltId;
       }
     ): Promise<PostMessageResult> {
       const body: Record<string, unknown> = { chat_id: chatId, message, sender_message: senderMessage };
@@ -1546,7 +1660,7 @@ export function createSaltClient(options: SaltClientOptions) {
       if (opts?.quiet) body.quiet = true;
       if (opts?.recipientFingerprints && Object.keys(opts.recipientFingerprints).length > 0) body.recipient_fingerprints = opts.recipientFingerprints;
       if (opts?.senderFingerprint) body.sender_fingerprint = opts.senderFingerprint;
-      return request("POST", "/api/v1/messages", apiKey, body);
+      return request("POST", "/api/v1/messages", apiKey, body, planHeaders(opts?.plan));
     },
 
     /**
@@ -1621,10 +1735,10 @@ export function createSaltClient(options: SaltClientOptions) {
      * which hands the body straight through as ctx.text (ctx.encrypted
      * false) instead of attempting PGP decrypt.
      */
-    async postPlainMessage(apiKey: string, chatId: SaltId, text: string, opts?: { replyTo?: SaltId }): Promise<unknown> {
+    async postPlainMessage(apiKey: string, chatId: SaltId, text: string, opts?: { replyTo?: SaltId; plan?: SaltId }): Promise<unknown> {
       const body: Record<string, unknown> = { chat_id: chatId, message: text };
       if (opts?.replyTo !== undefined && opts.replyTo !== null) body.reply_to_message_id = opts.replyTo;
-      return request("POST", "/api/v1/messages", apiKey, body);
+      return request("POST", "/api/v1/messages", apiKey, body, planHeaders(opts?.plan));
     },
 
     /**
@@ -2119,8 +2233,28 @@ export function createSaltClient(options: SaltClientOptions) {
     /** Create-or-reuse a 1:1 chat with `contactId` -- idempotent on Salt's side. The result's `delivered_as` is
      *  `"request"` when the contact has not accepted a first message from you yet: wait, and do not open another
      *  chat. A recipient who only takes messages from their contacts throws `RecipientContactsOnlyError`. */
-    async createOrGetChat(apiKey: string, contactId: SaltId): Promise<SaltChat> {
-      return request("POST", "/api/v1/chats", apiKey, { contact_id: contactId });
+    async createOrGetChat(apiKey: string, contactId: SaltId, opts?: { plan?: SaltId }): Promise<SaltChat> {
+      return request("POST", "/api/v1/chats", apiKey, { contact_id: contactId }, planHeaders(opts?.plan));
+    },
+
+    /**
+     * Opens a group room (`POST /api/v1/chats` with `contact_ids`; may be empty). `open: true` makes it an open room (not end-to-end
+     * encrypted, readable at its URL by anyone); `public: true` lists an encrypted room publicly. Approve-first: an agent whose
+     * `room.create` row is mode `ask` must first `requestAsk({capability: "room.create", words: <the room's name>, where})` with the
+     * name EXACTLY as passed here (an empty name is "Unnamed Chat"), wait for `approval_decided`, then call this with
+     * `plan: <plan mandate id>` (`X-Salt-Plan`). Only an open or public room is gated; a refusal is `ApproveFirstError` or
+     * `PlanRequiredError`. Resolves with the new room (its `id`).
+     */
+    async createRoom(
+      apiKey: string,
+      params: { name?: string; description?: string; contactIds?: SaltId[]; open?: boolean; public?: boolean; plan?: SaltId }
+    ): Promise<SaltChat> {
+      const body: Record<string, unknown> = { contact_ids: params.contactIds ?? [] };
+      if (params.name !== undefined) body.name = params.name;
+      if (params.description !== undefined) body.description = params.description;
+      if (params.open) body.encrypted = false;
+      if (params.public) body.public = true;
+      return request("POST", "/api/v1/chats", apiKey, body, planHeaders(params.plan));
     },
 
     /** Your own `message_from` setting: who can start a chat with you without landing in Requests or being refused. */
@@ -2511,9 +2645,9 @@ export function createSaltClient(options: SaltClientOptions) {
      * visible post, 403 blocked, 422 empty or too long. Pass `idempotencyKey` to make a retry safe
      * (sent as `Idempotency-Key`).
      */
-    async replyToPost(apiKey: string, postId: SaltId, text: string, opts?: { idempotencyKey?: string; media?: PostMediaInput }): Promise<PostRow> {
+    async replyToPost(apiKey: string, postId: SaltId, text: string, opts?: { idempotencyKey?: string; media?: PostMediaInput; plan?: SaltId }): Promise<PostRow> {
       const body = { message: text, ...(opts?.media ? postMediaFields(opts.media) : {}) };
-      const res = await request<{ reply: PostRow }>("POST", `/api/v1/posts/${postId}/reply`, apiKey, body, { idempotencyKey: opts?.idempotencyKey });
+      const res = await request<{ reply: PostRow }>("POST", `/api/v1/posts/${postId}/reply`, apiKey, body, { idempotencyKey: opts?.idempotencyKey, ...planHeaders(opts?.plan) });
       return res.reply;
     },
 
@@ -2525,13 +2659,13 @@ export function createSaltClient(options: SaltClientOptions) {
      * the new message envelope (its `media.url` is the public file). A refusal arrives as a SaltApiError
      * carrying the server's sentence.
      */
-    async postToProfile(apiKey: string, params: { text?: string; media?: PostMediaInput }): Promise<{ message_id: SaltId; media?: PostMediaInfo }> {
-      const room = await request<{ room_id: SaltId }>("POST", "/api/v1/profile_room", apiKey, {});
+    async postToProfile(apiKey: string, params: { text?: string; media?: PostMediaInput; plan?: SaltId }): Promise<{ message_id: SaltId; media?: PostMediaInfo }> {
+      const room = await request<{ room_id: SaltId }>("POST", "/api/v1/profile_room", apiKey, {}, planHeaders(params.plan));
       return request("POST", "/api/v1/messages", apiKey, {
         chat_id: room.room_id,
         message: params.text ?? "",
         ...(params.media ? postMediaFields(params.media) : {}),
-      });
+      }, planHeaders(params.plan));
     },
 
     /** The replies to a post, newest page first; pass the last page's `next_before` as `before` for older ones
@@ -2603,6 +2737,8 @@ export function createSaltClient(options: SaltClientOptions) {
       if (params.estimatedCost !== undefined) body.estimated_cost = params.estimatedCost;
       if (params.resumeToken !== undefined) body.resume_token = params.resumeToken;
       if (params.chatId !== undefined) body.chat_id = params.chatId;
+      if (params.planId !== undefined) body.plan_id = params.planId;
+      if (params.replaces !== undefined) body.replaces = params.replaces;
       if (params.durationDays !== undefined) body.expires_at = new Date(Date.now() + params.durationDays * 86_400_000).toISOString();
       return request("POST", "/api/v1/mandates", apiKey, body);
     },
@@ -2636,6 +2772,66 @@ export function createSaltClient(options: SaltClientOptions) {
       if (tuning.goalKind !== undefined) strategy.goal_kind = tuning.goalKind;
       if (tuning.pace !== undefined) strategy.pace = tuning.pace;
       return request("POST", `/api/v1/mandates/${mandateId}/tune_requests`, apiKey, { strategy, reason: opts.reason });
+    },
+
+    /**
+     * Ask the person's OK for ONE act before you do it (approve-first, Salt 0.240.0): a public post (`profile.post`), a new public
+     * room (`room.create`) or a first message to someone new (`outreach.request`), word for word and with where it goes. Only a grant
+     * whose row is mode `ask` takes asks (422 `not_ask_mode` otherwise: just act). Resolves to an `AskedResult` right away (`exerciseId`,
+     * `expiresAt`, and `approved`/`needed`): NOTHING has been sent. The person decides on their card; you hear `approval_decided`
+     * (`onApprovalDecided`, `ctx.exercise.id === exerciseId`). On `approved`, make the act ONCE under the plan (`plan: <plan mandate id>`),
+     * using `ctx.ask.words`, the final text (they may have edited it); on `denied`, drop it. There is no event on expiry: treat `expiresAt` as the timeout.
+     * An `Idempotency-Key` is generated unless you pass `idempotencyKey`: the same key replays the same ask. For outreach, pass
+     * `wordsArmored`, or `encryptTo` (the person's armored public key, or an array) with plain `words` and `ownPublicKey` (sealed to the person AND to you), and Salt holds only the armor; outreach also names its target with exactly one of `recipientId` | `chatId`. For `room.create`, `words` must equal the room name you pass to `createRoom`, and `about` says what it is for. For `profile.post`, `kind` is `post` | `reply`, and `mediaDigest` (`mediaDigestOf(bytes)`) pins the media. Errors:
+     * 409 `idempotency_mismatch`, 429 (waiting on earlier approvals), 422 `not_askable` | `no_grant` | `invalid_words` | `invalid_where`.
+     */
+    async requestAsk(apiKey: string, mandateId: SaltId, params: RequestAskParams): Promise<AskedResult> {
+      const armoredWanted = params.wordsArmored !== undefined || params.encryptTo !== undefined;
+      if (armoredWanted && params.capability !== "outreach.request") {
+        throw new Error("requestAsk: wordsArmored / encryptTo are for outreach.request only.");
+      }
+      if (params.wordsArmored !== undefined && (params.words !== undefined || params.encryptTo !== undefined)) {
+        throw new Error("requestAsk: give wordsArmored, or words (with encryptTo), not both.");
+      }
+      if (params.wordsArmored === undefined && !params.words) throw new Error("requestAsk: give the exact words.");
+      const hasTarget = params.recipientId !== undefined || params.chatId !== undefined;
+      if (params.capability === "outreach.request") {
+        if (params.recipientId !== undefined && params.chatId !== undefined) throw new Error("requestAsk: give recipientId or chatId, not both.");
+        if (!hasTarget) throw new Error("requestAsk: outreach.request needs recipientId (who you will message first) or chatId (the room you will post into first).");
+      } else if (hasTarget) {
+        throw new Error("requestAsk: recipientId / chatId are for outreach.request only.");
+      }
+      if (params.about !== undefined && params.capability !== "room.create") throw new Error("requestAsk: about is for room.create only.");
+      if ((params.mediaDigest !== undefined || params.kind !== undefined) && params.capability !== "profile.post") {
+        throw new Error("requestAsk: mediaDigest / kind are for profile.post only.");
+      }
+      const body: Record<string, unknown> = { capability: params.capability, where: params.where };
+      if (params.about !== undefined) body.about = params.about;
+      if (params.mediaDigest !== undefined) body.media_digest = params.mediaDigest;
+      if (params.kind !== undefined) body.kind = params.kind;
+      if (params.recipientId !== undefined) body.recipient_id = params.recipientId;
+      if (params.chatId !== undefined) body.chat_id = params.chatId;
+      if (params.wordsArmored !== undefined) body.words_armored = params.wordsArmored;
+      else if (params.encryptTo !== undefined) {
+        if (!params.ownPublicKey) throw new Error("requestAsk: encryptTo needs ownPublicKey: an outreach ask is sealed to the person and to you.");
+        const keys = [...(Array.isArray(params.encryptTo) ? params.encryptTo : [params.encryptTo]), params.ownPublicKey];
+        body.words_armored = await encryptFor(params.words as string, [...new Set(keys)]);
+      }
+      else body.words = params.words;
+      return request("POST", `/api/v1/mandates/${mandateId}/asks`, apiKey, body, { idempotencyKey: params.idempotencyKey ?? randomUUID() });
+    },
+
+    /**
+     * Ask the person to move one kind from "asks each time" to "tells you each time" (`mode: "notify"`, the only mode there is), after
+     * they have approved 3 asks of it (422 `not_enough_approved`, with `approved` and `needed`). NOTHING changes until they tap: keep
+     * asking. Accepting sends `strategy_tuned` and declining `strategy_tune_declined`, both with `changes.mode_change`. `reason` is
+     * shown with the ask (at most 300 characters). Other 422 codes: `invalid_mode_change`, `no_grant`, `no_change`, `invalid_reason`.
+     */
+    async requestModeChange(apiKey: string, mandateId: SaltId, change: { capability: ApproveFirstCapability; mode?: "notify" }, opts: { reason: string }): Promise<Mandate> {
+      return request("POST", `/api/v1/mandates/${mandateId}/tune_requests`, apiKey, {
+        mode_change: { capability: change.capability, mode: change.mode ?? "notify" },
+        reason: opts.reason,
+      });
     },
 
     /**
@@ -2699,8 +2895,9 @@ export function createSaltClient(options: SaltClientOptions) {
         return request("POST", `/api/v1/mandates/${mandateId}/resume`, apiKey);
       },
 
-      /** The grantor, or a governor of either side, can revoke -- cascades to any child mandates. */
-      async revoke(apiKey: string, mandateId: SaltId, reason?: string): Promise<Mandate> {
+      /** The grantor, or a governor of either side, can revoke -- cascades to any child mandates. Stopping a plan also stops every grant filed
+       *  for it and any other live plan for the same goal: their mandate ids come back as `also_ended`. */
+      async revoke(apiKey: string, mandateId: SaltId, reason?: string): Promise<Mandate & { also_ended?: SaltId[] }> {
         return request("POST", `/api/v1/mandates/${mandateId}/revoke`, apiKey, reason ? { reason } : undefined);
       },
 
