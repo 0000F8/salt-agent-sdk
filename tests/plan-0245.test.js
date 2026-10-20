@@ -109,3 +109,27 @@ test("a plan read carries runner, note, working and the summary's new fields as 
   const got = await client.getPlanSummary("k", "m1");
   assert.equal(got.runner, "self");
 });
+
+test("dropPlanSteps patches strategy.drop_steps with the version", async () => {
+  const { fetchImpl, client } = make(() => jsonResponse(200, { id: "m1", version: 5 }));
+  await client.dropPlanSteps("k", "m1", { version: 4, steps: [1, 3] });
+  const c = fetchImpl.calls[0];
+  assert.equal(c.method, "PATCH");
+  assert.match(c.url, /\/api\/v1\/mandates\/m1$/);
+  assert.deepStrictEqual(c.body, { version: 4, strategy: { drop_steps: [1, 3] } });
+});
+
+test("dropPlanSteps refusals keep their code: plan_locked, invalid_strategy, strategy_not_editable", async () => {
+  for (const [status, code] of [[422, "plan_locked"], [422, "invalid_strategy"], [422, "strategy_not_editable"]]) {
+    const { client } = make(() => jsonResponse(status, { error: "No.", code }));
+    await assert.rejects(client.dropPlanSteps("k", "m1", { version: 1, steps: [0] }), (err) => err instanceof sdk.SaltApiError && err.code === code);
+  }
+});
+
+test("getStrategyLimits reads the public limits without a key", async () => {
+  const { fetchImpl, client } = make(() => jsonResponse(200, { live_tunable: ["explore", "goal_kind", "pace"], live_narrowable: ["drop_steps"], lock_values: ["pace", "explore", "goal_kind", "drop_steps", "all"] }));
+  const r = await client.getStrategyLimits();
+  assert.deepStrictEqual(r.live_narrowable, ["drop_steps"]);
+  assert.match(fetchImpl.calls[0].url, /\/api\/v1\/strategies\/limits$/);
+  assert.equal(fetchImpl.calls[0].headers["api-key"], undefined);
+});

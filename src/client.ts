@@ -1232,14 +1232,25 @@ export interface StrategyTuning {
 
 /** What a tune (or a request for one) changes: the three effort keys, or one capability's mode (`requestModeChange`). */
 export interface StrategyTuneChanges {
+  /** The steps dropped from the plan: `[{index, text}]` (0-based positions in the plan before the drop). */
+  drop_steps?: { index: number; text: string }[];
   explore?: number;
   goal_kind?: string;
   pace?: string;
   mode_change?: { capability: ApproveFirstCapability; mode: "notify" };
 }
 
+/** `getStrategyLimits`: the lists the API checks a plan against. Only the keys named here are typed; the rest is open. */
+export interface StrategyLimits {
+  live_tunable: string[];
+  /** Keys a running plan can only narrow: `["drop_steps"]`. */
+  live_narrowable?: string[];
+  lock_values: string[];
+  [key: string]: unknown;
+}
+
 /** What the person can keep fixed on a running plan (`lockPlan`): any of the three keys, or everything. */
-export type PlanLock = "pace" | "explore" | "goal_kind" | "all";
+export type PlanLock = "pace" | "explore" | "goal_kind" | "drop_steps" | "all";
 
 /** A count the person reported for a `reported` plan target (`reportCount`). */
 export interface ReportedCount {
@@ -3189,6 +3200,25 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async resumeAll(apiKey: string, opts?: { goalId?: SaltId | string }): Promise<ResumeAllResult> {
       return request("POST", "/api/v1/mandates/resume_all", apiKey, opts?.goalId !== undefined ? { goal_id: opts.goalId } : undefined);
+    },
+
+    /**
+     * Take steps out of a RUNNING plan (`PATCH /api/v1/mandates/:id {version, strategy: {drop_steps}}`, 0.245.0): `steps` are 0-based
+     * positions in the plan, each once. The plan only narrows: it keeps at least one step (422 `invalid_strategy`), and adding steps is 422
+     * `strategy_not_editable`. Allowed to the plan's agent, the person, and an account on its own plan. A locked `drop_steps` is 422
+     * `plan_locked`. Salt writes the "dropped a step" line and the person can Undo it (`undoTuning`); you hear `strategy_tuned` with
+     * `changes.drop_steps`. Tell the person in one line which step and why.
+     */
+    async dropPlanSteps(apiKey: string, mandateId: SaltId, params: { version: number; steps: number[] }): Promise<Mandate> {
+      return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, { version: params.version, strategy: { drop_steps: params.steps } });
+    },
+
+    /**
+     * The closed lists and ranges the API accepts for plans (`GET /api/v1/strategies/limits`, public): `live_tunable` (explore, goal_kind, pace),
+     * `live_narrowable` (`["drop_steps"]`: keys that can only take something away from a running plan), `lock_values`, and more.
+     */
+    async getStrategyLimits(): Promise<StrategyLimits> {
+      return request("GET", "/api/v1/strategies/limits", "");
     },
 
     /**
