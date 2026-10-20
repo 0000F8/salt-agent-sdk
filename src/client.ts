@@ -925,6 +925,8 @@ export interface Mandate {
   approved_by?: "self" | null;
   /** The pending request to change a running plan's settings, or null. See `requestStrategyTune`. */
   tune_request?: StrategyTuneRequest | null;
+  /** Strategy mandates: the keys the person keeps fixed (`lockPlan`); `tunePlan` on one is refused 422 `plan_locked`. Top level, not inside `strategy`. */
+  locks?: PlanLock[];
   /** Strategy mandates: money paid under the plan, per currency (this month and in total). Measured, never estimated. */
   spend?: { money: { amount: string; currency: string }[]; money_month: { amount: string; currency: string }[]; payments: number; as_of: string } | null;
   [key: string]: unknown;
@@ -952,6 +954,8 @@ export interface MandateExercise {
   expires_at?: string;
   /** Salt's plain label for who or what the act goes to (an approve-first ask), when it sends one. */
   target_label?: string;
+  /** One plain sentence for the act ("Posted on your profile"), derived on read. `summary` stays the structured hash. */
+  summary_text?: string;
   [key: string]: unknown;
 }
 
@@ -1076,6 +1080,20 @@ export interface StrategyTuneChanges {
   mode_change?: { capability: ApproveFirstCapability; mode: "notify" };
 }
 
+/** What the person can keep fixed on a running plan (`lockPlan`): any of the three keys, or everything. */
+export type PlanLock = "pace" | "explore" | "goal_kind" | "all";
+
+/** A count the person reported for a `reported` plan target (`reportCount`). */
+export interface ReportedCount {
+  id: string;
+  mandate_id: SaltId;
+  metric_key: string;
+  value: number | string;
+  note?: string | null;
+  reported_at: string;
+  reported_by: { id: SaltId; username?: string; display_name?: string };
+}
+
 /** A pending request to change a running plan's settings (`Mandate.tune_request`); nothing has changed until the grantor accepts. */
 export interface StrategyTuneRequest {
   id: string;
@@ -1096,6 +1114,8 @@ export interface AskedResult {
    *  file `requestModeChange`. */
   approved?: number;
   needed?: number;
+  /** `"grantor"` on the answer to an `as: "grantor"` ask: the post or room will be the PERSON's own, not yours. */
+  as?: "grantor";
 }
 
 export function isAsked(value: unknown): value is AskedResult {
@@ -1373,8 +1393,13 @@ export interface RequestAskParams {
   mediaDigest?: string;
   /** `profile.post` only: a new post, or a reply to someone's post. */
   kind?: "post" | "reply";
-  /** Where it goes: the room, post or person (at most 200 characters). */
-  where: string;
+  /** Where it goes: the room, post or person (at most 200 characters). Leave it out with `as: "grantor"`: the destination is fixed
+   *  (their profile, or a new public room) and anything you send is ignored. */
+  where?: string;
+  /** `"grantor"`: ask the person to post this AS THEMSELVES (`profile.post`, a new post) or open a public room (`room.create`) in their
+   *  name. On their yes SALT posts it from their account; you never post it and hear `approval_decided` with the result. Not for
+   *  replies, media or outreach (422 `as_post_only`). 422 `invalid_as` | `as_not_allowed`. */
+  as?: "grantor";
   /** `outreach.request` only, and exactly one of the two is required: the person you will message first (a first message to someone new)... */
   recipientId?: SaltId;
   /** ...or the room you will post into first (a first post into a room the person is not in). The act must name the same target. */
@@ -1400,7 +1425,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.31.0";
+export const SDK_VERSION = "0.32.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -1455,6 +1480,7 @@ export function createSaltClient(options: SaltClientOptions) {
       const result: AskedResult = { asked: true, exerciseId: asked.exercise_id, expiresAt: asked.expires_at };
       if (typeof asked.approved === "number") result.approved = asked.approved;
       if (typeof asked.needed === "number") result.needed = asked.needed;
+      if ((asked as { as?: unknown }).as === "grantor") result.as = "grantor";
       return result as unknown as T;
     }
     return parsed as T;
@@ -2860,7 +2886,16 @@ export function createSaltClient(options: SaltClientOptions) {
       if ((params.mediaDigest !== undefined || params.kind !== undefined) && params.capability !== "profile.post") {
         throw new Error("requestAsk: mediaDigest / kind are for profile.post only.");
       }
-      const body: Record<string, unknown> = { capability: params.capability, where: params.where };
+      if (params.as !== undefined) {
+        if (params.as !== "grantor") throw new Error('requestAsk: as can only be "grantor".');
+        if (params.capability !== "profile.post" && params.capability !== "room.create") throw new Error('requestAsk: as: "grantor" is for profile.post and room.create only.');
+        if (armoredWanted || params.kind === "reply" || params.mediaDigest !== undefined) throw new Error('requestAsk: as: "grantor" asks are plain new posts or rooms: no replies, media or armored words.');
+      } else if (params.where === undefined) {
+        throw new Error("requestAsk: say where it goes.");
+      }
+      const body: Record<string, unknown> = { capability: params.capability };
+      if (params.where !== undefined) body.where = params.where;
+      if (params.as !== undefined) body.as = params.as;
       if (params.about !== undefined) body.about = params.about;
       if (params.mediaDigest !== undefined) body.media_digest = params.mediaDigest;
       if (params.kind !== undefined) body.kind = params.kind;
@@ -2896,6 +2931,52 @@ export function createSaltClient(options: SaltClientOptions) {
      */
     async decideStrategyTune(apiKey: string, mandateId: SaltId, requestId: string, decision: "accept" | "decline"): Promise<Mandate> {
       return request("POST", `/api/v1/mandates/${mandateId}/tune_requests/${requestId}/decide`, apiKey, { decision });
+    },
+
+    /**
+     * Change the pace, exploring or kind of goal of a plan YOU run, yourself, with no ask (Salt 0.243.0): `PATCH /api/v1/mandates/:id`
+     * as the plan's grantee. Same body as `tuneStrategy`, but this is the agent's call: a key the person has locked is refused up
+     * front, 422 `plan_locked` ("You asked to keep this plan as is."; `err.code`, and `err.body.locked` names the keys), so file
+     * `requestStrategyTune` for it instead and keep the old value. Tell the person in one line what you changed (the change shows in
+     * `Mandate.strategy.tunings` with an Undo). Other refusals: 409 stale `version`, 422 `strategy_not_editable` | `invalid_strategy`,
+     * 429 `too_many_today` (10 a day per plan). A value that already holds changes nothing and bumps no version.
+     */
+    async tunePlan(apiKey: string, mandateId: SaltId, params: { version: number } & StrategyTuning): Promise<Mandate> {
+      const strategy: Record<string, unknown> = {};
+      if (params.explore !== undefined) strategy.explore = params.explore;
+      if (params.goalKind !== undefined) strategy.goal_kind = params.goalKind;
+      if (params.pace !== undefined) strategy.pace = params.pace;
+      return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, { version: params.version, strategy });
+    },
+
+    /**
+     * For the owner's client: keep a running plan as it is. `locks` is any of `"pace" | "explore" | "goal_kind"`, or `["all"]`, or `[]` to
+     * unlock; it replaces the current locks (the answer's `locks`). While locked, the agent's `tunePlan` is refused 422 `plan_locked`.
+     * Only the plan's grantor (403 `locks_grantor_only` otherwise), who is not bound by their own lock. The agent is not sent an event.
+     */
+    async lockPlan(apiKey: string, mandateId: SaltId, params: { version: number; locks: PlanLock[] }): Promise<Mandate> {
+      return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, { version: params.version, locks: params.locks });
+    },
+
+    /**
+     * For the owner's client: undo one change in `Mandate.strategy.tunings[]` (`POST /api/v1/mandates/:id/tunings/:tid/undo`), the person's
+     * Undo. Restores the values from before it. The plan's grantor only (404 for anyone else). 422 `already_undone` | `strategy_not_editable`,
+     * 409 `tuning_superseded` (it was changed again since: nothing was undone), 404 `tuning_not_found`. The agent hears `strategy_tuned`.
+     */
+    async undoTuning(apiKey: string, mandateId: SaltId, tuningId: string): Promise<Mandate> {
+      return request("POST", `/api/v1/mandates/${mandateId}/tunings/${encodeURIComponent(tuningId)}/undo`, apiKey);
+    },
+
+    /**
+     * For the owner's client: a number the person counts themselves for a plan target whose `source` is `reported` (`metricKey` is that
+     * target's `metric`). Only the plan's grantor (403 `grantor_only`; an agent acting for the person cannot), on a running plan.
+     * 201 with the stored count. 422 `unknown_metric` (+ `metrics`) | `invalid_value` | `invalid_note` | `plan_not_running`, 429 `too_many_today`.
+     * The agent reads it back as a measured value (`GET /metrics?source=reported&metric_key=`), labelled "Reported by <name>".
+     */
+    async reportCount(apiKey: string, mandateId: SaltId, params: { metricKey: string; value: number; note?: string }): Promise<ReportedCount> {
+      const body: Record<string, unknown> = { metric_key: params.metricKey, value: params.value };
+      if (params.note !== undefined) body.note = params.note;
+      return request("POST", `/api/v1/mandates/${mandateId}/reported_counts`, apiKey, body);
     },
 
     /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */

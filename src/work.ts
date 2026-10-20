@@ -375,3 +375,120 @@ export function createWorkReporter(client: SaltClient) {
 }
 
 export type WorkReporter = ReturnType<typeof createWorkReporter>;
+
+// --- Reading the plan's report back (Salt 0.243.0) --------------------------
+// A plan's report is a work report with `kind=strategy` and a `strategy: {json}`
+// line, posted into the private lane (see top of file). The person's web app
+// reads it; `readPlanReport` lets the agent that wrote it, or any agent in the
+// lane, read the latest one back with its own key. Salt only ever holds the
+// ciphertext, so this fetches the lane's messages and decrypts them here. The
+// JSON is returned as the writer sent it (salt-fe `parseStrategy` is the
+// reference reader for its fields); only the marker is checked.
+
+export const STRATEGY_REPORT_STATUSES = ["attempting", "blocked", "succeeded", "abandoned", "superseded"] as const;
+export type StrategyReportStatus = (typeof STRATEGY_REPORT_STATUSES)[number];
+const STRATEGY_JSON_MAX = 20000;
+
+/** One `strategy` work report, as decrypted. `strategy` is the `strategy: {json}` line's object, untouched. */
+export interface PlanReport {
+  /** The work id from the marker (the strategy id when the writer used one). */
+  id: string;
+  status: StrategyReportStatus;
+  title: string;
+  /** Free text after the title, if any. */
+  detail?: string;
+  strategy: Record<string, unknown> & {
+    strategy_id?: string;
+    mandate_id?: string;
+    goal?: string;
+    next_check_in?: string;
+    progress?: Array<{ metric: string; actual: number | null; target: number | null; unit?: string; source_label?: string }>;
+    steps?: Array<{ text: string; state: string; at?: string }>;
+    targets?: Array<Record<string, unknown>>;
+  };
+  /** The lane message it came from, and when it was posted, as Salt sent them. */
+  messageId?: SaltId;
+  createdAt?: string;
+}
+
+/** The plan report in a plaintext, or null when it is not a `kind=strategy` report with a readable `strategy:` line. */
+export function parsePlanReport(plaintext: string): PlanReport | null {
+  const match = MARKER_RE.exec(plaintext || "");
+  if (!match) return null;
+  const attrs: Record<string, string> = {};
+  match[1].split(/\s+/).forEach((pair) => {
+    const eq = pair.indexOf("=");
+    if (eq > 0) attrs[pair.slice(0, eq)] = pair.slice(eq + 1);
+  });
+  if (attrs.kind !== "strategy" || !ID_RE.test(attrs.id || "")) return null;
+  const [title, ...rest] = plaintext.slice(match[0].length).split("\n");
+  let strategy: PlanReport["strategy"] | null = null;
+  const kept: string[] = [];
+  rest.forEach((line) => {
+    const m = /^strategy:[ \t]*(.*)$/.exec(line.trim());
+    if (!m) { kept.push(line); return; }
+    const raw = m[1].trim();
+    if (!raw || raw.length > STRATEGY_JSON_MAX) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) strategy = parsed;
+    } catch { /* a malformed line is no strategy */ }
+  });
+  if (!strategy) return null;
+  const inner = strategy as PlanReport["strategy"] & { status?: string };
+  const status = (STRATEGY_REPORT_STATUSES as readonly string[]).includes(inner.status as string) ? inner.status : attrs.status;
+  if (!(STRATEGY_REPORT_STATUSES as readonly string[]).includes(status as string)) return null;
+  const report: PlanReport = { id: attrs.id, status: status as StrategyReportStatus, title: (title || "").trim(), strategy: inner };
+  const detail = kept.join("\n").trim();
+  if (detail) report.detail = detail;
+  return report;
+}
+
+/**
+ * The latest `strategy` work report in the private lane with `requesterId` under `chatId`, decrypted with the identity's own key
+ * (`passphrase` is the one its key was made with). Without `requesterId`, `chatId` is read as the lane itself. Opens the lane if it
+ * does not exist yet (get-or-create, like posting a report does), so it needs a chat you are a member of. `strategyId` keeps only
+ * reports of that plan. Resolves to null when the lane holds none; a message that cannot be opened with this key (it predates it) is
+ * skipped, never fatal. HTTP errors (no such chat, not a member) are thrown as `SaltApiError`.
+ */
+export async function readPlanReport(
+  client: SaltClient,
+  identity: Pick<AgentIdentity, "apiKey" | "privateKey">,
+  chatId: SaltId,
+  opts: { passphrase: string; requesterId?: SaltId; strategyId?: string }
+): Promise<PlanReport | null> {
+  let laneId = chatId;
+  if (opts.requesterId !== undefined) {
+    try {
+      const res = (await client.openSidechain(identity.apiKey, chatId, opts.requesterId)) as { session?: { id: SaltId } };
+      if (res?.session?.id !== undefined) laneId = res.session.id;
+    } catch (err) {
+      // 422 "This is already a private lane.": chatId is the lane.
+      if ((err as { status?: number }).status !== 422) throw err;
+    }
+  }
+  const messages = (await client.getChatMessages(identity.apiKey, laneId)) as Array<{ id?: SaltId; message?: unknown; encrypted?: boolean; event_type?: string; created_at?: string }>;
+  let latest: PlanReport | null = null;
+  for (const m of messages) {
+    if (!m || m.event_type || typeof m.message !== "string") continue;
+    let plaintext: string;
+    if (m.encrypted === false) plaintext = m.message;
+    else {
+      if (!/^-----BEGIN PGP MESSAGE-----/.test(m.message.trim())) continue;
+      try {
+        plaintext = await pgp.decrypt(m.message, identity.privateKey, opts.passphrase);
+      } catch {
+        continue;
+      }
+    }
+    const report = parsePlanReport(plaintext);
+    if (!report) continue;
+    if (opts.strategyId && (report.strategy.strategy_id ?? report.id) !== opts.strategyId) continue;
+    const at = m.created_at && !Number.isNaN(Date.parse(m.created_at)) ? Date.parse(m.created_at) : null;
+    const latestAt = latest?.createdAt ? Date.parse(latest.createdAt) : null;
+    // Chat order is oldest first; a later message wins unless both carry times and it is older.
+    if (latest && at !== null && latestAt !== null && at < latestAt) continue;
+    latest = { ...report, ...(m.id !== undefined ? { messageId: m.id } : {}), ...(m.created_at ? { createdAt: m.created_at } : {}) };
+  }
+  return latest;
+}
