@@ -258,3 +258,47 @@ test("tuneStrategy sends a PATCH with snake_case keys and the version, and only 
   assert.deepStrictEqual(calls[0].body, { version: 4, strategy: { goal_kind: "growth", pace: "careful", explore: 0.3 } });
   assert.deepStrictEqual(calls[1].body, { version: 5, strategy: { pace: "aggressive" } });
 });
+
+test("requestStrategyTune posts the three keys and a reason; decideStrategyTune posts the decision", async () => {
+  const calls = [];
+  const fetchImpl = async (url, opts) => {
+    calls.push({ url, method: opts?.method, body: JSON.parse(opts.body) });
+    return { ok: true, status: 200, headers: { get: () => undefined }, json: async () => ({ id: "mandate-1", tune_request: null }), text: async () => "{}" };
+  };
+  const client = sdk.createSaltClient({ host: "https://salt.test", fetchImpl });
+  await client.requestStrategyTune("agent-key", "mandate-1", { pace: "careful", goalKind: "growth", explore: 0.3 }, { reason: "Fewer unsubscribes" });
+  await client.decideStrategyTune("owner-key", "mandate-1", "req-1", "decline");
+  assert.equal(calls[0].method, "POST");
+  assert.ok(calls[0].url.endsWith("/api/v1/mandates/mandate-1/tune_requests"));
+  assert.deepStrictEqual(calls[0].body, { strategy: { pace: "careful", goal_kind: "growth", explore: 0.3 }, reason: "Fewer unsubscribes" });
+  assert.ok(calls[1].url.endsWith("/api/v1/mandates/mandate-1/tune_requests/req-1/decide"));
+  assert.deepStrictEqual(calls[1].body, { decision: "decline" });
+});
+
+test("strategy_tune_declined reaches onStrategyTuneDeclined with what was asked and the version; no handler is a quiet no-op", async () => {
+  const agent = { saltAppId: "agent-1", username: "helper", apiKey: "agent-key", publicKey: "x", privateKey: "y" };
+  const seen = [];
+  const body = {
+    ...baseMandate({ status: "active", version: 4 }),
+    type: "strategy_tune_declined",
+    strategy_id: "strat_1",
+    changes: { pace: "careful" },
+    version: 4,
+  };
+  const dispatcher = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent]), pgpPassphrase: "x", logger: silent, onStrategyTuneDeclined: (ctx) => void seen.push(ctx) });
+  await dispatcher.dispatch(body, "agent-1");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].identity.saltAppId, "agent-1");
+  assert.equal(seen[0].mandateId, "mandate-1");
+  assert.equal(seen[0].strategyId, "strat_1");
+  assert.deepStrictEqual(seen[0].changes, { pace: "careful" });
+  assert.equal(seen[0].version, 4);
+
+  const tuned = [];
+  const both = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent]), pgpPassphrase: "x", logger: silent, onStrategyTuned: (ctx) => void tuned.push(ctx) });
+  await both.dispatch(body, "agent-1");
+  assert.equal(tuned.length, 0, "a decline is not a tune");
+
+  const quiet = sdk.createDispatcher({ client: { trackEvent() {} }, identities: identityStore([agent]), pgpPassphrase: "x", logger: silent });
+  await quiet.dispatch(body, "agent-1");
+});

@@ -897,6 +897,12 @@ export interface Mandate {
   revoke_reason?: string;
   children?: MandateChild[];
   trail?: MandateTrail;
+  /** `"self"` when a root agent approved its own plan (grantor == grantee). */
+  approved_by?: "self" | null;
+  /** The pending request to change a running plan's settings, or null. See `requestStrategyTune`. */
+  tune_request?: StrategyTuneRequest | null;
+  /** Strategy mandates: money paid under the plan, per currency (this month and in total). Measured, never estimated. */
+  spend?: { money: { amount: string; currency: string }[]; money_month: { amount: string; currency: string }[]; payments: number; as_of: string } | null;
   [key: string]: unknown;
 }
 
@@ -1022,6 +1028,14 @@ export interface StrategyTuning {
   explore?: number;
   goalKind?: StrategyGoalKind;
   pace?: StrategyPace;
+}
+
+/** A pending request to change a running plan's settings (`Mandate.tune_request`); nothing has changed until the grantor accepts. */
+export interface StrategyTuneRequest {
+  id: string;
+  changes: { explore?: number; goal_kind?: string; pace?: string };
+  reason: string;
+  at: string;
 }
 
 /**
@@ -1256,7 +1270,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.28.0";
+export const SDK_VERSION = "0.29.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -2606,6 +2620,31 @@ export function createSaltClient(options: SaltClientOptions) {
       if (tuning.goalKind !== undefined) strategy.goal_kind = tuning.goalKind;
       if (tuning.pace !== undefined) strategy.pace = tuning.pace;
       return request("PATCH", `/api/v1/mandates/${mandateId}`, apiKey, { version: opts.version, strategy });
+    },
+
+    /**
+     * Ask the person (the plan's grantor) to change the pace, exploring or kind of goal of a RUNNING plan you run.
+     * NOTHING changes until they accept: tell them you asked, do not use the new value yet. `reason` (at most 300
+     * characters) is shown with the ask. One pending request per plan; a newer one replaces it. 422 codes:
+     * `strategy_not_editable` (any other key, or the plan is not running), `invalid_strategy`, `no_change`,
+     * `invalid_reason`, `self_approved` (a plan you approved yourself has nobody to ask: use `tuneStrategy`). The
+     * request rides on the mandate as `tune_request`. If they accept you hear `strategy_tuned`; if not, `strategy_tune_declined`.
+     */
+    async requestStrategyTune(apiKey: string, mandateId: SaltId, tuning: StrategyTuning, opts: { reason: string }): Promise<Mandate> {
+      const strategy: Record<string, unknown> = {};
+      if (tuning.explore !== undefined) strategy.explore = tuning.explore;
+      if (tuning.goalKind !== undefined) strategy.goal_kind = tuning.goalKind;
+      if (tuning.pace !== undefined) strategy.pace = tuning.pace;
+      return request("POST", `/api/v1/mandates/${mandateId}/tune_requests`, apiKey, { strategy, reason: opts.reason });
+    },
+
+    /**
+     * For the owner's client: answer a pending `tune_request` on a plan you granted. `accept` applies it exactly like
+     * `tuneStrategy` (the agent hears `strategy_tuned`); `decline` changes nothing (the agent hears
+     * `strategy_tune_declined`). 404 `request_not_open` when it was replaced or already answered.
+     */
+    async decideStrategyTune(apiKey: string, mandateId: SaltId, requestId: string, decision: "accept" | "decline"): Promise<Mandate> {
+      return request("POST", `/api/v1/mandates/${mandateId}/tune_requests/${requestId}/decide`, apiKey, { decision });
     },
 
     /** Do you already hold this capability? `{allowed, mandate_id?, mode, constraints}`. */
