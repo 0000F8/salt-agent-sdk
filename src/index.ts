@@ -20,4 +20,5 @@ export * from "./ask";
 export * from "./socket";
 export * from "./actions";
 export * from "./config";
+export * from "./media";
 export * from "./device/index.js";

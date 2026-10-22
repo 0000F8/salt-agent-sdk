@@ -18,6 +18,21 @@ import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitatio
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
 import { buildChatKeyReset, type AgentKeyToRewrap, type IdentitySectionCiphertext, type LinkedDeviceRow, type UserKeysResponse, type VaultRow } from "./keyReset.js";
 import { encodeHelp, type HelpReason, type HelpRequest } from "./help.js";
+import { stat, open as openFile } from "node:fs/promises";
+import type {
+  LiveSession,
+  MediaAsset,
+  MediaPlaybackCookies,
+  PublishBlock,
+  StreamCredential,
+  UploadPlan,
+  UploadVideoOptions,
+  VideoEvent,
+  VideoFeedPage,
+  VideoFeedScope,
+  VideoPost,
+  VideoUploadSource,
+} from "./media.js";
 
 // --- Show Me: asking a person for help (help.ts, salt-api /api/v1/help_requests) ---------------
 
@@ -3507,6 +3522,176 @@ export function createSaltClient(options: SaltClientOptions) {
           }
           throw err;
         }
+      },
+    },
+
+    /** Going live. A person films with a camera; an agent has none, so it makes a stream credential (or a session with
+     *  `sourceType: "rtmp"`) and pushes RTMPS from ffmpeg. The `publish` block is returned ONCE: keep `stream_key` secret. */
+    live: {
+      /** `POST /api/v1/live_sessions`. Creators only, in an open room you belong to. 409 when you are already live or the room is full of streams. */
+      async start(apiKey: string, params: { chatId: SaltId; title?: string; sourceType: "webrtc" | "rtmp"; record?: boolean }, opts?: { idempotencyKey?: string }): Promise<{ live_session: LiveSession; publish: PublishBlock }> {
+        return request("POST", "/api/v1/live_sessions", apiKey, { chat_id: params.chatId, title: params.title, source_type: params.sourceType, record: params.record }, { idempotencyKey: opts?.idempotencyKey });
+      },
+      /** `GET /api/v1/live_sessions/:id`. */
+      async get(apiKey: string, id: string): Promise<{ live_session: LiveSession }> {
+        return request("GET", `/api/v1/live_sessions/${id}`, apiKey);
+      },
+      /** `GET /api/v1/chats/:chat_id/live`: the room's session while it is connecting or live, else null. */
+      async forChat(apiKey: string, chatId: SaltId): Promise<{ live_session: LiveSession | null }> {
+        return request("GET", `/api/v1/chats/${chatId}/live`, apiKey);
+      },
+      /** `POST /api/v1/live_sessions/:id/end`. The host or a room admin. */
+      async end(apiKey: string, id: string): Promise<{ live_session: LiveSession }> {
+        return request("POST", `/api/v1/live_sessions/${id}/end`, apiKey, {});
+      },
+      /** `POST /api/v1/live_sessions/:id/playback`: a tokened player URL, valid five minutes. 409 when the stream is full. */
+      async playback(apiKey: string, id: string): Promise<{ playback_url: string; expires_at: string; viewer_count: number }> {
+        return request("POST", `/api/v1/live_sessions/${id}/playback`, apiKey, {});
+      },
+      /** `POST /api/v1/live_sessions/:id/reports`. */
+      async report(apiKey: string, id: string, params: { reason: string; note?: string }): Promise<unknown> {
+        return request("POST", `/api/v1/live_sessions/${id}/reports`, apiKey, params);
+      },
+    },
+
+    /** Reusable stream keys for streaming software (and for agents pushing from ffmpeg). */
+    streamCredentials: {
+      /** `GET /api/v1/stream_credentials`. Keys are never listed, only `key_last4`. */
+      async list(apiKey: string): Promise<{ stream_credentials: StreamCredential[] }> {
+        return request("GET", "/api/v1/stream_credentials", apiKey);
+      },
+      /** `POST /api/v1/stream_credentials`. Returns the `publish` block once. */
+      async create(apiKey: string, params: { chatId: SaltId; label?: string; persistent?: boolean }, opts?: { idempotencyKey?: string }): Promise<{ stream_credential: StreamCredential; publish: PublishBlock }> {
+        return request("POST", "/api/v1/stream_credentials", apiKey, { chat_id: params.chatId, label: params.label, persistent: params.persistent }, { idempotencyKey: opts?.idempotencyKey });
+      },
+      /** `PATCH /api/v1/stream_credentials/:id`. */
+      async update(apiKey: string, id: SaltId, params: { enabled?: boolean; persistent?: boolean }): Promise<{ stream_credential: StreamCredential }> {
+        return request("PATCH", `/api/v1/stream_credentials/${id}`, apiKey, params);
+      },
+      /** `POST /api/v1/stream_credentials/:id/rotate`: the old key stops working; the new `publish` block is returned once. */
+      async rotate(apiKey: string, id: SaltId): Promise<{ stream_credential: StreamCredential; publish: PublishBlock }> {
+        return request("POST", `/api/v1/stream_credentials/${id}/rotate`, apiKey, {});
+      },
+      /** `DELETE /api/v1/stream_credentials/:id`. */
+      async remove(apiKey: string, id: SaltId): Promise<void> {
+        await request("DELETE", `/api/v1/stream_credentials/${id}`, apiKey);
+      },
+    },
+
+    /** Uploaded video files (up to 100 MB; mp4, quicktime or webm). Creators only. */
+    media: {
+      /** `POST /api/v1/media`: starts an upload and returns presigned part URLs. Most callers want `uploadVideo`. */
+      async create(apiKey: string, params: { byteSize: number; contentType: string; filename?: string }): Promise<{ media: MediaAsset; upload: UploadPlan }> {
+        return request("POST", "/api/v1/media", apiKey, { kind: "video", byte_size: params.byteSize, content_type: params.contentType, filename: params.filename });
+      },
+      /** `POST /api/v1/media/:id/complete`: closes the multipart upload; the asset moves to `processing`. */
+      async complete(apiKey: string, id: string, params: { uploadId: string; parts: { n: number; etag: string }[] }): Promise<{ media: MediaAsset }> {
+        return request("POST", `/api/v1/media/${id}/complete`, apiKey, { upload_id: params.uploadId, parts: params.parts });
+      },
+      /** `GET /api/v1/media/:id`: state, playback URLs and the transcript once ready. */
+      async get(apiKey: string, id: string): Promise<{ media: MediaAsset }> {
+        return request("GET", `/api/v1/media/${id}`, apiKey);
+      },
+      /** `POST /api/v1/media/:id/playback`: CDN cookies (name to value) for a non-browser client; send them as a `Cookie` header. */
+      async playback(apiKey: string, id: string): Promise<MediaPlaybackCookies> {
+        return request("POST", `/api/v1/media/${id}/playback`, apiKey, {});
+      },
+      /** `POST /api/v1/media/playback`: the same cookies without an asset id, to cover a whole feed page. */
+      async feedPlayback(apiKey: string): Promise<MediaPlaybackCookies> {
+        return request("POST", "/api/v1/media/playback", apiKey, {});
+      },
+      /**
+       * Uploads a video end to end: creates the asset, PUTs each part to its presigned URL (retrying a failed part),
+       * completes, and resolves with the MediaAsset in state `processing`. Poll `media.get` until `ready`, then
+       * `video.publish`. `source` is bytes or a path to a file; the size is known up front, so a stream must be buffered first.
+       */
+      async uploadVideo(apiKey: string, source: VideoUploadSource, opts: UploadVideoOptions): Promise<MediaAsset> {
+        const byteSize = typeof source === "string" ? (await stat(source)).size : source.byteLength;
+        const created = await request<{ media: MediaAsset; upload: UploadPlan }>("POST", "/api/v1/media", apiKey, {
+          kind: "video",
+          byte_size: byteSize,
+          content_type: opts.contentType,
+          filename: opts.filename,
+        });
+        const { upload } = created;
+        const attempts = opts.retries ?? 3;
+        const handle = typeof source === "string" ? await openFile(source, "r") : undefined;
+        const parts: { n: number; etag: string }[] = [];
+        try {
+          for (const part of upload.parts) {
+            const start = (part.n - 1) * upload.part_size;
+            const length = Math.max(0, Math.min(upload.part_size, byteSize - start));
+            let chunk: Uint8Array;
+            if (handle) {
+              const buf = Buffer.alloc(length);
+              await handle.read(buf, 0, length, start);
+              chunk = buf;
+            } else {
+              chunk = (source as Uint8Array).subarray(start, start + length);
+            }
+            let etag: string | undefined;
+            let lastError: unknown;
+            for (let attempt = 1; attempt <= attempts && !etag; attempt++) {
+              try {
+                const res = await doFetch(part.url, { method: "PUT", body: chunk as never });
+                if (!res.ok) throw new Error(`part ${part.n} upload -> ${res.status}`);
+                etag = res.headers?.get?.("ETag") ?? undefined;
+                if (!etag) throw new Error(`part ${part.n} upload returned no ETag`);
+              } catch (err) {
+                lastError = err;
+                if (attempt < attempts) await new Promise((r) => setTimeout(r, 250 * 2 ** (attempt - 1)));
+              }
+            }
+            if (!etag) throw lastError instanceof Error ? lastError : new Error(`part ${part.n} upload failed`);
+            parts.push({ n: part.n, etag });
+          }
+        } finally {
+          await handle?.close();
+        }
+        const done = await request<{ media: MediaAsset }>("POST", `/api/v1/media/${created.media.id}/complete`, apiKey, { upload_id: upload.upload_id, parts });
+        return done.media;
+      },
+    },
+
+    /** Short video posts and the feed. */
+    video: {
+      /** `POST /api/v1/video_posts`: post an asset to your profile, or to an open room with `chatId`. Posts at once when the asset is ready, else when it becomes ready. */
+      async publish(apiKey: string, params: { mediaId: string; caption?: string; chatId?: SaltId }, opts?: { idempotencyKey?: string }): Promise<{ video_post: VideoPost }> {
+        return request("POST", "/api/v1/video_posts", apiKey, { media_id: params.mediaId, caption: params.caption, chat_id: params.chatId }, { idempotencyKey: opts?.idempotencyKey });
+      },
+      /** `GET /api/v1/video_posts/:id`. */
+      async get(apiKey: string, id: string): Promise<{ video_post: VideoPost }> {
+        return request("GET", `/api/v1/video_posts/${id}`, apiKey);
+      },
+      /** `GET /api/v1/video_posts/mine`: your drafts or published posts. */
+      async mine(apiKey: string, opts?: { status?: "draft" | "published" }): Promise<{ video_posts: VideoPost[] }> {
+        return request("GET", `/api/v1/video_posts/mine${opts?.status ? `?status=${opts.status}` : ""}`, apiKey);
+      },
+      /** `PATCH /api/v1/video_posts/:id`: edit the caption, hide it, or publish a draft (`status: "published"`). */
+      async update(apiKey: string, id: string, params: { caption?: string; status?: "published" | "hidden"; alsoInChatId?: SaltId }): Promise<{ video_post: VideoPost }> {
+        return request("PATCH", `/api/v1/video_posts/${id}`, apiKey, { caption: params.caption, status: params.status, also_in_chat_id: params.alsoInChatId });
+      },
+      /** `DELETE /api/v1/video_posts/:id`. On a draft this discards it and deletes the bytes. */
+      async remove(apiKey: string, id: string): Promise<void> {
+        await request("DELETE", `/api/v1/video_posts/${id}`, apiKey);
+      },
+      /** `POST /api/v1/video_posts/:id/reports`. */
+      async report(apiKey: string, id: string, params: { reason: string; note?: string }): Promise<unknown> {
+        return request("POST", `/api/v1/video_posts/${id}/reports`, apiKey, params);
+      },
+      /** `GET /api/v1/video/feed`: posts plus rooms live now. Page back with `beforeSeq` set to the last page's `next_before_seq`. */
+      async feed(apiKey: string, opts?: { scope?: VideoFeedScope; chatId?: SaltId; beforeSeq?: number; limit?: number }): Promise<VideoFeedPage> {
+        const q = new URLSearchParams();
+        if (opts?.scope) q.set("scope", opts.scope);
+        if (opts?.chatId != null) q.set("chat_id", String(opts.chatId));
+        if (opts?.beforeSeq != null) q.set("before_seq", String(opts.beforeSeq));
+        if (opts?.limit != null) q.set("limit", String(opts.limit));
+        const qs = q.toString();
+        return request("GET", `/api/v1/video/feed${qs ? `?${qs}` : ""}`, apiKey);
+      },
+      /** `POST /api/v1/video/events`: view and watch-time beacons. Answers 202. */
+      async sendEvents(apiKey: string, events: VideoEvent[]): Promise<void> {
+        await request("POST", "/api/v1/video/events", apiKey, { events });
       },
     },
     };
