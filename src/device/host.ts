@@ -333,25 +333,12 @@ export interface DeviceAuditEntry {
   reason?: string;
 }
 
-/** Apps the floor never allows a command to target, whatever a mandate says:
- *  password managers and keychains. The desktop app extends this with its own
- *  Salt windows (which it also blanks in the capture handler). Browsers are
- *  deliberately NOT here (owner: browsers full, no deny-list). */
-export const NEVER_ALLOWED_APPS: readonly string[] = [
-  "com.1password.1password",
-  "com.agilebits.onepassword7",
-  "com.apple.keychainaccess",
-  "com.apple.passwords",
-  "com.bitwarden.desktop",
-  "com.dashlane.dashlane",
-  "org.keepassxc.keepassxc",
-  "1password",
-  "bitwarden",
-  "keepassxc",
-  "keychain access",
-  "passwords",
-  "dashlane",
-];
+/** The default never-allowed list: EMPTY. Hosts pass their own app ids (the desktop app passes its
+ *  own Salt Device ids) and any extras through `options.neverAllowedApps`; whatever they pass is the
+ *  whole floor. Password managers and keychain apps are no longer blocked by default (owner decision,
+ *  2026-11-13). Kept as an export so existing imports and spreads (`[...NEVER_ALLOWED_APPS, ...own]`)
+ *  keep working. Browsers are deliberately not here either (owner: browsers full, no deny-list). */
+export const NEVER_ALLOWED_APPS: readonly string[] = [];
 
 export interface DeviceHost {
   /** Feed a decrypted lane message in. Non-device lines and results from
@@ -583,7 +570,7 @@ export function createDeviceHost(
   }
 
   /** The floor: an app named by id OR by a longer name that contains a never-allowed one
-   *  ("1Password 7 - Password Manager") is refused whatever the mandate says. */
+   *  (e.g. "Salt Device - Approve") is refused whatever the mandate says. */
   function isNeverAllowed(app: string): boolean {
     const a = app.toLowerCase();
     return neverAllowed.some((n) => a === n || a.includes(n));

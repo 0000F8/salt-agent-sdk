@@ -69,18 +69,19 @@ test("C-N1: write_file is scoped the same way", async () => {
 });
 
 // ---- M-N2 -------------------------------------------------------------------
-test("M-N2: Apple Passwords is on the never-allowed floor", async () => {
-  assert.ok(sdk.NEVER_ALLOWED_APPS.includes("com.apple.passwords"));
-  assert.ok(sdk.NEVER_ALLOWED_APPS.includes("passwords"));
+test("M-N2: the default never-allowed list is empty; Apple Passwords is an ordinary app, a host-supplied entry still blocks", async () => {
+  assert.deepEqual([...sdk.NEVER_ALLOWED_APPS], []);
   const h = handlers(), t = transport();
   const host = sdk.createDeviceHost(snap({ "device.apps": { mode: "auto" }, "device.observe": { mode: "auto" } }), h, t);
   await host.handleCommand(cmd(1, "focus_app", { app: "com.apple.Passwords" }, { id: "p1" }));
-  assert.equal(t.results.at(-1).body.code, "forbidden");
-  await host.handleCommand(cmd(2, "focus_app", { app: "Passwords" }, { id: "p2" }));
-  assert.equal(t.results.at(-1).body.code, "forbidden");
-  await host.handleCommand(cmd(3, "observe", { target: "screen", app: "Passwords" }, { id: "p3" }));
-  assert.equal(t.results.at(-1).body.code, "forbidden");
-  assert.equal(h.calls.length, 0);
+  assert.notEqual(t.results.at(-1).body.code, "forbidden");
+  const h2 = handlers(), t2 = transport();
+  const host2 = sdk.createDeviceHost(snap({ "device.apps": { mode: "auto" }, "device.observe": { mode: "auto" } }), h2, t2, {}, { neverAllowedApps: ["passwords"] });
+  await host2.handleCommand(cmd(1, "focus_app", { app: "Passwords" }, { id: "p2" }));
+  assert.equal(t2.results.at(-1).body.code, "forbidden");
+  await host2.handleCommand(cmd(2, "observe", { target: "screen", app: "Passwords" }, { id: "p3" }));
+  assert.equal(t2.results.at(-1).body.code, "forbidden");
+  assert.equal(h2.calls.length, 0);
 });
 
 // ---- H-N1 -------------------------------------------------------------------

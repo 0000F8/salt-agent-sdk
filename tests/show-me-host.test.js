@@ -159,8 +159,9 @@ test("a message that is not a point is left for handleCommand", async () => {
 
 test("a never-allowed app is never named, whatever the handler returns", async () => {
   const { host, tx } = setup({
+    options: { neverAllowedApps: ["vaultbox"] },
     handlers: {
-      resolvePoint: async () => ({ screen: { x: 1, y: 1 }, app: "1Password 7 - Password Manager", element: { role: "AXRow", subrole: null, name: "bank", value: null, bounds: { x: 0, y: 0, w: 0, h: 0 } }, refused: null }),
+      resolvePoint: async () => ({ screen: { x: 1, y: 1 }, app: "VaultBox 7 - Extra", element: { role: "AXRow", subrole: null, name: "bank", value: null, bounds: { x: 0, y: 0, w: 0, h: 0 } }, refused: null }),
     },
   });
   host.handleDelivery("help_request_opened", { help_request: helpReq() });

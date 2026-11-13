@@ -146,8 +146,8 @@ test("a seq that does not strictly increase is out_of_order; a stale seq is out_
 test("a never-allowed app is forbidden even with device.apps granted", async () => {
   const h = recordingHandlers();
   const tx = recordingTransport();
-  const host = sdk.createDeviceHost(snapshot({ "device.apps": { mode: "auto" } }), h, tx);
-  await host.handleCommand(cmd(1, "focus_app", { app: "com.1password.1password" }));
+  const host = sdk.createDeviceHost(snapshot({ "device.apps": { mode: "auto" } }), h, tx, {}, { neverAllowedApps: ["systems.salt.device"] });
+  await host.handleCommand(cmd(1, "focus_app", { app: "systems.salt.device" }));
   assert.equal(h.calls.length, 0);
   assert.equal((await lastResult(tx)).body.code, "forbidden");
 });

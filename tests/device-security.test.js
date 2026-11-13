@@ -188,11 +188,11 @@ test("H2: observing or focusing a never-allowed app (even by a longer name) is f
   const h = handlers(), t = transport();
   const host = sdk.createDeviceHost(
     snap({ "device.observe": { mode: "auto" }, "device.apps": { mode: "auto" } }), h, t, {},
-    { neverAllowedApps: [...sdk.NEVER_ALLOWED_APPS, "systems.salt.device", "salt device"] }
+    { neverAllowedApps: [...sdk.NEVER_ALLOWED_APPS, "systems.salt.device", "salt device", "vaultbox"] }
   );
   const observed = [];
   h.observe = async (a) => { observed.push(a); return { obs: "o" }; };
-  await host.handleCommand(cmd(1, "observe", { target: "window", app: "1Password 7 - Password Manager" }));
+  await host.handleCommand(cmd(1, "observe", { target: "window", app: "VaultBox 7 - Extra" }));
   assert.equal(t.results.at(-1).body.code, "forbidden");
   await host.handleCommand(cmd(2, "focus_app", { app: "Salt Device" }));
   assert.equal(t.results.at(-1).body.code, "forbidden");
