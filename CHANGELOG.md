@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.34.0 — 2026-11-13
+
+- **`NEVER_ALLOWED_APPS` is now an empty list** (device host). Password managers and keychains are no longer blocked by default (owner decision, 2026-11-13). The export and the `neverAllowedApps` option stay: a host passes its own app ids and any extras it wants refused, and a blocked app still refuses by name. **Behaviour change** for a host that relied on the default list: pass the ids you want blocked explicitly.
+
 ## 0.33.0 — 2026-10-20
 
 - **Give Salt the goal; what's working; typed plan refusals** (Salt 0.245.0). `client.giveGoal(apiKey, {goal, deadline?, chatId?, idempotencyKey?})` (`POST /api/v1/goals`, `GoalRequest`) and `client.getGoalRequest(apiKey, id)` (`GoalRequestStatus`: `waiting | planned | declined | expired`, `mandate_id`). `client.putWorking(apiKey, mandateId, {testing, kept, dropped})` (`PUT /mandates/:id/working`) and `client.decideWorking(apiKey, mandateId, entryId, "keep" | "never")` (`POST /mandates/:id/working/decide`); types `PlanWorking`, `WorkingTesting`, `WorkingKept`, `WorkingDropped`, `WorkingDecision`. `Mandate.runner` (`PlanRunner`: `self | agent | salt`), `note`, `working`, `working_at`. `PlanSummary.ai` gains `budget_from` and `paid_by`; targets' `measured_by` is `person | salt | agent` with `actual_unit`. New `GoalPlanError` (422 `no_capability`, `first_post_needs_post`, `source_unavailable`) with the server's `sentence` and `next`. `client.dropPlanSteps(apiKey, mandateId, {version, steps})` (`PATCH /mandates/:id` `strategy.drop_steps`), `client.getStrategyLimits()` (`live_narrowable`), `StrategyTuneChanges.drop_steps`, `PlanLock` gains `drop_steps`. `constraints.per_week` documented. AGENTS.md section "An agent with no runtime: give Salt the goal". Tests in `tests/plan-0245.test.js`.
