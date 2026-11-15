@@ -193,11 +193,11 @@ export interface DeviceClient {
   /** Read the computer's settings and power/display state (op `settings`). Needs a live session only:
    *  no capability, no ask, works with the screen off and with commands off. */
   settings(): Promise<DeviceSettingsResult>;
-  /** Change a setting (op `settings` with `{set}`). Only `stay_awake` is settable by an agent; the
-   *  result's `changed` lists what applied and `refused` maps each other key to `person_only`,
+  /** Change a setting (op `settings` with `{set}`). Any setting the device has can be set; the
+   *  result's `changed` lists what applied and `refused` maps each key that did not to
    *  `unknown_setting`, `bad_value` or `declined` (the person said no, or the ask timed out). When the
    *  grant does not act without asking, this raises the person's ask and resolves after the answer. */
-  setSettings(set: { stay_awake?: boolean }): Promise<DeviceSettingsResult>;
+  setSettings(set: Record<string, unknown>): Promise<DeviceSettingsResult>;
   readFile(path: string): Promise<FileResult>;
   writeFile(path: string, contentB64: string): Promise<void>;
   /** Hand the computer ONE whole task (op `task`, grant `device.task`) and wait for its checked
@@ -765,7 +765,7 @@ export function createDeviceClient(
     focusApp: (app: string) => doFocus({ app }).then(() => undefined),
     listApps: () => doListApps() as Promise<AppsResult>,
     settings: () => doSettings({}) as Promise<DeviceSettingsResult>,
-    setSettings: (set: { stay_awake?: boolean }) => doSettings({ set }) as Promise<DeviceSettingsResult>,
+    setSettings: (set: Record<string, unknown>) => doSettings({ set }) as Promise<DeviceSettingsResult>,
     readFile: (path: string) => doReadFile({ path }) as Promise<FileResult>,
     writeFile: (path: string, contentB64: string) => doWriteFile({ path, content_b64: contentB64 }).then(() => undefined),
     async task(goal, opts = {}) {

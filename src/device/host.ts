@@ -58,6 +58,8 @@ import {
   RESULT_CACHE_SIZE,
   TASK_DEVICE_GRACE_MS,
   type AppsResult,
+  type DeviceSettingsArgs,
+  type DeviceSettingsResult,
   type ClickArgs,
   type DeviceCountClass,
   type DeviceErrorCode,
@@ -94,6 +96,12 @@ export interface DeviceHostHandlers {
   submit(args: SubmitArgs): Promise<HandlerResult>;
   focusApp(args: { app: string }): Promise<HandlerResult>;
   listApps(): Promise<AppsResult>;
+  /** Read (`args` has no `set`) or change (`args.set`) the computer's settings (op `settings`).
+   *  Optional: a host without it answers `unsupported`. The op needs no capability, only a live
+   *  session; the HANDLER decides a set (apply at once under Full control, otherwise ask the person)
+   *  and returns the full result: `{settings, state, changed, refused}`. Refusals belong in
+   *  `refused` (`unknown_setting`, `bad_value`, `declined`), not in a throw. Reads need no ask. */
+  settings?(args: DeviceSettingsArgs): Promise<DeviceSettingsResult>;
   readFile(args: { path: string }): Promise<FileResult>;
   writeFile(args: { path: string; content_b64: string }): Promise<HandlerResult>;
   /** Do ONE whole task (op `task`, capability `device.task`). Optional: a host without it
@@ -931,6 +939,11 @@ export function createDeviceHost(
         return { op: "ack", body: ackBody(await handlers.focusApp(body as { app: string })) };
       case "list_apps":
         return { op: "apps", body: await handlers.listApps() };
+      case "settings": {
+        if (!handlers.settings) throw new DeviceProtocolError("unsupported", "this computer has no settings op");
+        const b = body as DeviceSettingsArgs | undefined;
+        return { op: "settings", body: await handlers.settings(b && typeof b === "object" ? b : {}) };
+      }
       case "read_file":
         return { op: "file", body: await handlers.readFile(body as { path: string }) };
       case "write_file":

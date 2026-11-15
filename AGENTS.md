@@ -698,22 +698,22 @@ on its own answers the agent `failed` with the message.
 
 ## Read and change the computer's settings (op `settings`)
 
-Any active device session can read the computer's settings and power/display state, and ask for
-`stay_awake` to change. There is no capability name of its own: a read needs only a live session
+Any active device session can read the computer's settings and power/display state, and change
+any setting the computer has (today `stay_awake` and `commands_enabled`; the map can grow). There is no capability name of its own: a read needs only a live session
 (no ask, works with the screen off and with commands off).
 
 ```ts
 const r = await device.settings();                       // read
-// r.settings = { stay_awake, commands_enabled }
+// r.settings = { stay_awake, commands_enabled, ... }  (every setting the device has)
 // r.state    = { on_ac, battery_pct, lid_closed, display: "on" | "off" | null, holding_awake }
 // r.changed  = []        r.refused = {}
 const s = await device.setSettings({ stay_awake: true });  // set
 // s.changed = ["stay_awake"]  or  s.refused = { stay_awake: "declined" }
 ```
 
-- **Only `stay_awake` is settable by an agent.** `commands_enabled` is readable, never settable.
+- **Every setting is settable by an agent**, `commands_enabled` included. Settings are a general map: new ones need no SDK change.
 - **Refusals are data, not throws.** `refused` maps each key that was not applied to a reason:
-  `person_only` (only the person can change it, at the computer), `unknown_setting`, `bad_value`
+  `unknown_setting`, `bad_value`
   (wrong type), `declined` (the person said no, or the ask timed out).
 - **Deciding a set.** If every power in the session's grant acts without asking (Full control), it
   applies at once. Otherwise the computer raises the usual ask (screen card plus phone, titled

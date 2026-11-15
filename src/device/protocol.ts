@@ -350,16 +350,17 @@ export interface ObservationResult {
 export interface AppsResult {
   apps: Array<{ id: string; name: string; frontmost: boolean }>;
 }
-/** Settings an agent can set over the wire. `commands_enabled` is readable, never settable. */
+/** Settings are a general map: every setting the device has is settable by an agent (the device
+ *  decides: it applies at once under Full control, otherwise it asks the person). */
 export interface DeviceSettingsArgs {
-  set?: { stay_awake?: boolean; [key: string]: unknown };
+  set?: Record<string, unknown>;
 }
-/** Why a `set` key was not applied. `person_only`: only the person can change it, at the computer.
- *  `declined`: the person (or the ask's timeout) said no. */
-export type DeviceSettingRefusal = "person_only" | "unknown_setting" | "bad_value" | "declined";
+/** Why a `set` key was not applied. `declined`: the person said no, or the ask timed out. */
+export type DeviceSettingRefusal = "unknown_setting" | "bad_value" | "declined";
 /** The answer to `settings`, for a read and a set alike. */
 export interface DeviceSettingsResult {
-  settings: { stay_awake: boolean; commands_enabled: boolean };
+  /** Every setting the device has, by key (today `stay_awake`, `commands_enabled`; more may appear). */
+  settings: Record<string, boolean | number | string>;
   state: {
     on_ac: boolean | null;
     battery_pct: number | null;
