@@ -44,6 +44,7 @@ import {
   type SubmitArgs,
   type ElementRef,
   type AppsResult,
+  type DeviceSettingsResult,
   type PointedBody,
   type Progress,
   type StillBody,
@@ -189,6 +190,14 @@ export interface DeviceClient {
   submit(element: ElementRef): Promise<void>;
   focusApp(app: string): Promise<void>;
   listApps(): Promise<AppsResult>;
+  /** Read the computer's settings and power/display state (op `settings`). Needs a live session only:
+   *  no capability, no ask, works with the screen off and with commands off. */
+  settings(): Promise<DeviceSettingsResult>;
+  /** Change a setting (op `settings` with `{set}`). Only `stay_awake` is settable by an agent; the
+   *  result's `changed` lists what applied and `refused` maps each other key to `person_only`,
+   *  `unknown_setting`, `bad_value` or `declined` (the person said no, or the ask timed out). When the
+   *  grant does not act without asking, this raises the person's ask and resolves after the answer. */
+  setSettings(set: { stay_awake?: boolean }): Promise<DeviceSettingsResult>;
   readFile(path: string): Promise<FileResult>;
   writeFile(path: string, contentB64: string): Promise<void>;
   /** Hand the computer ONE whole task (op `task`, grant `device.task`) and wait for its checked
@@ -596,6 +605,7 @@ export function createDeviceClient(
   const doSubmit = expect("submit", "ack");
   const doFocus = expect("focus_app", "ack");
   const doListApps = expect("list_apps", "apps");
+  const doSettings = expect("settings", "settings");
   const doReadFile = expect("read_file", "file");
   const doWriteFile = expect("write_file", "ack");
   const doTask = expect("task", "task_result");
@@ -754,6 +764,8 @@ export function createDeviceClient(
     submit: (element: ElementRef) => doSubmit({ element } satisfies SubmitArgs).then(() => undefined),
     focusApp: (app: string) => doFocus({ app }).then(() => undefined),
     listApps: () => doListApps() as Promise<AppsResult>,
+    settings: () => doSettings({}) as Promise<DeviceSettingsResult>,
+    setSettings: (set: { stay_awake?: boolean }) => doSettings({ set }) as Promise<DeviceSettingsResult>,
     readFile: (path: string) => doReadFile({ path }) as Promise<FileResult>,
     writeFile: (path: string, contentB64: string) => doWriteFile({ path, content_b64: contentB64 }).then(() => undefined),
     async task(goal, opts = {}) {

@@ -1174,6 +1174,12 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
   and resolves a checked `TaskResult` (words and numbers only; command output and screenshots
   never leave the computer). The host side is an optional `handlers.task(args, ctx)`. See
   "Hand a whole task to a computer" in `AGENTS.md`.
+- **Settings.** `await device.settings()` reads the computer's settings and state
+  (`stay_awake`, `commands_enabled`, `on_ac`, `battery_pct`, `lid_closed`, `display`,
+  `holding_awake`) with no ask; `await device.setSettings({ stay_awake: true })` changes the one
+  setting an agent may set, asking the person first unless the grant acts without asking. The result
+  is `{ settings, state, changed, refused }`; a refusal reads `person_only`, `unknown_setting`,
+  `bad_value` or `declined`. See "Read and change the computer's settings" in `AGENTS.md`.
 
 Device side:
 

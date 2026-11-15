@@ -1390,6 +1390,7 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "submit",
   "focus_app",
   "list_apps",
+  "settings",
   "read_file",
   "write_file",
   "task",

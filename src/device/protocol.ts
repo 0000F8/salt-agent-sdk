@@ -70,6 +70,7 @@ export type DeviceOp =
   | "submit" // accessibility confirm of a named element; never a keystroke
   | "focus_app"
   | "list_apps"
+  | "settings" // read the computer's settings + state, or `{set: {...}}` to change what an agent may; answers `settings`
   | "read_file"
   | "write_file"
   | "task" // hand the computer ONE whole task; it answers `progress` (non-final) then `task_result`
@@ -82,6 +83,7 @@ export type DeviceResultOp =
   | "ack"
   | "observation"
   | "apps"
+  | "settings"
   | "file"
   | "ask"
   | "error"
@@ -98,6 +100,7 @@ export const AGENT_OPS: readonly DeviceOp[] = [
   "submit",
   "focus_app",
   "list_apps",
+  "settings",
   "read_file",
   "write_file",
   "task",
@@ -110,6 +113,7 @@ export const DEVICE_RESULT_OPS: readonly DeviceResultOp[] = [
   "ack",
   "observation",
   "apps",
+  "settings",
   "file",
   "ask",
   "error",
@@ -160,6 +164,7 @@ export const CAPABILITY_FOR_OP: Record<DeviceOp, string | null> = {
   submit: "device.act",
   focus_app: "device.apps",
   list_apps: "device.apps",
+  settings: null, // no capability of its own: any active session may read; a set follows the command-approval rule on the device
   read_file: "device.files.read",
   write_file: "device.files.write",
   task: "device.task",
@@ -226,6 +231,7 @@ export function countClassForOp(op: DeviceOp): DeviceCountClass | null {
       return "app_focus";
     case "task":
       return "task";
+    case "settings":
     case "stop":
     case "cancel":
     case "shell":
@@ -343,6 +349,28 @@ export interface ObservationResult {
 }
 export interface AppsResult {
   apps: Array<{ id: string; name: string; frontmost: boolean }>;
+}
+/** Settings an agent can set over the wire. `commands_enabled` is readable, never settable. */
+export interface DeviceSettingsArgs {
+  set?: { stay_awake?: boolean; [key: string]: unknown };
+}
+/** Why a `set` key was not applied. `person_only`: only the person can change it, at the computer.
+ *  `declined`: the person (or the ask's timeout) said no. */
+export type DeviceSettingRefusal = "person_only" | "unknown_setting" | "bad_value" | "declined";
+/** The answer to `settings`, for a read and a set alike. */
+export interface DeviceSettingsResult {
+  settings: { stay_awake: boolean; commands_enabled: boolean };
+  state: {
+    on_ac: boolean | null;
+    battery_pct: number | null;
+    lid_closed: boolean | null;
+    display: "on" | "off" | null;
+    holding_awake: boolean;
+  };
+  /** Keys the set applied. */
+  changed: string[];
+  /** Keys it did not, with the reason. */
+  refused: Record<string, DeviceSettingRefusal>;
 }
 export interface FileResult {
   path: string;

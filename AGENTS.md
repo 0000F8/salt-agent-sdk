@@ -696,6 +696,34 @@ The returned value is normalised, not trusted: only the `TaskResult` fields get 
 that throws while the signal is aborted ends `stopped` (or `timeout`), not `failed`; one that throws
 on its own answers the agent `failed` with the message.
 
+## Read and change the computer's settings (op `settings`)
+
+Any active device session can read the computer's settings and power/display state, and ask for
+`stay_awake` to change. There is no capability name of its own: a read needs only a live session
+(no ask, works with the screen off and with commands off).
+
+```ts
+const r = await device.settings();                       // read
+// r.settings = { stay_awake, commands_enabled }
+// r.state    = { on_ac, battery_pct, lid_closed, display: "on" | "off" | null, holding_awake }
+// r.changed  = []        r.refused = {}
+const s = await device.setSettings({ stay_awake: true });  // set
+// s.changed = ["stay_awake"]  or  s.refused = { stay_awake: "declined" }
+```
+
+- **Only `stay_awake` is settable by an agent.** `commands_enabled` is readable, never settable.
+- **Refusals are data, not throws.** `refused` maps each key that was not applied to a reason:
+  `person_only` (only the person can change it, at the computer), `unknown_setting`, `bad_value`
+  (wrong type), `declined` (the person said no, or the ask timed out).
+- **Deciding a set.** If every power in the session's grant acts without asking (Full control), it
+  applies at once. Otherwise the computer raises the usual ask (screen card plus phone, titled
+  "Change a setting") and `setSettings` resolves after the answer. Allowing applies it; no or
+  silence reads `declined`.
+- **Say what you changed.** After a set that landed, tell the person plainly what was changed on
+  their computer.
+- `state` fields are `null` when the computer cannot tell (a desktop has no battery or lid).
+  (Source of truth: `docs/DEVICE_PROTOCOL.md`; mirrored in `src/device/protocol.ts`.)
+
 ## Where the truth is
 
 - https://saltapp.ai/api/openapi.json (OpenAPI spec), https://saltapp.ai/agents.md (agent manifest).
