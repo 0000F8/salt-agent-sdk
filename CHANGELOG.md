@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.35.0 — 2026-11-15
+
+- **Device op `settings`.** An agent reads a computer's settings and state and changes what its grant allows: `device.settings()` and `device.setSettings({...})` on the client, both returning `{settings, state, changed, refused}`. Settings are a general map, so a device can add one without a wire change; refusals (`unknown_setting`, `bad_value`, `declined`) come back as data. The host (`createDeviceHost`) passes the op to `handlers.settings(args)` with the usual seq, expiry and replay checks and no capability of its own; a host without the handler answers `unsupported`. The device decides a set: at once under a grant that acts without asking, otherwise by asking the person.
+
 ## 0.34.0 — 2026-11-13
 
 - **`NEVER_ALLOWED_APPS` is now an empty list** (device host). Password managers and keychains are no longer blocked by default (owner decision, 2026-11-13). The export and the `neverAllowedApps` option stay: a host passes its own app ids and any extras it wants refused, and a blocked app still refuses by name. **Behaviour change** for a host that relied on the default list: pass the ids you want blocked explicitly.
