@@ -425,6 +425,8 @@ export const TASK_ID_MAX = 64;
 export const PROGRESS_MIN_INTERVAL_MS = 1_000;
 /** An `amend`'s `say` is cut to this many characters. */
 export const AMEND_SAY_MAX = 500;
+/** A task takes at most this many amends in total; the host refuses the rest with a plain progress line. */
+export const AMEND_MAX_PER_TASK = 20;
 /** A task's command deadline on the device is `timeout_s` + this, not COMMAND_TTL_MS. */
 export const TASK_DEVICE_GRACE_MS = 15_000;
 /** The agent waits `timeout_s` + this for the result before it cancels. */
@@ -566,10 +568,12 @@ export function normalizeProgress(raw: unknown): Progress | null {
   return out;
 }
 
-/** The wire body of an `amend`: `{id?, say}`. `say` must be a non-empty string and is cut to
- *  500 characters; `id` (the task command's id) is optional and at most 64 characters. Throws
+/** The wire body of an `amend`: `{id?, say}`. `say` must be a non-empty string of at most
+ *  500 characters (longer is `bad_args`: the sender fixes the words); `id` (the task command's id) is optional and at most 64 characters. Throws
  *  DeviceProtocolError("bad_args"). Used by the agent before it sends. */
 export function amendCommandBody(say: string, id?: string): AmendArgs {
+  // The sender is told, never cut silently (the device still clips what it receives, by code points).
+  if (typeof say === "string" && charCount(say) > AMEND_SAY_MAX) throw new DeviceProtocolError("bad_args", `say is over ${AMEND_SAY_MAX} characters`);
   const p = normalizeAmend({ ...(id !== undefined ? { id } : {}), say });
   if (!p) throw new DeviceProtocolError("bad_args", "amend needs a non-empty say" + (id !== undefined ? " and an id of at most 64 characters" : ""));
   return p;

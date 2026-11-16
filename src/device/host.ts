@@ -34,6 +34,7 @@
 import {
   CAPABILITY_FOR_OP,
   COMMAND_TTL_MS,
+  PROGRESS_LINE_MAX,
   countClassForOp,
   decodeDeviceMessage,
   DeviceProtocolError,
@@ -47,6 +48,7 @@ import {
   decodePoint,
   isPointMessage,
   normalizePointed,
+  AMEND_MAX_PER_TASK,
   normalizeAmend,
   normalizeProgress,
   normalizeStill,
@@ -151,10 +153,12 @@ export interface DeviceTaskContext {
    *  off 15 s after `timeout_s` with a `timeout` result and the device lock is released. */
   signal: AbortSignal;
   /** Tell the agent (and keep the session alive) with one plain line. The host allow-lists the
-   *  fields, cuts `line` to 140 and sends at most one every 2 s (the newest waiting one goes
-   *  out when the gap is over). Never throws. Call it at least once a minute on a long task:
+   *  fields, cuts `line` to 140 and sends at most one every 1 s (the newest waiting one goes
+   *  out when the gap is over). `{urgent: true}` sends the line in order outside that throttle and
+   *  never drops it: for words the person must be able to read in full (an `amend`'s text, which can
+   *  take several lines). Never throws. Call it at least once a minute on a long task:
    *  Salt ends a session that has run nothing for 2 minutes (5 when a person supervises). */
-  progress(p: Progress): void;
+  progress(p: Progress, opts?: { urgent?: boolean }): void;
   /** Take the instructions an agent sent with `amend` since the last call, oldest first, each at most
    *  500 characters; the list is then empty. Call it between steps. An amend that arrived while the
    *  task was still queued is in the first call. Never throws. */
@@ -344,6 +348,8 @@ export interface DeviceAuditEntry {
   decision: "ran" | "refused" | "needs_approval" | "ended";
   code?: DeviceErrorCode;
   reason?: string;
+  /** An `amend`'s text, at most 500 characters, so the on-disk audit shows what the agent changed. */
+  text?: string;
 }
 
 /** The default never-allowed list: EMPTY. Hosts pass their own app ids (the desktop app passes its
@@ -486,6 +492,18 @@ export function createDeviceHost(
   const amendInbox = new Map<string, string[]>();
   const AMEND_INBOX_CAP = 20;
   const AMEND_TASKS_CAP = 64;
+  const SEEN_AMEND_CAP = 256;
+  const MAX_AMENDS_PER_SECOND = 2;
+  // Task command ids accepted and not finished (queued, waiting for the device lock, or running), counted
+  // like `queuedIds` for a resend; what an amend may name. Cleared when the command ends, however it ends.
+  const unfinishedTasks = new Map<string, number>();
+  // Amend frames already applied (a replayed frame is applied once), the times of recent amends, how many a
+  // task has taken in total, and a way to say one line into a running task's progress stream.
+  const startedTasks = new Set<string>();
+  const seenAmendIds = new Set<string>();
+  const amendTimes: number[] = [];
+  const amendCounts = new Map<string, number>();
+  const taskNotes = new Map<string, (line: string) => void>();
   // Callers of ctx.waitWhilePaused(), released by resume().
   const resumeWaiters = new Set<() => void>();
 
@@ -644,27 +662,54 @@ export function createDeviceHost(
 
     if (header.op === "amend" && header.v === DEVICE_PROTOCOL_VERSION) {
       // Out of band like `cancel`: never queued, no seq, never answered. The target is body `{id}`,
-      // else the header's `re`, else the only task running. A task that is running or still queued
-      // keeps the text; an unknown or finished one is dropped as `cancel` drops it. It changes what
-      // the task does and nothing else: it grants, approves and lifts nothing.
+      // else the header's `re`, else the only unfinished task. A task that is running, or accepted and
+      // waiting (behind another command or the device lock), keeps the text; an unknown or finished one
+      // is dropped as `cancel` drops it. It changes what the task does and nothing else: it grants,
+      // approves and lifts nothing. Unlike `cancel` it is NOT idempotent, so it has what `task` has: a
+      // fresh `exp` (required, and not further ahead than a command may live), a seen-id set so a
+      // replayed frame is applied once, a rate limit, the mandate's expiry, and a cap per task.
       const said = normalizeAmend(body);
       const id =
         said?.id ??
         (typeof header.re === "string" ? header.re : undefined) ??
-        (runningTasks.size === 1 ? runningTasks.keys().next().value : undefined);
-      const known = typeof id === "string" && (runningTasks.has(id) || queuedIds.has(id));
-      if (!said || !known || !snapshot.caps["device.task"]) {
-        audit({ commandId: typeof id === "string" ? id : "-", op: "amend", decision: "refused", reason: !said ? "bad amend" : !known ? "no such task" : "no task grant" });
+        (unfinishedTasks.size === 1 ? unfinishedTasks.keys().next().value : undefined);
+      const refuseAmend = (reason: string): boolean => {
+        audit({ commandId: typeof id === "string" ? id : "-", op: "amend", decision: "refused", reason, ...(said ? { text: said.say } : {}) });
         return true;
+      };
+      const t = clock();
+      if (!said) return refuseAmend("bad amend");
+      if (typeof header.exp !== "number" || !Number.isFinite(header.exp)) return refuseAmend("exp is required");
+      if (header.exp > t + COMMAND_TTL_MS + EXP_SKEW_MS) return refuseAmend("exp is further ahead than a command may live");
+      if (t >= Math.min(header.exp, t + COMMAND_TTL_MS)) return refuseAmend("expired");
+      if (seenAmendIds.has(header.id)) return refuseAmend("repeated id");
+      if (snapshot.expiresAt && Date.now() >= Date.parse(snapshot.expiresAt)) return refuseAmend("mandate expired");
+      if (!snapshot.caps["device.task"]) return refuseAmend("no task grant");
+      if (typeof id !== "string" || !unfinishedTasks.has(id)) return refuseAmend("no such task");
+      if (startedTasks.has(id) && !runningTasks.has(id)) {
+        // The handler has returned and the result is on its way: nothing will read it.
+        taskNotes.get(id)?.("Not applied: the task had just finished.");
+        return refuseAmend("task over");
       }
-      const key = id as string;
-      const list = amendInbox.get(key) ?? [];
+      while (amendTimes.length && t - amendTimes[0] >= 1000) amendTimes.shift();
+      if (amendTimes.length >= MAX_AMENDS_PER_SECOND) return refuseAmend("too many amends at once");
+      amendTimes.push(t);
+      seenAmendIds.add(header.id);
+      while (seenAmendIds.size > SEEN_AMEND_CAP) seenAmendIds.delete(seenAmendIds.values().next().value as string);
+      const total = (amendCounts.get(id) ?? 0) + 1;
+      if (total > AMEND_MAX_PER_TASK) {
+        taskNotes.get(id)?.(`Not applied: this task has already been changed ${AMEND_MAX_PER_TASK} times.`);
+        return refuseAmend("amend cap per task");
+      }
+      amendCounts.set(id, total);
+      while (amendCounts.size > AMEND_TASKS_CAP) amendCounts.delete(amendCounts.keys().next().value as string);
+      const list = amendInbox.get(id) ?? [];
       list.push(said.say);
       while (list.length > AMEND_INBOX_CAP) list.shift();
-      amendInbox.delete(key);
-      amendInbox.set(key, list);
+      amendInbox.delete(id);
+      amendInbox.set(id, list);
       while (amendInbox.size > AMEND_TASKS_CAP) amendInbox.delete(amendInbox.keys().next().value as string);
-      audit({ commandId: key, op: "amend", decision: "ran" });
+      audit({ commandId: id, op: "amend", decision: "ran", text: said.say });
       return true;
     }
 
@@ -678,8 +723,25 @@ export function createDeviceHost(
     // The deadline runs on THIS device's clock from arrival: the sender's `exp`
     // can only shorten it, never extend it.
     const receivedAt = clock();
+    const isTask = header.op === "task";
+    if (isTask) unfinishedTasks.set(header.id, (unfinishedTasks.get(header.id) ?? 0) + 1);
     const run = tail.then(() => processCommand(header, body, receivedAt));
     tail = run.catch(() => undefined);
+    if (isTask) {
+      const forget = (): void => {
+        const left = (unfinishedTasks.get(header.id) ?? 1) - 1;
+        if (left > 0) {
+          unfinishedTasks.set(header.id, left);
+          return;
+        }
+        // Finished, or refused before it started (out_of_order, expired, paused...): nothing keeps its inbox.
+        unfinishedTasks.delete(header.id);
+        startedTasks.delete(header.id);
+        amendInbox.delete(header.id);
+        amendCounts.delete(header.id);
+      };
+      run.then(forget, forget);
+    }
     return run;
   }
 
@@ -1013,7 +1075,21 @@ export function createDeviceHost(
     let progressTimer: ReturnType<typeof setTimeout> | undefined;
     let postChain: Promise<void> = Promise.resolve();
 
+    let lastStep = 0;
+    let notesOpen = true;
+    // One plain line into this task's progress stream outside the throttle (an amend that was not applied).
+    const note = (line: string): void => {
+      if (!notesOpen || ended) return;
+      postChain = postChain
+        .then(() => reply(header, "progress", { step: lastStep, line: line.slice(0, PROGRESS_LINE_MAX) }))
+        .then(() => undefined)
+        .catch(() => undefined);
+    };
+    taskNotes.set(header.id, note);
+    startedTasks.add(header.id);
+
     const sendProgress = (p: Progress): void => {
+      lastStep = p.step;
       lastProgressAt = clock();
       touchLease(header);
       postChain = postChain
@@ -1024,10 +1100,18 @@ export function createDeviceHost(
 
     const ctx: DeviceTaskContext = {
       signal: ac.signal,
-      progress(p) {
+      progress(p, o) {
         if (over || ended) return;
         const n = normalizeProgress(p);
         if (!n) return;
+        if (o?.urgent) {
+          // In order, outside the throttle, never dropped: a line the person must be able to read in full.
+          if (progressTimer) clearTimeout(progressTimer);
+          progressTimer = undefined;
+          pendingProgress = null;
+          sendProgress(n);
+          return;
+        }
         const wait = progressMinIntervalMs - (clock() - lastProgressAt);
         if (wait <= 0) {
           if (progressTimer) clearTimeout(progressTimer);
@@ -1111,9 +1195,15 @@ export function createDeviceHost(
     if (progressTimer) clearTimeout(progressTimer);
     pendingProgress = null;
     runningTasks.delete(header.id);
+    // Amends the task never took up (they arrived as it ended): say so, once, where a frame can still go.
+    const undrained = amendInbox.get(header.id) ?? [];
     amendInbox.delete(header.id);
+    for (const text of undrained) audit({ commandId: header.id, op: "amend", decision: "refused", reason: "task over", text });
+    if (undrained.length > 0) note(`Not applied: the task finished before it could take ${undrained.length === 1 ? "a change" : `${undrained.length} changes`}.`);
     if (outcome.kind === "hard") ac.abort("timeout"); // a handler that ignored the signal is let go
     await postChain; // every progress line goes out before the final result
+    notesOpen = false;
+    taskNotes.delete(header.id);
 
     const elapsed = Math.max(0, clock() - startedAt);
     const cut = (status: TaskResult["status"], summary: string): TaskResult => ({

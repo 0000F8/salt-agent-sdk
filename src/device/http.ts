@@ -10,7 +10,7 @@
 
 import { encryptFor } from "../crypto.js";
 import type { SaltId } from "../ids.js";
-import { DeviceSessionLiveError, type DeviceClientTransport, type DeviceSessionMeta, type LaneReaders } from "./client.js";
+import { DeviceLaneReaderError, DeviceSessionLiveError, type DeviceClientTransport, type DeviceSessionMeta, type LaneReaders } from "./client.js";
 import { DeviceBeatOverError, type DeviceBeatReport, type DeviceHostTransport } from "./host.js";
 import { DeviceProtocolError } from "./protocol.js";
 import type { DeviceCountClass, DevicePauseReason } from "./protocol.js";
@@ -122,11 +122,14 @@ async function keysFor(opts: DeviceHttpOptions, readers: LaneReaders): Promise<s
   for (const u of data?.session?.users ?? []) {
     if (typeof u.public_key === "string" && u.public_key) byId.set(String(u.id).toLowerCase(), u.public_key);
   }
-  return readers.readerIds.map((id) => {
+  const keys: string[] = [];
+  for (const id of readers.readerIds) {
     const key = byId.get(String(id).toLowerCase());
-    if (!key) throw new DeviceProtocolError("failed", `lane reader ${id} has no public key; not sending`);
-    return key;
-  });
+    if (key) keys.push(key);
+    else if (!readers.lenient) throw new DeviceLaneReaderError(`lane reader ${id} has no public key; not sending`);
+  }
+  if (keys.length === 0) throw new DeviceLaneReaderError("no lane reader has a public key; not sending");
+  return keys;
 }
 
 /** Device-side transport. `apiKey` is the DEVICE's own key. */

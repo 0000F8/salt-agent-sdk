@@ -1185,7 +1185,10 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
   and resolves a checked `TaskResult` (words and numbers only; command output and screenshots
   never leave the computer). `device.amendTask(id, say)` (`id` from `task`'s `onStart`) changes a
   task that is already running: the new instruction reaches it between steps and it carries on
-  (op `amend`, out of band like `cancel`, `say` <= 500 characters). The host side is an optional
+  (op `amend`, out of band like `cancel` but with the usual `exp`, which the host requires; `say` <= 500 characters, `bad_args`
+  over that). A send that fails because a lane reader has no key (or its id is stale) re-reads the session and retries once;
+  `cancel` and `amend` skip a keyless reader. Note: the `open()` timers are `unref`'d, so a script whose only pending work is
+  an 8-hour `open()` exits with the promise unsettled; keep the process alive yourself (a socket, an interval). The host side is an optional
   `handlers.task(args, ctx)`, which drains `ctx.amends()` between steps. See
   "Hand a whole task to a computer" in `AGENTS.md`.
 - **Settings.** `await device.settings()` reads the computer's settings and state

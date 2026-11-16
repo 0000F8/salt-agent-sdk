@@ -62,6 +62,17 @@ export interface LaneReaders {
    *  Set when the session carried ids and no keys: the transport fetches each key from the
    *  lane chat's members at send time. */
   readerIds?: string[];
+  /** Set by the client on an out-of-band send (`cancel`, `amend`): a reader with no key is skipped
+   *  rather than stopping the send, as long as one key remains. Content-bearing sends stay strict. */
+  lenient?: boolean;
+}
+
+/** A send failed because of the lane's readers (one has no key, or the ids are stale). The client
+ *  re-reads the session and retries once. */
+export class DeviceLaneReaderError extends DeviceProtocolError {
+  constructor(message: string) {
+    super("failed", message);
+  }
 }
 
 export type DeviceSessionStatus = "queued" | "requested" | "active" | "paused" | "ended";
@@ -231,7 +242,7 @@ export interface DeviceClient {
    *  output and screenshots never come back, only a `TaskResult` of words and numbers. Rejects with
    *  `bad_args` before sending when the arguments are out of range, `unsupported` when the computer
    *  cannot run tasks, `out_of_scope` without the grant or when the budget is spent. `onProgress`
-   *  gets each non-final line in order (at most one every 2 s, newest wins). Waits
+   *  gets each non-final line in order (at most one every 1 s, newest wins). Waits
    *  `timeoutS + 30` s (default 180 + 30); on that timeout, or when `signal` aborts, it sends
    *  `cancel` with the task's id as `re`. After an abort it waits up to 10 s for the device's
    *  `stopped` result and resolves with it, else rejects. */
@@ -332,6 +343,24 @@ export function createDeviceClient(
     return ids.length ? { chatId: m.chat.id, publicKeys: [], readerIds: ids } : null;
   }
 
+  /** Post one lane message. A send that failed on the lane's readers re-reads the session (fresh reader
+   *  ids) and tries once more, so one stale or keyless reader cannot block a `cancel` or an `amend`.
+   *  `oob` marks those out-of-band sends: a keyless reader is then skipped, not fatal. */
+  async function postLane(plaintext: string, r: LaneReaders, oob = false): Promise<void> {
+    const send = (rr: LaneReaders): Promise<void> => transport.postCommand(plaintext, oob ? { ...rr, lenient: true } : rr);
+    try {
+      await send(r);
+    } catch (e) {
+      if (!(e instanceof DeviceLaneReaderError) || !transport.fetchSession || !meta) throw e;
+      const fetched = await transport.fetchSession(meta.id).catch(() => null);
+      const fresh = fetched ? readersFrom(fetched) : null;
+      if (!fresh || !fetched) throw e;
+      readers = fresh;
+      meta = { ...meta, chat: fetched.chat ?? meta.chat };
+      await send(fresh);
+    }
+  }
+
   function failAll(err: Error): void {
     for (const p of pending.values()) {
       clearTimeout(p.timer);
@@ -428,6 +457,10 @@ export function createDeviceClient(
     const signal = o.signal;
     if (signal?.aborted) throw new DeviceProtocolError("failed", "open aborted");
     let onAbort: (() => void) | null = null;
+    let rejectAborted: (e: Error) => void = () => undefined;
+    // The caller is told at once, even while the POST is still in flight (openInner withdraws what it creates).
+    const aborted = new Promise<never>((_, reject) => (rejectAborted = reject));
+    aborted.catch(() => undefined);
     if (signal) {
       onAbort = () => {
         const sid = meta?.id;
@@ -436,19 +469,22 @@ export function createDeviceClient(
         const rej = openReject;
         openResolve = openReject = null;
         rej?.(new DeviceProtocolError("failed", "open aborted"));
+        rejectAborted(new DeviceProtocolError("failed", "open aborted"));
         // Do not leave a request holding the computer for hours: withdraw it (best effort).
         if (sid !== undefined && waiting) void (transport.withdrawSession ?? transport.stopSession).call(transport, sid).catch(() => undefined);
       };
       signal.addEventListener("abort", onAbort, { once: true });
     }
     try {
-      return await openInner(o);
+      const inner = openInner(o);
+      inner.catch(() => undefined); // when the abort wins the race, a later failure of the POST is not unhandled
+      return signal ? await Promise.race([inner, aborted]) : await inner;
     } finally {
       if (signal && onAbort) signal.removeEventListener("abort", onAbort);
     }
   }
 
-  async function openInner(o: { wait?: boolean; intent?: string }): Promise<DeviceSessionMeta> {
+  async function openInner(o: { wait?: boolean; intent?: string; signal?: AbortSignal }): Promise<DeviceSessionMeta> {
     const wait = o.wait !== false;
     if (meta && (meta.status === "active" || meta.status === "paused")) return meta;
     // A previous session's leftovers must never leak into this one.
@@ -468,10 +504,20 @@ export function createDeviceClient(
     try {
       created = await transport.openSession(params.deviceId, o.intent !== undefined ? { intent: o.intent } : undefined);
     } catch (e) {
-      if (e instanceof DeviceSessionLiveError) return reattach(e.sessionId, waiter);
+      if (e instanceof DeviceSessionLiveError && !o.signal?.aborted) return reattach(e.sessionId, waiter);
       clearOpenTimer();
       openResolve = openReject = null;
       throw e;
+    }
+    if (o.signal?.aborted) {
+      // Aborted while the POST was in flight: the request now exists on the server (it may sit for 8 hours on a
+      // sleeping computer). Withdraw it, or end it if it already went live, and leave nothing behind.
+      const live = created.status === "active" || created.status === "paused";
+      void (live ? transport.stopSession : (transport.withdrawSession ?? transport.stopSession)).call(transport, created.id).catch(() => undefined);
+      clearOpenTimer();
+      openResolve = openReject = null;
+      meta = null;
+      throw new DeviceProtocolError("failed", "open aborted");
     }
     seq = 0;
     const early = earlyEnded.get(String(created.id));
@@ -566,7 +612,7 @@ export function createDeviceClient(
       if (!p || aborted) return;
       aborted = true;
       // Ask the device to stop, then give it a moment to say how far it got.
-      void transport.postCommand(cancelBody(), r).catch(() => undefined);
+      void postLane(cancelBody(), r, true).catch(() => undefined);
       clearTimeout(p.timer);
       p.timer = setTimeout(() => {
         pending.delete(id);
@@ -579,7 +625,7 @@ export function createDeviceClient(
     }
     try {
       try {
-        await transport.postCommand(plaintext, r);
+        await postLane(plaintext, r);
       } catch (e) {
         const p = pending.get(id);
         if (p) {
@@ -594,7 +640,7 @@ export function createDeviceClient(
         if (e instanceof CommandTimeout) {
           // Out-of-band and best effort: consumes no seq. A command that already
           // started keeps its stored result on the device for a retry by id.
-          await transport.postCommand(cancelBody(), r).catch(() => undefined);
+          await postLane(cancelBody(), r, true).catch(() => undefined);
           throw new DeviceProtocolError("failed", e.message);
         }
         if (e instanceof CommandAborted) throw new DeviceProtocolError("failed", e.message);
@@ -882,9 +928,14 @@ export function createDeviceClient(
       const r = readers;
       if (!r) throw new DeviceProtocolError("failed", "session active but lane readers unknown");
       // Out of band like cancel: no seq is used, and nothing waits for an answer.
-      await transport.postCommand(
-        encodeDeviceMessage({ v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: Math.max(seq, 1), op: "amend", session: m.id, ...(taskId !== undefined ? { re: taskId } : {}) }, args),
-        r
+      // `exp` as on every command: the device refuses a stale amend and applies a replayed one once.
+      await postLane(
+        encodeDeviceMessage(
+          { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: Math.max(seq, 1), op: "amend", session: m.id, exp: Date.now() + clockOffsetMs + commandTtlMs, ...(taskId !== undefined ? { re: taskId } : {}) },
+          args
+        ),
+        r,
+        true
       );
     },
     async stop() {

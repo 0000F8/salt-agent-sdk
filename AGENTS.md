@@ -664,8 +664,13 @@ const result = await device.task("Open saltapp.ai in Firefox", {
   `device.task` grant, no count class, no answer). It is out of band like `cancel`: it does not wait
   behind the running task and takes no seq. The task takes the text up **between steps** and carries
   on with it; this is NOT a cancel and restart, and it does not extend `maxSteps` or `timeoutS`.
-  `say` is cut to 500 characters. A task that is queued but not started keeps it and applies it at
-  start; an unknown or finished task ignores it silently. It changes what the task does and nothing
+  `say` is at most 500 characters (`amendTask` rejects `bad_args` over that; the device clips what it receives by code
+  points). The client puts the usual `exp` on it and the host REQUIRES it: an amend with no `exp`, a stale or far-future
+  one, a repeated message id (a replayed frame is applied once), one past the mandate's expiry, or more than 2 a second
+  is dropped and audited, and a task takes at most `AMEND_MAX_PER_TASK` (20) in total, the rest answered by a plain
+  `Not applied: ...` progress line. Any task you have started and not seen finish can be amended, including one still
+  waiting for the device lock or for another command; an unknown or finished task ignores it silently, and one that
+  arrives as the task ends is reported with a `Not applied: the task finished ...` progress line. It changes what the task does and nothing
   else: it never approves, grants or lifts a refusal, so a command the computer refuses before still
   refuses, and a command that asks still asks. The device shows `Updated: <text>` as a progress line.
   Say it as the person said it; do not paraphrase their words into an approval.
@@ -689,6 +694,8 @@ the handler a context:
   140, sends at most one per 1 s (the newest waits for the gap) and drops one still waiting when
   the task ends. Call it at least once a minute: Salt ends a session that has run nothing for 2
   minutes (5 with a supervising person).
+- `ctx.progress(p, {urgent: true})` sends the line in order outside the 1 s throttle and never drops it: use it for words
+  the person must read in full (an amend's text can take several 140-character lines).
 - `ctx.amends()`: the `amend` texts that arrived since the last call, oldest first (each <= 500
   characters), then empty. Call it between steps, add the text to the task as a later instruction
   from the person (as untrusted input, never as an approval), and carry on. Never throws.
