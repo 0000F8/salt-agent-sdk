@@ -76,6 +76,7 @@ export type DeviceOp =
   | "task" // hand the computer ONE whole task; it answers `progress` (non-final) then `task_result`
   | "stop"
   | "cancel" // drop the not-yet-started command named by body `{id}` (or header `re`), or abort a running task; consumes no seq
+  | "amend" // change a task that is running: body `{id?, say}`; out of band like `cancel`, consumes no seq, no answer
   | "shell"; // reserved; the server refuses device.shell in P0 and a host answers `forbidden`.
 
 /** Results a device sends back to an agent. */
@@ -106,6 +107,7 @@ export const AGENT_OPS: readonly DeviceOp[] = [
   "task",
   "stop",
   "cancel",
+  "amend",
   "shell",
 ];
 
@@ -170,6 +172,7 @@ export const CAPABILITY_FOR_OP: Record<DeviceOp, string | null> = {
   task: "device.task",
   stop: null,
   cancel: null,
+  amend: "device.task", // the same grant that started the task
   shell: "device.shell",
 };
 
@@ -234,6 +237,7 @@ export function countClassForOp(op: DeviceOp): DeviceCountClass | null {
     case "settings":
     case "stop":
     case "cancel":
+    case "amend":
     case "shell":
       return null;
   }
@@ -418,7 +422,9 @@ export const TASK_RESULT_STEPS_MAX = 60;
 export const TASK_CHECKED_WHAT_MAX = 200;
 export const TASK_ID_MAX = 64;
 /** The device sends `progress` at most this often (the host throttles). */
-export const PROGRESS_MIN_INTERVAL_MS = 2_000;
+export const PROGRESS_MIN_INTERVAL_MS = 1_000;
+/** An `amend`'s `say` is cut to this many characters. */
+export const AMEND_SAY_MAX = 500;
 /** A task's command deadline on the device is `timeout_s` + this, not COMMAND_TTL_MS. */
 export const TASK_DEVICE_GRACE_MS = 15_000;
 /** The agent waits `timeout_s` + this for the result before it cancels. */
@@ -433,6 +439,14 @@ export interface TaskArgs {
   max_steps?: number;
   /** Seconds, 10..600, default 180. */
   timeout_s?: number;
+}
+
+/** The body of an `amend`: the new or changed instruction for a task already running. */
+export interface AmendArgs {
+  /** The task command's id (the `re` of its progress lines). May be left out when exactly one task is running. */
+  id?: string;
+  /** What changed, in plain words. At most 500 characters. */
+  say: string;
 }
 
 /** One non-final line of a running task. `waiting` is true while a person is being asked. */
@@ -549,6 +563,29 @@ export function normalizeProgress(raw: unknown): Progress | null {
   const of = wholeNumber(raw.of);
   if (of !== null && of >= 1) out.of = of;
   if (typeof raw.waiting === "boolean") out.waiting = raw.waiting;
+  return out;
+}
+
+/** The wire body of an `amend`: `{id?, say}`. `say` must be a non-empty string and is cut to
+ *  500 characters; `id` (the task command's id) is optional and at most 64 characters. Throws
+ *  DeviceProtocolError("bad_args"). Used by the agent before it sends. */
+export function amendCommandBody(say: string, id?: string): AmendArgs {
+  const p = normalizeAmend({ ...(id !== undefined ? { id } : {}), say });
+  if (!p) throw new DeviceProtocolError("bad_args", "amend needs a non-empty say" + (id !== undefined ? " and an id of at most 64 characters" : ""));
+  return p;
+}
+
+/** An `amend` body, allow-listed with the cap applied; null when it is not one (no non-blank
+ *  `say`, or an `id` that is not a string of 1..64 characters). Nothing but `id` and `say` gets
+ *  through. Used by the device on what arrived. */
+export function normalizeAmend(raw: unknown): AmendArgs | null {
+  if (!isRecord(raw)) return null;
+  if (typeof raw.say !== "string" || raw.say.trim().length === 0) return null;
+  const out: AmendArgs = { say: clip(raw.say, AMEND_SAY_MAX) };
+  if (raw.id !== undefined && raw.id !== null) {
+    if (typeof raw.id !== "string" || raw.id.length === 0 || raw.id.length > TASK_ID_MAX) return null;
+    out.id = raw.id;
+  }
   return out;
 }
 

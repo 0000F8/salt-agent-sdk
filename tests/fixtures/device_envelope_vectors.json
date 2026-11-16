@@ -1984,6 +1984,7 @@
       "task",
       "stop",
       "cancel",
+      "amend",
       "shell"
     ],
     "DEVICE_RESULT_OPS": [
@@ -2041,6 +2042,7 @@
       "task": "device.task",
       "stop": null,
       "cancel": null,
+      "amend": "device.task",
       "shell": "device.shell"
     },
     "TASK_GOAL_MAX": 2000,
@@ -2057,7 +2059,7 @@
     "TASK_RESULT_STEPS_MAX": 60,
     "TASK_CHECKED_WHAT_MAX": 200,
     "TASK_ID_MAX": 64,
-    "PROGRESS_MIN_INTERVAL_MS": 2000,
+    "PROGRESS_MIN_INTERVAL_MS": 1000,
     "TASK_DEVICE_GRACE_MS": 15000,
     "TASK_CLIENT_GRACE_MS": 30000,
     "TASK_STATUSES": [

@@ -28,6 +28,7 @@ import {
   normalizeStill,
   normalizeTaskResult,
   taskCommandBody,
+  amendCommandBody,
   TASK_CLIENT_GRACE_MS,
   TASK_TIMEOUT_S_DEFAULT,
   type ClickArgs,
@@ -134,6 +135,10 @@ export interface DeviceClientTransport {
   fetchSession?(sessionId: SaltId): Promise<DeviceSessionMeta>;
   /** POST /api/v1/device_sessions/:sid/stop (subtract-only, idempotent). */
   stopSession(sessionId: SaltId): Promise<void>;
+  /** DELETE /api/v1/device_sessions/:sid: withdraw a request that is still waiting (`queued` or
+   *  `requested`, before the person answered). Best effort; a transport without it falls back to
+   *  `stopSession`. */
+  withdrawSession?(sessionId: SaltId): Promise<void>;
   /** Encrypt `plaintext` for the current lane readers and POST it as one lane
    *  message. The transport owns the crypto and the readers; this module only
    *  decides the plaintext. */
@@ -175,6 +180,8 @@ type Pending = {
 
 /** What `task()` can ask of one request: its own timeout, a progress listener, an abort signal. */
 type RequestOptions = {
+  /** Called with the command id before the command is sent (a task's id, for `amendTask`). */
+  onStart?: (id: string) => void;
   timeoutMs?: number;
   onProgress?: (p: Progress) => void;
   signal?: AbortSignal;
@@ -230,8 +237,17 @@ export interface DeviceClient {
    *  `stopped` result and resolves with it, else rejects. */
   task(
     goal: string,
-    opts?: { doneWhen?: string; maxSteps?: number; timeoutS?: number; onProgress?: (p: Progress) => void; signal?: AbortSignal }
+    opts?: { doneWhen?: string; maxSteps?: number; timeoutS?: number; onProgress?: (p: Progress) => void; signal?: AbortSignal; onStart?: (taskId: string) => void }
   ): Promise<TaskResult>;
+  /** Change a task that is already running (op `amend`, same grant as `task`): `say` is the new or
+   *  changed instruction in plain words (cut to 500 characters). The task takes it up between steps
+   *  and carries on with it; this is not a cancel and restart. `taskId` is the id `task()` gave to
+   *  its `onStart`; leave it `undefined` when exactly one task is running. Out of band: it takes no
+   *  turn behind the running task and the device does not answer, so a task that is unknown or
+   *  already over ignores it silently. It changes what the task does and nothing else: it never
+   *  approves, grants or lifts a refusal. Rejects with `bad_args` for an empty `say`, and when
+   *  there is no live session. Resolves once it is posted. */
+  amendTask(taskId: string | undefined, say: string): Promise<void>;
   /** End the session (subtract-only). Safe to call more than once. */
   stop(): Promise<void>;
   /** The live session metadata, or null before open() / after it ended. */
@@ -421,7 +437,7 @@ export function createDeviceClient(
         openResolve = openReject = null;
         rej?.(new DeviceProtocolError("failed", "open aborted"));
         // Do not leave a request holding the computer for hours: withdraw it (best effort).
-        if (sid !== undefined && waiting) void transport.stopSession(sid).catch(() => undefined);
+        if (sid !== undefined && waiting) void (transport.withdrawSession ?? transport.stopSession).call(transport, sid).catch(() => undefined);
       };
       signal.addEventListener("abort", onAbort, { once: true });
     }
@@ -593,6 +609,7 @@ export function createDeviceClient(
     if (ropts?.signal?.aborted) throw new DeviceProtocolError("failed", "task aborted");
     const { m, r } = requireActive();
     const id = deviceMessageId(); // reused by every resend of this command
+    ropts?.onStart?.(id);
     seq += 1;
     let resynced = false;
     let refreshed = false;
@@ -853,8 +870,22 @@ export function createDeviceClient(
         timeoutMs: timeoutS * 1000 + TASK_CLIENT_GRACE_MS,
         onProgress: opts.onProgress,
         signal: opts.signal,
+        onStart: opts.onStart,
       });
       return normalizeTaskResult(body);
+    },
+    async amendTask(taskId, say) {
+      const args = amendCommandBody(say, taskId);
+      // A paused session still takes it (the host reads it before the pause gate, as it reads cancel).
+      const m = meta;
+      if (!m || (m.status !== "active" && m.status !== "paused")) throw new DeviceProtocolError("failed", "no active device session");
+      const r = readers;
+      if (!r) throw new DeviceProtocolError("failed", "session active but lane readers unknown");
+      // Out of band like cancel: no seq is used, and nothing waits for an answer.
+      await transport.postCommand(
+        encodeDeviceMessage({ v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: Math.max(seq, 1), op: "amend", session: m.id, ...(taskId !== undefined ? { re: taskId } : {}) }, args),
+        r
+      );
     },
     async stop() {
       const id = meta?.id;

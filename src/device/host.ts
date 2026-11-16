@@ -47,6 +47,7 @@ import {
   decodePoint,
   isPointMessage,
   normalizePointed,
+  normalizeAmend,
   normalizeProgress,
   normalizeStill,
   normalizeTaskResult,
@@ -154,6 +155,10 @@ export interface DeviceTaskContext {
    *  out when the gap is over). Never throws. Call it at least once a minute on a long task:
    *  Salt ends a session that has run nothing for 2 minutes (5 when a person supervises). */
   progress(p: Progress): void;
+  /** Take the instructions an agent sent with `amend` since the last call, oldest first, each at most
+   *  500 characters; the list is then empty. Call it between steps. An amend that arrived while the
+   *  task was still queued is in the first call. Never throws. */
+  amends(): string[];
   /** Count one step toward the grant's budget and the metadata counts, and keep the session
    *  alive. Throws `DeviceBudgetSpentError` when `max_actions` is already spent: let it bubble. */
   spend(cls: TaskSpendClass): void;
@@ -476,6 +481,11 @@ export function createDeviceHost(
   let countsFlushQueued = false;
   // Tasks being run right now, by command id: `cancel` and the end of the session abort them.
   const runningTasks = new Map<string, AbortController>();
+  // `amend` text by task command id, for a task running or queued behind another command. A task
+  // drains its own with ctx.amends(); bounded so a flood cannot grow it.
+  const amendInbox = new Map<string, string[]>();
+  const AMEND_INBOX_CAP = 20;
+  const AMEND_TASKS_CAP = 64;
   // Callers of ctx.waitWhilePaused(), released by resume().
   const resumeWaiters = new Set<() => void>();
 
@@ -632,6 +642,32 @@ export function createDeviceHost(
       return true;
     }
 
+    if (header.op === "amend" && header.v === DEVICE_PROTOCOL_VERSION) {
+      // Out of band like `cancel`: never queued, no seq, never answered. The target is body `{id}`,
+      // else the header's `re`, else the only task running. A task that is running or still queued
+      // keeps the text; an unknown or finished one is dropped as `cancel` drops it. It changes what
+      // the task does and nothing else: it grants, approves and lifts nothing.
+      const said = normalizeAmend(body);
+      const id =
+        said?.id ??
+        (typeof header.re === "string" ? header.re : undefined) ??
+        (runningTasks.size === 1 ? runningTasks.keys().next().value : undefined);
+      const known = typeof id === "string" && (runningTasks.has(id) || queuedIds.has(id));
+      if (!said || !known || !snapshot.caps["device.task"]) {
+        audit({ commandId: typeof id === "string" ? id : "-", op: "amend", decision: "refused", reason: !said ? "bad amend" : !known ? "no such task" : "no task grant" });
+        return true;
+      }
+      const key = id as string;
+      const list = amendInbox.get(key) ?? [];
+      list.push(said.say);
+      while (list.length > AMEND_INBOX_CAP) list.shift();
+      amendInbox.delete(key);
+      amendInbox.set(key, list);
+      while (amendInbox.size > AMEND_TASKS_CAP) amendInbox.delete(amendInbox.keys().next().value as string);
+      audit({ commandId: key, op: "amend", decision: "ran" });
+      return true;
+    }
+
     // `stop` waits its turn like any command, but a running task must not make it wait up to
     // `timeout_s`: tell the task now, so the stop is reached as soon as it unwinds.
     if (header.op === "stop" && header.v === DEVICE_PROTOCOL_VERSION) {
@@ -651,6 +687,7 @@ export function createDeviceHost(
     const left = (queuedIds.get(header.id) ?? 1) - 1;
     if (left > 0) queuedIds.set(header.id, left);
     else queuedIds.delete(header.id);
+    if (header.op !== "task") amendInbox.delete(header.id);
     if (ended) return true;
 
     if (header.v !== DEVICE_PROTOCOL_VERSION) {
@@ -667,6 +704,7 @@ export function createDeviceHost(
 
     if (cancelledIds.delete(header.id)) {
       audit({ commandId: header.id, op: header.op, decision: "refused", reason: "cancelled before start" });
+      amendInbox.delete(header.id);
       return true;
     }
 
@@ -1020,6 +1058,12 @@ export function createDeviceHost(
         touchLease(header);
         bump(counted);
       },
+      amends() {
+        const list = amendInbox.get(header.id);
+        if (!list || list.length === 0) return [];
+        amendInbox.delete(header.id);
+        return list;
+      },
       paused: () => pausedReason,
       waitWhilePaused() {
         if (pausedReason === null) return Promise.resolve("running");
@@ -1067,6 +1111,7 @@ export function createDeviceHost(
     if (progressTimer) clearTimeout(progressTimer);
     pendingProgress = null;
     runningTasks.delete(header.id);
+    amendInbox.delete(header.id);
     if (outcome.kind === "hard") ac.abort("timeout"); // a handler that ignored the signal is let go
     await postChain; // every progress line goes out before the final result
 
@@ -1121,6 +1166,7 @@ export function createDeviceHost(
   async function stop(reason = "stopped_by_device"): Promise<void> {
     if (ended) return;
     ended = true;
+    amendInbox.clear();
     if (beatTimer) clearInterval(beatTimer);
     if (durationTimer) clearTimeout(durationTimer);
     beatTimer = durationTimer = null;
@@ -1409,5 +1455,6 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "task",
   "stop",
   "cancel",
+  "amend",
   "shell",
 ]);

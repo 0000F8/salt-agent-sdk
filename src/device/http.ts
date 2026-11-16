@@ -90,6 +90,10 @@ export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientT
     async stopSession(sessionId: SaltId): Promise<void> {
       await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`);
     },
+    async withdrawSession(sessionId: SaltId): Promise<void> {
+      // A request still waiting is withdrawn with DELETE; `stop` is for a session that is working.
+      await call(opts, "DELETE", `/api/v1/device_sessions/${sessionId}`);
+    },
     async postCommand(plaintext: string, readers: LaneReaders): Promise<void> {
       const ciphertext = await encryptFor(plaintext, await keysFor(opts, readers));
       const { status } = await call(opts, "POST", `/api/v1/messages`, {

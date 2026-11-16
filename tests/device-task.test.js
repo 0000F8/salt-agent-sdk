@@ -112,7 +112,7 @@ test("protocol: task is a mutating op under device.task, counted as `task`; prog
   for (const c of ["task", "command", "look"]) assert.ok(sdk.DEVICE_COUNT_CLASSES.includes(c));
   assert.ok(sdk.DEVICE_RESULT_OPS.includes("progress"));
   assert.ok(sdk.DEVICE_RESULT_OPS.includes("task_result"));
-  assert.equal(sdk.PROGRESS_MIN_INTERVAL_MS, 2000);
+  assert.equal(sdk.PROGRESS_MIN_INTERVAL_MS, 1000);
   assert.equal(sdk.TASK_DEVICE_GRACE_MS, 15000);
   assert.equal(sdk.TASK_CLIENT_GRACE_MS, 30000);
 });
@@ -279,7 +279,7 @@ test("host: progress is throttled (newest wins after the gap), allow-listed, and
   assert.ok(t.stamps[1] - t.stamps[0] >= 55, `progress lines only ${t.stamps[1] - t.stamps[0]} ms apart`);
 });
 
-test("host: with the default 2 s gap a burst sends the first line only, and a line still waiting when the task ends is dropped", async () => {
+test("host: with the default 1 s gap a burst sends the first line only, and a line still waiting when the task ends is dropped", async () => {
   const t = transport();
   const dh = mkHost(
     baseHandlers(async (_a, ctx) => {

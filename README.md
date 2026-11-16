@@ -1166,7 +1166,8 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
   delivery; until then `open()` waits up to `queuedTimeoutMs` (default 8 hours; the same wait
   covers `queued` behind another agent). `onState` shows `{state: "requested", delivered: false}`,
   then `{state: "delivered"}`. Pass `open({ signal })` (an `AbortSignal`) to stop waiting: it
-  rejects with "open aborted" and withdraws the request (best effort, `stopSession`).
+  rejects with "open aborted" and withdraws the request (best effort, `DELETE /device_sessions/:id`
+  through the transport's `withdrawSession`; a transport without it falls back to `stopSession`).
 - **Lane readers.** salt-api names a lane's readers by account id (`chat.readers = {ids, open:false}`);
   `httpDeviceAgentTransport` reads each one's key from the lane chat's members at every send and
   refuses to send if a reader has no key. A session that carries armored keys still works.
@@ -1182,7 +1183,10 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
 - **Whole tasks.** With a `device.task` grant, `await device.task("Open saltapp.ai in
   Firefox", { doneWhen, maxSteps, timeoutS, onProgress, signal })` hands the computer ONE job
   and resolves a checked `TaskResult` (words and numbers only; command output and screenshots
-  never leave the computer). The host side is an optional `handlers.task(args, ctx)`. See
+  never leave the computer). `device.amendTask(id, say)` (`id` from `task`'s `onStart`) changes a
+  task that is already running: the new instruction reaches it between steps and it carries on
+  (op `amend`, out of band like `cancel`, `say` <= 500 characters). The host side is an optional
+  `handlers.task(args, ctx)`, which drains `ctx.amends()` between steps. See
   "Hand a whole task to a computer" in `AGENTS.md`.
 - **Settings.** `await device.settings()` reads the computer's settings and state
   (`stay_awake`, `commands_enabled`, `on_ac`, `battery_pct`, `lid_closed`, `display`,

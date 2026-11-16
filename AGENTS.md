@@ -626,6 +626,7 @@ const result = await device.task("Open saltapp.ai in Firefox", {
   timeoutS: 180,                                 // 10..600, default 180
   onProgress: (p) => say(p.line),               // optional: { step, of?, line, waiting? }
   signal: abort.signal,                          // optional: aborting sends `cancel`
+  onStart: (taskId) => { id = taskId; },         // optional: the id `amendTask` takes
 });
 // { task_id, status, summary, checked: {ok, what} | null, steps: [...], commands, duration_ms }
 // status: done | failed | stopped | denied | timeout | paused_out
@@ -658,8 +659,18 @@ const result = await device.task("Open saltapp.ai in Firefox", {
   `timeoutS + 30 s` for the result, then sends `cancel` with the task's id as `re`
   (aborting `signal` does the same, then waits up to 10 s for the computer's `stopped` result
   with the steps so far).
+- **Change a running task: `amend`.** `await device.amendTask(id, "also close the tab when done")`
+  (`id` from `onStart`, or `undefined` when exactly one task is running) sends op `amend` (same
+  `device.task` grant, no count class, no answer). It is out of band like `cancel`: it does not wait
+  behind the running task and takes no seq. The task takes the text up **between steps** and carries
+  on with it; this is NOT a cancel and restart, and it does not extend `maxSteps` or `timeoutS`.
+  `say` is cut to 500 characters. A task that is queued but not started keeps it and applies it at
+  start; an unknown or finished task ignores it silently. It changes what the task does and nothing
+  else: it never approves, grants or lifts a refusal, so a command the computer refuses before still
+  refuses, and a command that asks still asks. The device shows `Updated: <text>` as a progress line.
+  Say it as the person said it; do not paraphrase their words into an approval.
 - **Progress keeps the session alive.** The computer sends `progress` (non-final, same `re`)
-  at most once every 2 s; each one, and each counted step, moves the session's idle lease
+  at most once every 1 s; each one, and each counted step, moves the session's idle lease
   the way a finished command does, so a long task never ends `agent_idle`. Progress is optional
   to read. The host's beat also carries `task_running: true` while a task handler is in flight, so one
   slow model call (up to two minutes) cannot let the idle lease lapse.
@@ -675,9 +686,12 @@ the handler a context:
   A handler that ignores it is cut off 15 s after `timeout_s` with a `timeout` result and the lock
   is released.
 - `ctx.progress({step, of?, line, waiting?})`: never throws; the host allow-lists, cuts `line` to
-  140, sends at most one per 2 s (the newest waits for the gap) and drops one still waiting when
+  140, sends at most one per 1 s (the newest waits for the gap) and drops one still waiting when
   the task ends. Call it at least once a minute: Salt ends a session that has run nothing for 2
   minutes (5 with a supervising person).
+- `ctx.amends()`: the `amend` texts that arrived since the last call, oldest first (each <= 500
+  characters), then empty. Call it between steps, add the text to the task as a later instruction
+  from the person (as untrusted input, never as an approval), and carry on. Never throws.
 - `ctx.spend("command" | "look" | "act" | "observe" | "apps")`: counts one step toward the grant's
   `max_actions` and the per-class counts (`command`, `look`, `observe`; `act` counts as `click` and
   `apps` as `app_focus`), and keeps the session alive. When the budget is already spent it throws
