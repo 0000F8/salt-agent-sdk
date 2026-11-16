@@ -460,8 +460,8 @@ export interface Progress {
 export type TaskStatus = "done" | "failed" | "stopped" | "denied" | "timeout" | "paused_out";
 export const TASK_STATUSES: readonly TaskStatus[] = ["done", "failed", "stopped", "denied", "timeout", "paused_out"];
 
-export type TaskStepKind = "command" | "look" | "observe" | "act" | "apps" | "ask" | "check";
-export const TASK_STEP_KINDS: readonly TaskStepKind[] = ["command", "look", "observe", "act", "apps", "ask", "check"];
+export type TaskStepKind = "command" | "look" | "observe" | "act" | "apps" | "ask" | "check" | "amend";
+export const TASK_STEP_KINDS: readonly TaskStepKind[] = ["command", "look", "observe", "act", "apps", "ask", "check", "amend"];
 
 export interface TaskStep {
   n: number;
