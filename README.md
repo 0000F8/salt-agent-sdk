@@ -1143,7 +1143,7 @@ agent at a time. `createDeviceClient` (agent side) and `createDeviceHost`
 
 ```ts
 const device = createDeviceClient(httpDeviceAgentTransport({ host, apiKey }), { deviceId });
-device.onState((s) => console.log(s)); // queued(position) | requested | active | paused(reason) | resumed | ended(reason)
+device.onState((s) => console.log(s)); // queued(position) | requested | delivered | active | paused(reason) | resumed | ended(reason)
 await device.open();                    // waits through queued/requested on deliveries, never polls
 await device.open({ wait: false });     // or: return at once with the queued state
 await device.open({ intent: "Download the three invoices and save them to Documents" }); // see Intent
@@ -1160,6 +1160,16 @@ await device.click({ x: 10, y: 20 });   // one command at a time, however many c
   it resolves when a `device_session` delivery (`promoted`, then approval) makes the
   session `active`. Feed deliveries in with `device.handleDelivery("device_session", body)`
   (from `onDeviceDelivery`) and lane results with `device.handleLaneMessage(plaintext, senderId)` (from `onMessage`: `ctx.text`, `ctx.senderId`); only the device's own account is accepted, so nobody else posting in the lane can forge a result, a still or a `pointed`.
+- **Asleep or offline computer.** The server keeps an undelivered request (`status: "requested"`,
+  `delivered_at: null`) for up to 8 hours (`UNDELIVERED_TTL`) and sends `device_session_received`
+  when the computer has it. `approvalTimeoutMs` (default 150 s) therefore starts only at that
+  delivery; until then `open()` waits up to `queuedTimeoutMs` (default 8 hours; the same wait
+  covers `queued` behind another agent). `onState` shows `{state: "requested", delivered: false}`,
+  then `{state: "delivered"}`. Pass `open({ signal })` (an `AbortSignal`) to stop waiting: it
+  rejects with "open aborted" and withdraws the request (best effort, `stopSession`).
+- **Lane readers.** salt-api names a lane's readers by account id (`chat.readers = {ids, open:false}`);
+  `httpDeviceAgentTransport` reads each one's key from the lane chat's members at every send and
+  refuses to send if a reader has no key. A session that carries armored keys still works.
 - **Reattach.** If this agent already has a live session (409 `session_live`) `open()`
   calls `POST /device_sessions/:id/reattach` and continues at `last_seq + 1`.
 - **One command in flight.** Commands carry `id`, `seq` and `exp` (epoch ms, now + 30 s).

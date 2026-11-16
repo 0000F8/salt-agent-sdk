@@ -91,7 +91,7 @@ export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientT
       await call(opts, "POST", `/api/v1/device_sessions/${sessionId}/stop`);
     },
     async postCommand(plaintext: string, readers: LaneReaders): Promise<void> {
-      const ciphertext = await encryptFor(plaintext, readers.publicKeys);
+      const ciphertext = await encryptFor(plaintext, await keysFor(opts, readers));
       const { status } = await call(opts, "POST", `/api/v1/messages`, {
         chat_id: readers.chatId,
         message: ciphertext,
@@ -100,6 +100,29 @@ export function httpDeviceAgentTransport(opts: DeviceHttpOptions): DeviceClientT
       if (status >= 400) throw new Error(`postCommand failed: ${status}`);
     },
   };
+}
+
+/** The armored keys to seal a lane message for. salt-api names readers by account id
+ *  (`chat.readers = {ids, open:false}`): their keys are read fresh from the lane chat's members
+ *  (`GET /chats/:id` -> `session.users[].public_key`) at every send, never cached, and a reader
+ *  with no key stops the send. Armored keys carried by the session are used as they are. */
+async function keysFor(opts: DeviceHttpOptions, readers: LaneReaders): Promise<string[]> {
+  if (readers.publicKeys.length > 0 || !readers.readerIds?.length) return readers.publicKeys;
+  const { status, data } = await call<{ session?: { users?: Array<{ id?: unknown; public_key?: unknown }> } }>(
+    opts,
+    "GET",
+    `/api/v1/chats/${readers.chatId}?_=${Date.now()}`
+  );
+  if (status >= 400) throw new Error(`lane readers lookup failed: ${status}`);
+  const byId = new Map<string, string>();
+  for (const u of data?.session?.users ?? []) {
+    if (typeof u.public_key === "string" && u.public_key) byId.set(String(u.id).toLowerCase(), u.public_key);
+  }
+  return readers.readerIds.map((id) => {
+    const key = byId.get(String(id).toLowerCase());
+    if (!key) throw new DeviceProtocolError("failed", `lane reader ${id} has no public key; not sending`);
+    return key;
+  });
 }
 
 /** Device-side transport. `apiKey` is the DEVICE's own key. */

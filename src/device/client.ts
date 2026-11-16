@@ -57,6 +57,10 @@ import { sameId, type SaltId } from "../ids.js";
 export interface LaneReaders {
   chatId: SaltId;
   publicKeys: string[];
+  /** Account ids of the readers, as salt-api names them (`chat.readers = {ids, open:false}`).
+   *  Set when the session carried ids and no keys: the transport fetches each key from the
+   *  lane chat's members at send time. */
+  readerIds?: string[];
 }
 
 export type DeviceSessionStatus = "queued" | "requested" | "active" | "paused" | "ended";
@@ -71,7 +75,14 @@ export interface DeviceSessionMeta {
   position?: number;
   /** `paused` only. */
   pause_reason?: DevicePauseReason;
-  chat?: { id: SaltId; readers: string[] };
+  /** The lane chat. salt-api sends `readers: {ids: [account ids], open: false}` (or `{open: true}`);
+   *  an array of armored public keys is also accepted. */
+  chat?: { id: SaltId; readers: string[] | { ids?: string[]; open?: boolean } };
+  /** When the device said it RECEIVED the request. `null` = nobody at the computer has it yet
+   *  (asleep or offline: the server keeps the request up to 8 hours); absent = an older server. */
+  delivered_at?: string | null;
+  /** When the server gives up on the request as it stands (ISO time). */
+  waits_until?: string | null;
   /** What the agent said it is doing when it opened (its own words, untrusted; null/absent when it gave none). */
   intent?: string | null;
 }
@@ -102,7 +113,8 @@ export class DevicePausedError extends DeviceProtocolError {
 /** What onState emits. */
 export type DeviceState =
   | { state: "queued"; position: number }
-  | { state: "requested" }
+  | { state: "requested"; delivered?: false }
+  | { state: "delivered" }
   | { state: "active" }
   | { state: "paused"; reason: DevicePauseReason }
   | { state: "resumed" }
@@ -130,10 +142,16 @@ export interface DeviceClientTransport {
 
 export interface DeviceClientOptions {
   /** How long a session may sit in `requested` (waiting for the device's local
-   *  approval) before open() gives up. Does not run while `queued`. The server
-   *  ends an unanswered request after 2 minutes with `request_expired`;
+   *  approval) before open() gives up. Starts only once the device has the request
+   *  (`delivered_at` set / `device_session_received`); it does not run while the
+   *  request is `queued` or still undelivered (see `queuedTimeoutMs`). The server
+   *  ends an unanswered, delivered request after 2 minutes with `request_expired`;
    *  default here is a touch longer so the server's own end reaches us first. */
   approvalTimeoutMs?: number;
+  /** How long open() waits while the request is `queued` behind another agent or
+   *  undelivered (the computer asleep or offline), before giving up. Default 8 hours,
+   *  the server's `UNDELIVERED_TTL`; the server expires it first. */
+  queuedTimeoutMs?: number;
   /** Per-command timeout waiting for a result. Default 30s. On timeout the
    *  client sends `cancel {id}`. */
   commandTimeoutMs?: number;
@@ -180,7 +198,7 @@ export interface DeviceClient {
    *  (e.g. `queued` with `position`); watch onState for the rest. If this
    *  agent already has a live session on the device (409 session_live) it
    *  reattaches and continues at last_seq + 1. */
-  open(opts?: { wait?: boolean; intent?: string }): Promise<DeviceSessionMeta>;
+  open(opts?: { wait?: boolean; intent?: string; signal?: AbortSignal }): Promise<DeviceSessionMeta>;
   observe(args?: ObserveArgs): Promise<ObservationResult>;
   click(args: ClickArgs): Promise<void>;
   type(text: string): Promise<void>;
@@ -247,6 +265,7 @@ export function createDeviceClient(
   options: DeviceClientOptions = {}
 ): DeviceClient {
   const approvalTimeoutMs = options.approvalTimeoutMs ?? 150_000;
+  const queuedTimeoutMs = options.queuedTimeoutMs ?? 8 * 60 * 60 * 1000;
   const commandTimeoutMs = options.commandTimeoutMs ?? 30_000;
   const commandTtlMs = options.commandTtlMs ?? COMMAND_TTL_MS;
 
@@ -290,8 +309,11 @@ export function createDeviceClient(
   }
 
   function readersFrom(m: DeviceSessionMeta): LaneReaders | null {
-    if (!m.chat || !m.chat.readers?.length) return null;
-    return { chatId: m.chat.id, publicKeys: m.chat.readers };
+    const raw = m.chat?.readers;
+    if (!m.chat || !raw) return null;
+    if (Array.isArray(raw)) return raw.length ? { chatId: m.chat.id, publicKeys: raw } : null;
+    const ids = Array.isArray(raw.ids) ? raw.ids.map(String) : [];
+    return ids.length ? { chatId: m.chat.id, publicKeys: [], readerIds: ids } : null;
   }
 
   function failAll(err: Error): void {
@@ -307,17 +329,40 @@ export function createDeviceClient(
     openTimer = null;
   }
 
-  /** The approval clock runs only while `requested`, never while `queued`. */
+  /** The approval clock runs only once the device has the request, never while it is
+   *  `queued` or undelivered. */
   function startApprovalTimer(): void {
-    if (!openReject || openTimer) return;
+    startOpenTimer(approvalTimeoutMs, "device did not approve in time");
+  }
+
+  /** While queued or undelivered open() waits on its own, much longer clock. */
+  function startWaitTimer(): void {
+    startOpenTimer(queuedTimeoutMs, "computer did not pick up the request in time");
+  }
+
+  function startOpenTimer(ms: number, message: string): void {
+    if (!openReject) return;
+    clearOpenTimer();
     openTimer = setTimeout(() => {
       openTimer = null;
       const rej = openReject;
       openResolve = openReject = null;
-      rej?.(new DeviceProtocolError("failed", "device did not approve in time"));
-    }, approvalTimeoutMs);
+      rej?.(new DeviceProtocolError("failed", message));
+    }, ms);
     if (typeof (openTimer as { unref?: () => void }).unref === "function") {
       (openTimer as { unref: () => void }).unref();
+    }
+  }
+
+  /** A request the device holds: approval clock if delivered (or an older server that never says),
+   *  otherwise the long wait. */
+  function enterRequested(): void {
+    if (meta && meta.delivered_at === null) {
+      emitState({ state: "requested", delivered: false });
+      startWaitTimer();
+    } else {
+      emitState({ state: "requested" });
+      startApprovalTimer();
     }
   }
 
@@ -363,7 +408,31 @@ export function createDeviceClient(
     clockOffsetMs = 0;
   }
 
-  async function open(o: { wait?: boolean; intent?: string } = {}): Promise<DeviceSessionMeta> {
+  async function open(o: { wait?: boolean; intent?: string; signal?: AbortSignal } = {}): Promise<DeviceSessionMeta> {
+    const signal = o.signal;
+    if (signal?.aborted) throw new DeviceProtocolError("failed", "open aborted");
+    let onAbort: (() => void) | null = null;
+    if (signal) {
+      onAbort = () => {
+        const sid = meta?.id;
+        const waiting = meta !== null && meta.status !== "active" && meta.status !== "paused";
+        clearOpenTimer();
+        const rej = openReject;
+        openResolve = openReject = null;
+        rej?.(new DeviceProtocolError("failed", "open aborted"));
+        // Do not leave a request holding the computer for hours: withdraw it (best effort).
+        if (sid !== undefined && waiting) void transport.stopSession(sid).catch(() => undefined);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      return await openInner(o);
+    } finally {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async function openInner(o: { wait?: boolean; intent?: string }): Promise<DeviceSessionMeta> {
     const wait = o.wait !== false;
     if (meta && (meta.status === "active" || meta.status === "paused")) return meta;
     // A previous session's leftovers must never leak into this one.
@@ -405,10 +474,10 @@ export function createDeviceClient(
         return waiter ? waiter : meta;
       case "queued":
         emitState({ state: "queued", position: meta.position ?? 1 });
+        startWaitTimer();
         break;
       case "requested":
-        emitState({ state: "requested" });
-        startApprovalTimer();
+        enterRequested();
         break;
       default:
         break;
@@ -647,9 +716,16 @@ export function createDeviceClient(
           becomeActive(merged, true);
         } else {
           meta = { ...merged, status: "requested" };
-          emitState({ state: "requested" });
-          startApprovalTimer();
+          enterRequested();
         }
+        break;
+      }
+      case "received": {
+        // The device has the request: the approval clock starts now, the long wait ends.
+        if (!meta || meta.status === "active" || meta.status === "paused") return;
+        meta = { ...meta, ...(sess ?? {}), status: "requested", delivered_at: (b.delivered_at as string | undefined) ?? new Date().toISOString() };
+        emitState({ state: "delivered" });
+        startApprovalTimer();
         break;
       }
       case "queue_moved": {
@@ -658,6 +734,7 @@ export function createDeviceClient(
         if (!Number.isFinite(position)) return;
         meta = { ...meta, status: "queued", position };
         emitState({ state: "queued", position });
+        if (!openTimer) startWaitTimer();
         break;
       }
       case "paused": {
