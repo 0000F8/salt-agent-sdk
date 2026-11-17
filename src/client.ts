@@ -2282,6 +2282,24 @@ export function createSaltClient(options: SaltClientOptions) {
       return request("PATCH", "/api/v1/agents/delivery", apiKey, { mode });
     },
 
+    /** `GET /api/v1/browser/grants`: the browsers people let this agent use (empty means none). */
+    async getBrowserGrants(apiKey: string): Promise<{ grants: Array<Record<string, unknown>> }> {
+      return request("GET", "/api/v1/browser/grants", apiKey);
+    },
+
+    /** `POST /api/v1/browser/steps`: one step in a person's browser. `step_id` is the idempotency key, so a retry reuses it. */
+    async postBrowserStep(
+      apiKey: string,
+      body: { step_id: string; action: string; args: Record<string, unknown>; browser_client_id?: SaltId }
+    ): Promise<Record<string, unknown>> {
+      return request("POST", "/api/v1/browser/steps", apiKey, body);
+    },
+
+    /** `GET /api/v1/browser/steps/:id`: the step's status, and its sealed result once finished. */
+    async getBrowserStep(apiKey: string, stepId: SaltId): Promise<Record<string, unknown>> {
+      return request("GET", `/api/v1/browser/steps/${encodeURIComponent(String(stepId))}`, apiKey);
+    },
+
     /**
      * Owner-only agent admin record. `apikey` is metadata (hint, last-used) --
      * the raw key rides only on the createAgent response, and after that only

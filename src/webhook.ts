@@ -13,6 +13,7 @@
 // on top of this module, since it's specific to how one particular model
 // wants a situation framed.
 
+import { recordBrowserStepEvent } from "./browser.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
 import * as asks from "./ask.js";
@@ -2663,6 +2664,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   // consume), so nothing is answered by a sender those would not accept.
   // Returns true when the frame was consumed and must not be dispatched.
   async function resolveAnswer(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<boolean> {
+    // A browser_step result must reach the action waiting on it even while that action occupies the frame queue.
+    if (body?.type === "browser_step") return recordBrowserStepEvent(body);
     if (!asks.hasPendingAsks()) return false;
     if (body?.type === "card_interaction") {
       const b = body as unknown as { owner_id: SaltId; chat_id: SaltId; card_id: SaltId; action_id: string; user: RawSender };
@@ -2742,6 +2745,10 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
   }
 
   async function dispatch(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    if (body?.type === "browser_step") {
+      recordBrowserStepEvent(body);
+      return;
+    }
     if (body?.type === "card_interaction") return handleCardInteraction(body as never);
     if (body?.type === "app_action") return handleAppAction(body as never, headerAgentId);
     if (body?.type === "invoice_paid") return handleInvoicePaid(body as never);

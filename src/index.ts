@@ -22,3 +22,4 @@ export * from "./actions";
 export * from "./config";
 export * from "./media";
 export * from "./device/index.js";
+export * from "./browser";

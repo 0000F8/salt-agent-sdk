@@ -20,6 +20,7 @@ import { createWorkReporter, newWorkId, WORK_STATUSES, type WorkReport, type Wor
 import { createIdentitySharer } from "./identityShare.js";
 import type { AgentIdentity, IdentityStore } from "./identities";
 import { sameId, type SaltId } from "./ids.js";
+import { createBrowserTools } from "./browser.js";
 import { HELP_REASONS, type HelpReason } from "./help.js";
 import { AGENT_CLAIM_SECTION_KEYS, IdentityCardInvalidError, MAX_CAPABILITIES, type AgentClaimSectionKey, type CardSection, type Capability, type IdentityClaims } from "./identity.js";
 
@@ -1506,6 +1507,9 @@ export function createActions(options: ActionsOptions) {
       execute: closeHelpRequestAction,
     },
   ];
+
+  // Work in a person's browser (browser.ts): browser_grants and browser_step.
+  definitions.push(...createBrowserTools({ client, pgpPassphrase }).definitions);
 
   const byName = new Map(definitions.map((d) => [d.name, d]));
 
