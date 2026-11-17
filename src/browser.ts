@@ -206,7 +206,7 @@ export const BROWSER_ACTION_SPECS: Record<BrowserAction, ActionSpec> = {
     required: ["reason"],
   },
   tabs: {
-    use: "List the open tabs (needs All tabs on the grant). Rows {tab, window, title, host, url, pinned, current, lent?, read_only?, duplicate_of?}; a tab with lent:true is one the person lent you.",
+    use: "List the open tabs (needs All tabs on the grant). Rows {tab, window, title, host, url, pinned, current, read_only?, duplicate_of?}; read_only:true marks a look-only grant.",
     args: obj({}),
   },
   control: {
