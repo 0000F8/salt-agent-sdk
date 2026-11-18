@@ -7,3 +7,4 @@ dist/
 # any repo. salt-deploy refuses to deploy a dirty tree, so an untracked stray
 # here silently blocks the agents deploy (it did).
 .omc/
+.npmrc
