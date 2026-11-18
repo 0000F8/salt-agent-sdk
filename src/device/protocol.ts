@@ -70,6 +70,7 @@ export type DeviceOp =
   | "submit" // accessibility confirm of a named element; never a keystroke
   | "focus_app"
   | "list_apps"
+  | "apps_access" // read-only: the apps access list (can control / needs you / never allowed); answers `apps_access`
   | "settings" // read the computer's settings + state, or `{set: {...}}` to change what an agent may; answers `settings`
   | "read_file"
   | "write_file"
@@ -84,6 +85,7 @@ export type DeviceResultOp =
   | "ack"
   | "observation"
   | "apps"
+  | "apps_access"
   | "settings"
   | "file"
   | "ask"
@@ -101,6 +103,7 @@ export const AGENT_OPS: readonly DeviceOp[] = [
   "submit",
   "focus_app",
   "list_apps",
+  "apps_access",
   "settings",
   "read_file",
   "write_file",
@@ -115,6 +118,7 @@ export const DEVICE_RESULT_OPS: readonly DeviceResultOp[] = [
   "ack",
   "observation",
   "apps",
+  "apps_access",
   "settings",
   "file",
   "ask",
@@ -166,6 +170,7 @@ export const CAPABILITY_FOR_OP: Record<DeviceOp, string | null> = {
   submit: "device.act",
   focus_app: "device.apps",
   list_apps: "device.apps",
+  apps_access: "device.apps", // read-only, same grant as list_apps
   settings: null, // no capability of its own: any active session may read; a set follows the command-approval rule on the device
   read_file: "device.files.read",
   write_file: "device.files.write",
@@ -234,6 +239,7 @@ export function countClassForOp(op: DeviceOp): DeviceCountClass | null {
       return "app_focus";
     case "task":
       return "task";
+    case "apps_access": // a read of the access list, not an app focus
     case "settings":
     case "stop":
     case "cancel":
@@ -350,6 +356,30 @@ export interface ObservationResult {
   scale?: number;
   format?: "png" | "jpeg";
   image_b64?: string;
+}
+/** One app in the device's apps access list (mirrors the device's GET /v1/apps/access). */
+export interface AppsAccessEntry {
+  bundle_id: string;
+  app: string;
+  group: "can_control" | "needs_you" | "never_allowed";
+  status: "allowed" | "off" | "not_asked" | "closed" | "not_installed" | "never_allowed";
+  installed?: boolean;
+  running?: boolean;
+  last_known_state?: string | null;
+  last_known_at?: string | null;
+  live?: boolean;
+  reason?: string;
+  used_by?: Array<{ agent: string; last_used_at: string }>;
+  actions: Array<"ask" | "check" | "open_settings">;
+}
+/** The answer to `apps_access`: the two system permissions and every app with its group. */
+export interface AppsAccessResult {
+  as_of: string;
+  system: {
+    accessibility: { state: "granted" | "off" };
+    screen_recording: { state: "granted" | "off" };
+  };
+  apps: AppsAccessEntry[];
 }
 export interface AppsResult {
   apps: Array<{ id: string; name: string; frontmost: boolean }>;

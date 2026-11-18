@@ -62,6 +62,7 @@ import {
   TASK_DEVICE_GRACE_MS,
   type AppsResult,
   type DeviceSettingsArgs,
+  type AppsAccessResult,
   type DeviceSettingsResult,
   type ClickArgs,
   type DeviceCountClass,
@@ -99,6 +100,9 @@ export interface DeviceHostHandlers {
   submit(args: SubmitArgs): Promise<HandlerResult>;
   focusApp(args: { app: string }): Promise<HandlerResult>;
   listApps(): Promise<AppsResult>;
+  /** Read the apps access list (op `apps_access`, read-only, needs `device.apps` like `listApps`).
+   *  Optional: a host without it answers `unsupported`. */
+  appsAccess?(): Promise<AppsAccessResult>;
   /** Read (`args` has no `set`) or change (`args.set`) the computer's settings (op `settings`).
    *  Optional: a host without it answers `unsupported`. The op needs no capability, only a live
    *  session; the HANDLER decides a set (apply at once under Full control, otherwise ask the person)
@@ -1039,6 +1043,9 @@ export function createDeviceHost(
         return { op: "ack", body: ackBody(await handlers.focusApp(body as { app: string })) };
       case "list_apps":
         return { op: "apps", body: await handlers.listApps() };
+      case "apps_access":
+        if (!handlers.appsAccess) throw new DeviceProtocolError("unsupported", "this computer has no apps access list");
+        return { op: "apps_access", body: await handlers.appsAccess() };
       case "settings": {
         if (!handlers.settings) throw new DeviceProtocolError("unsupported", "this computer has no settings op");
         const b = body as DeviceSettingsArgs | undefined;
@@ -1539,6 +1546,7 @@ const AGENT_OP_SET = new Set<DeviceOp>([
   "submit",
   "focus_app",
   "list_apps",
+  "apps_access",
   "settings",
   "read_file",
   "write_file",

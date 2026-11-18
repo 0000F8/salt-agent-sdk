@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.39.0 — 2026-11-17
+
+- **Device op `apps_access`: read the apps access list.** `device.appsAccess()` returns `AppsAccessResult` (`as_of`, `system.{accessibility,screen_recording}.state`, and `apps: AppsAccessEntry[]` with `group` `can_control | needs_you | never_allowed`, `status`, `used_by`, `actions`), the same data as the device's `GET /v1/apps/access`. Read-only, capability `device.apps` (same grant as `listApps`), no lock, no count class. A host gains the optional handler `appsAccess?(): Promise<AppsAccessResult>`; without it the host answers `unsupported`. The shared envelope fixture gains `apps_access` in `AGENT_OPS`, `DEVICE_RESULT_OPS` and `CAPABILITY_FOR_OP`; saltapp-python needs the same fixture and constants. Tests in `tests/device-apps-access.test.js`.
+
 ## 0.38.0 — 2026-11-17
 
 - **The screen card: `show_screen`.** `buildScreenMarker({sessionId, deviceId, caption})` / `parseScreenMarker(text)` / `isScreenMessage` (`src/screen.ts`; marker `[[SALT-SCREEN session=<uuid> device=<uuid>]]` + a one-line caption of at most 200 characters, malformed parses to `null`, unknown attributes ignored), `client.showScreen(apiKey, {chatId, sessionId, deviceId, caption?})` (encrypts for the chat's members and the sender's own copy like `askForHelp`, posts to `/api/v1/messages`, no server call beyond that) and the `show_screen` action. Like `[[SALT-HELP]]`, nothing in the SDK treats the marker as a turn: an agent never receives its own message. Tests in `tests/screen-card.test.js`.
