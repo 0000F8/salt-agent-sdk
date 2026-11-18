@@ -18,6 +18,7 @@ import { resealHeldShare, type HeldRecoveryShare, type RecoveryGuardianInvitatio
 import { encryptAttachment, encryptFor, isAllowedSendContentType, MAX_ATTACHMENT_BYTES } from "./crypto.js";
 import { buildChatKeyReset, type AgentKeyToRewrap, type IdentitySectionCiphertext, type LinkedDeviceRow, type UserKeysResponse, type VaultRow } from "./keyReset.js";
 import { encodeHelp, type HelpReason, type HelpRequest } from "./help.js";
+import { buildScreenMarker } from "./screen.js";
 import { stat, open as openFile } from "node:fs/promises";
 import type {
   LiveSession,
@@ -35,6 +36,17 @@ import type {
 } from "./media.js";
 
 // --- Show Me: asking a person for help (help.ts, salt-api /api/v1/help_requests) ---------------
+
+/** What `client.showScreen` takes. */
+export interface ShowScreenParams {
+  chatId: SaltId;
+  /** The live device session this agent holds. */
+  sessionId: string;
+  deviceId: string;
+  /** One line, at most 200 characters; may be empty. */
+  caption?: string;
+  selfId?: SaltId;
+}
 
 /** What `client.askForHelp` / `ctx.askForHelp` take. The question rides end-to-end encrypted in the 1:1; Salt learns only the reason. */
 export interface AskForHelpParams {
@@ -2032,6 +2044,34 @@ export function createSaltClient(options: SaltClientOptions) {
       if (params.deviceSessionId !== undefined) body.device_session_id = params.deviceSessionId;
       const res = await request<{ help_request?: HelpRequest } & Partial<HelpRequest>>("POST", "/api/v1/help_requests", apiKey, body);
       return (res?.help_request ?? res) as HelpRequest;
+    },
+
+    /**
+     * The screen card: posts `[[SALT-SCREEN session=... device=...]]` + a caption as an ordinary
+     * end-to-end encrypted message (screen.ts), encrypted for every member and for the sender's
+     * own copy like any other encrypted send. salt-fe renders it as a live card for the person
+     * over the device. Returns the posted message id. Throws before sending when the chat is plain,
+     * an id is not a UUID, the caption is too long, or this account has no usable key.
+     */
+    async showScreen(apiKey: string, params: ShowScreenParams): Promise<{ message_id: SaltId }> {
+      const plaintext = buildScreenMarker({ sessionId: params.sessionId, deviceId: params.deviceId, caption: params.caption });
+      const chat = await request<SaltChat>("GET", `/api/v1/chats/${params.chatId}?_=${Date.now()}`, apiKey);
+      if (chat?.session?.encrypted === false) throw new Error("A screen card is for encrypted chats.");
+      const users = chat?.session?.users ?? [];
+      const selfId = params.selfId ?? (await whoAmI(apiKey))?.agent_id;
+      const me = users.find((u) => sameId(u.id, selfId));
+      const recipientKeys = users.filter((u) => !sameId(u.id, selfId)).map((u) => u.public_key).filter((k): k is string => Boolean(k));
+      if (recipientKeys.length === 0) throw new Error(`chat ${params.chatId}: no one in it has a usable public key; not posting.`);
+      if (!me?.public_key) throw new Error(`chat ${params.chatId}: this account is not a member with a public key; not posting.`);
+      const [message, senderMessage] = await Promise.all([encryptFor(plaintext, recipientKeys), encryptFor(plaintext, [me.public_key])]);
+      const posted = (await request<Record<string, unknown>>("POST", "/api/v1/messages", apiKey, {
+        chat_id: params.chatId,
+        message,
+        sender_message: senderMessage,
+      })) as { message_id?: SaltId; id?: SaltId; message?: { id?: SaltId } } | null;
+      const messageId = posted?.message_id ?? posted?.id ?? posted?.message?.id;
+      if (messageId == null) throw new Error("Salt did not return the id of the screen message.");
+      return { message_id: messageId };
     },
 
     /**

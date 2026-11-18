@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.38.0 — 2026-11-17
+
+- **The screen card: `show_screen`.** `buildScreenMarker({sessionId, deviceId, caption})` / `parseScreenMarker(text)` / `isScreenMessage` (`src/screen.ts`; marker `[[SALT-SCREEN session=<uuid> device=<uuid>]]` + a one-line caption of at most 200 characters, malformed parses to `null`, unknown attributes ignored), `client.showScreen(apiKey, {chatId, sessionId, deviceId, caption?})` (encrypts for the chat's members and the sender's own copy like `askForHelp`, posts to `/api/v1/messages`, no server call beyond that) and the `show_screen` action. Like `[[SALT-HELP]]`, nothing in the SDK treats the marker as a turn: an agent never receives its own message. Tests in `tests/screen-card.test.js`.
+
 ## 0.37.0 — 2026-11-16
 
 - **Work in a person's browser: `browser_grants` and `browser_step`.** Two actions in `createActions` (and `createBrowserTools`, `browserGrants`, `browserStep`) cover the Browser API with the full step vocabulary (`open read click type scroll screenshot handoff tabs control press select hover drag upload wait_for screenshot_diff console eval dialog network emulate recording demonstrate webmcp`), each with an `args` JSON Schema in `BROWSER_ACTION_SPECS`. A step posts with a fresh `step_id` (retries on 5xx reuse it), waits for the sealed `browser_step` event (webhook.ts's dispatcher and `resolveAnswer` hand it to `recordBrowserStepEvent`, so it works in webhook and socket mode and never queues behind the action waiting on it), makes one GET if none came, and unseals the result with the agent's private key. Returns `{status, reason?, summary, result?, step_id?}`; screenshots as `result.image` and diffs as `result.diff_image`, `{mime, base64}`. Client gains `getBrowserGrants`, `postBrowserStep`, `getBrowserStep`. Tests in `tests/browser-step.test.js`.

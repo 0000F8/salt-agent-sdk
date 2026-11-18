@@ -994,6 +994,28 @@ export function createActions(options: ActionsOptions) {
     return { closed: true, help_request_id: id, status: hr?.status ?? status };
   }
 
+  // --- show_screen (the screen card) --------------------------------------
+
+  async function showScreenAction(
+    caller: AgentIdentity,
+    input: { session_id?: unknown; device_id?: unknown; caption?: unknown; chat_id?: unknown },
+    ctx: ActionContext
+  ) {
+    const chatId = (typeof input.chat_id === "string" && input.chat_id) || ctx.mainChatId;
+    if (chatId == null) throw new Error("show_screen needs a chat_id, or must be called while replying in a chat.");
+    const sessionId = typeof input.session_id === "string" ? input.session_id.trim() : "";
+    const deviceId = typeof input.device_id === "string" ? input.device_id.trim() : "";
+    if (!sessionId) throw new Error("session_id is required: the live device session you hold.");
+    if (!deviceId) throw new Error("device_id is required: the computer that session is on.");
+    const caption = typeof input.caption === "string" ? input.caption : "";
+    const res = await client.showScreen(caller.apiKey, { chatId, sessionId, deviceId, caption, selfId: caller.saltAppId });
+    return {
+      shown: true,
+      message_id: res.message_id,
+      note: "The card is in the chat. The person sees the computer live while the card is on their screen and can take control from it. Do not post another on every task.",
+    };
+  }
+
   const definitions: ActionDefinition[] = [
     {
       name: "create_salt_agent",
@@ -1505,6 +1527,24 @@ export function createActions(options: ActionsOptions) {
         required: ["help_request_id"],
       },
       execute: closeHelpRequestAction,
+    },
+    {
+      name: "show_screen",
+      description:
+        "Post a live screen card for the computer you're using into the chat, so the person can watch it and take control. " +
+        "Use it when the person asks to see, show or look at their screen or to connect to it; give a one-line caption. " +
+        "Needs the live device session you hold (session_id) and its computer (device_id). Do not post one on every task.",
+      schema: {
+        type: "object",
+        properties: {
+          session_id: { type: "string", description: "The live device session you hold (UUID)." },
+          device_id: { type: "string", description: "The computer that session is on (UUID)." },
+          caption: { type: "string", description: "One line, at most 200 characters. May be empty." },
+          chat_id: { type: "string", description: "Optional: defaults to the current chat." },
+        },
+        required: ["session_id", "device_id"],
+      },
+      execute: showScreenAction,
     },
   ];
 
