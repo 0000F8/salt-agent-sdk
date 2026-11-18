@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## Unreleased
+
+- **Firefox reach in the browser steps.** `BROWSER_ACTIONS` gains `locate route download cookies clipboard`, each with an args schema in `BROWSER_ACTION_SPECS`; `eval` takes `world` (`page` | `isolated`), `dialog` takes `mode` (`next` | `always`), `control` documents `tabs.hide` / `tabs.show`. A `download`'s bytes come back as `result.file {mime, base64, size}` (like `result.image`; `saved`/`filename` stay for `save: true`). New types `BrowserResultFields`, `BrowserFile`, `BrowserRect`, `BrowserLocateResult`, `BrowserDialogSeen`, `BrowserRoute`, `BrowserCookie`; `BrowserStepResult.result` is typed with them. `needs_permission` is a documented reason. `BrowserGrant` gains `identity` (`"person"` | `"own"`) and `hidden`. Tests in `tests/browser-step-reach.test.js`.
+
 ## 0.38.0 — 2026-11-17
 
 - **The screen card: `show_screen`.** `buildScreenMarker({sessionId, deviceId, caption})` / `parseScreenMarker(text)` / `isScreenMessage` (`src/screen.ts`; marker `[[SALT-SCREEN session=<uuid> device=<uuid>]]` + a one-line caption of at most 200 characters, malformed parses to `null`, unknown attributes ignored), `client.showScreen(apiKey, {chatId, sessionId, deviceId, caption?})` (encrypts for the chat's members and the sender's own copy like `askForHelp`, posts to `/api/v1/messages`, no server call beyond that) and the `show_screen` action. Like `[[SALT-HELP]]`, nothing in the SDK treats the marker as a turn: an agent never receives its own message. Tests in `tests/screen-card.test.js`.

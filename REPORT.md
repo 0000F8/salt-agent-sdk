@@ -1,33 +1,38 @@
-# sdk lane: browser actions (salt-agent-sdk 0.37.0, branch feat/browse-parity)
+# sdk lane: Firefox reach (salt-agent-sdk, branch feat/fr-sdk; version NOT bumped, not published)
 
-## Exported action names (salt-mcp must annotate both)
+## Exported names and shapes (the mcp lane reads this)
 
-- `browser_grants`: input `{}` (additionalProperties false). Returns `{grants:[{browser_client_id, mode, all_tabs, client, ...}]}` (active only). Read-only.
-- `browser_step`: input `{action, args?, browser_client_id?, timeout_ms?}`; returns `{status, reason?, summary, result?, step_id?}`. Mutating (drives a person's browser); open-world.
+All from `src/browser.ts`, re-exported by `src/index.ts`.
 
-`browser_step` schema (`BROWSER_STEP_SCHEMA`, exported from `src/browser.ts`):
+- `BROWSER_ACTIONS` now ends with: `locate`, `route`, `download`, `cookies`, `clipboard` (after `webmcp`).
+- `BROWSER_ACTION_SPECS[action] = {use, args (JSON Schema, additionalProperties false), required?, oneOf?}`:
+  - `locate`: `{ref (required), tab}`. Read-only.
+  - `route`: `{op: add|remove|list|clear (required), id, match, action: block|fulfill|redirect|modify, status:int, headers:object, body, body_base64, redirect_url, replace:[{find,with}], tab}`. SDK check: `add` needs `match` and `action`, `remove` needs `id`.
+  - `download`: `{url (required, http/https), tab, save:boolean, filename}`.
+  - `cookies`: `{op: get|set|remove (required), url (required, http/https), tab, name, value, path, secure, http_only, same_site: no_restriction|lax|strict, expires:number}`.
+  - `clipboard`: `{op: read|write (required), text}`. SDK check: `write` needs `text`.
+  - `eval` gains `world: "page"|"isolated"`; `dialog` gains `mode: "next"|"always"`; `control.use` now names `tabs.hide`/`tabs.show` (method stays a free string, the SDK never listed control methods); `emulate.use` updated for Firefox.
+- Results (`BrowserStepResult.result` is now `BrowserResultFields`, all optional, index signature kept):
+  `world`, `armed`, `mode`, `seen: BrowserDialogSeen[]`, `detectable: string[]`, `screen/viewport: BrowserRect`, `device_pixel_ratio`, `in_front`, `id`, `routes: BrowserRoute[] | number`, `not_supported_fields`, `file: BrowserFile`, `url`, `saved`, `filename`, `cookies: BrowserCookie[]`, `text`, `written`, `image`, `diff_image`.
+- `download` bytes: wire `{url, mime, size, data_base64}` becomes `result.file = {mime, base64, size}`; `data_base64`/`mime`/`size` are removed from `result`. `save: true` keeps `{url, saved, filename}` and no `file`. (If `size` is missing it is computed from the base64.)
+- New exported types: `BrowserFile`, `BrowserRect`, `BrowserLocateResult`, `BrowserDialogSeen`, `BrowserRoute`, `BrowserCookie`, `BrowserResultFields`.
+- `BrowserGrant` gains `identity?: "person"|"own"` and `hidden?: boolean`.
+- `needs_permission` is documented as a reason (BrowserStepResult comment and the `browser_step` description, with the fix sentence). Reasons are not enumerated in code, so it passes through as the step's `reason`.
+- `browser_step`'s description and `args` description are generated from the specs, so the new actions appear there automatically (annotation of read-only vs not stays in salt-mcp: `locate` read-only; `download` without save and `cookies get` read-only; the rest not).
 
-- `action`: enum `BROWSER_ACTIONS` = open, read, click, type, scroll, screenshot, handoff, tabs, control, press, select, hover, drag, upload, wait_for, screenshot_diff, console, eval, dialog, network, emulate, recording, demonstrate, webmcp
-- `args`: object (checked per action by the SDK before posting)
-- `browser_client_id`: string, optional
-- `timeout_ms`: integer 1000..120000, default 60000
-- required: `["action"]`, additionalProperties false
+## Files changed
 
-Per-action `args` schemas (plain JSON Schema, with `required` and one-of groups) are in `BROWSER_ACTION_SPECS` (also exported): the mcp lane can build `salt_browser_open|read|click|type|press|screenshot|eval|handoff|tabs` from `BROWSER_ACTION_SPECS[action].args` and `.use`. Also exported: `createBrowserTools({client, pgpPassphrase})` -> `{grants, step, definitions}`, `browserGrants(client, caller)`, `browserStep(client, caller, pgpPassphrase, input)`, `checkBrowserArgs`, `recordBrowserStepEvent`, types `BrowserStepInput`, `BrowserStepResult`, `BrowserGrant`, `BrowserImage`.
-
-Result shapes: images are `result.image {mime, base64}` (screenshot) and `result.diff_image {mime, base64}` (screenshot_diff); recording stop keeps `webm_base64`. Statuses: done, failed, refused, stopped, expired, needs_human, running (+ reason `timed_out` when the wait ended; do not repeat). SDK-made reasons: `no_grant` (404), `rate_limited` (429), `unreachable`, `not_sealed`, `unreadable`, or Salt's own `code` on a 4xx.
-
-## Changes
-
-- `src/browser.ts` new; `src/client.ts` 3 methods; `src/actions.ts` registers both in `createActions`; `src/webhook.ts` routes `type: "browser_step"` in `dispatch` and `resolveAnswer` (socket early path); `src/index.ts` export; README section; CHANGELOG; version 0.37.0.
-- Event shape assumed: `{type:"browser_step", step:{id, step_id, status, summary, reason, result_armor}}` (or the step at top level); `result_armor` and REST `result` are both accepted.
+- `src/browser.ts` (actions, specs, types, `checkBrowserArgs`, `shapeImages` download branch, description)
+- `tests/browser-step-reach.test.js` (new, 8 tests)
+- `README.md` (Firefox reach section with one example each), `CHANGELOG.md` (Unreleased entry)
 
 ## Tests
 
-`node --test tests/browser-step.test.js`: 13 pass, 0 fail (step post, event wait, event-before-POST race, unseal, GET fallback, timeout, needs_human, 5xx retry with same step_id, 4xx structured, unsealed/unreadable results, bad args, dispatcher routing). Also run for regression: work-cancel, ask, socket-ask, socket tests: pass. `npm run build`: clean.
+`npm run build`: clean (tsc, no output).
+`node --test tests/browser-step-reach.test.js tests/browser-step.test.js`: 21 tests, 21 pass, 0 fail (8 new + the 13 existing).
 
 ## Not done
 
-- A look-only grant's `read_only` refusal comes from the server/extension; the SDK does not pre-check mode.
-- The contract says `eval`/`upload` size caps (64 KB, 5 MB) are enforced by the extension; the SDK checks key names and required parts only.
-- The worktree's `node_modules` is a symlink to the main salt-agent-sdk checkout (not committed).
+- No version bump, no publish (as instructed). The new entry sits under "Unreleased".
+- The SDK does not pre-check grant mode or permissions; the extension/API enforce them.
+- `node_modules` in the worktree is a symlink to the main checkout's (not committed).
