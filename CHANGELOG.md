@@ -5,9 +5,13 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
-## Unreleased
+## 0.40.0 — 2026-11-18
 
 - **Firefox reach in the browser steps.** `BROWSER_ACTIONS` gains `locate route download cookies clipboard`, each with an args schema in `BROWSER_ACTION_SPECS`; `eval` takes `world` (`page` | `isolated`), `dialog` takes `mode` (`next` | `always`), `control` documents `tabs.hide` / `tabs.show`. A `download`'s bytes come back as `result.file {mime, base64, size}` (like `result.image`; `saved`/`filename` stay for `save: true`). New types `BrowserResultFields`, `BrowserFile`, `BrowserRect`, `BrowserLocateResult`, `BrowserDialogSeen`, `BrowserRoute`, `BrowserCookie`; `BrowserStepResult.result` is typed with them. `needs_permission` is a documented reason. `BrowserGrant` gains `identity` (`"person"` | `"own"`) and `hidden`. Tests in `tests/browser-step-reach.test.js`.
+
+## 0.39.0 — 2026-11-17
+
+- **Device op `apps_access`: read the apps access list.** `device.appsAccess()` returns `AppsAccessResult` (`as_of`, `system.{accessibility,screen_recording}.state`, and `apps: AppsAccessEntry[]` with `group` `can_control | needs_you | never_allowed`, `status`, `used_by`, `actions`), the same data as the device's `GET /v1/apps/access`. Read-only, capability `device.apps` (same grant as `listApps`), no lock, no count class. A host gains the optional handler `appsAccess?(): Promise<AppsAccessResult>`; without it the host answers `unsupported`. The shared envelope fixture gains `apps_access` in `AGENT_OPS`, `DEVICE_RESULT_OPS` and `CAPABILITY_FOR_OP`; saltapp-python needs the same fixture and constants. Tests in `tests/device-apps-access.test.js`.
 
 ## 0.38.0 — 2026-11-17
 

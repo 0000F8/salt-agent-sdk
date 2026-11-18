@@ -45,6 +45,7 @@ import {
   type SubmitArgs,
   type ElementRef,
   type AppsResult,
+  type AppsAccessResult,
   type DeviceSettingsResult,
   type PointedBody,
   type Progress,
@@ -226,6 +227,8 @@ export interface DeviceClient {
   submit(element: ElementRef): Promise<void>;
   focusApp(app: string): Promise<void>;
   listApps(): Promise<AppsResult>;
+  /** Read the apps access list (op `apps_access`, read-only, needs `device.apps`): which apps this computer lets an agent control, which need the person, which are never allowed. */
+  appsAccess(): Promise<AppsAccessResult>;
   /** Read the computer's settings and power/display state (op `settings`). Needs a live session only:
    *  no capability, no ask, works with the screen off and with commands off. */
   settings(): Promise<DeviceSettingsResult>;
@@ -737,6 +740,7 @@ export function createDeviceClient(
   const doSubmit = expect("submit", "ack");
   const doFocus = expect("focus_app", "ack");
   const doListApps = expect("list_apps", "apps");
+  const doAppsAccess = expect("apps_access", "apps_access");
   const doSettings = expect("settings", "settings");
   const doReadFile = expect("read_file", "file");
   const doWriteFile = expect("write_file", "ack");
@@ -904,6 +908,7 @@ export function createDeviceClient(
     submit: (element: ElementRef) => doSubmit({ element } satisfies SubmitArgs).then(() => undefined),
     focusApp: (app: string) => doFocus({ app }).then(() => undefined),
     listApps: () => doListApps() as Promise<AppsResult>,
+    appsAccess: () => doAppsAccess() as Promise<AppsAccessResult>,
     settings: () => doSettings({}) as Promise<DeviceSettingsResult>,
     setSettings: (set: Record<string, unknown>) => doSettings({ set }) as Promise<DeviceSettingsResult>,
     readFile: (path: string) => doReadFile({ path }) as Promise<FileResult>,
