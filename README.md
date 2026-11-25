@@ -404,6 +404,26 @@ const { exercises } = await client.mandates.exercises(myAgentApiKey, mandateId);
 await client.mandates.decide(ownerApiKey, exerciseId, "approve", "looks right");
 ```
 
+### Mailbox grant and folder archives (0.42.0)
+
+```ts
+const grant = await client.mailbox.getGrant(apiKey, personId);          // rows: Off / ask / alone
+const page = await client.mailbox.listMessages(apiKey, personId);
+let opened = await client.mailbox.openMessage(apiKey, page.messages[0].id, personId);
+if (sdk.isMailAsked(opened)) {                                          // the row is on "ask": nothing happened yet
+  await client.mailbox.waitForApproval(apiKey, opened);
+  opened = await client.mailbox.openMessage(apiKey, page.messages[0].id, personId);   // repeat the identical call
+}
+const mail = await sdk.openMailRow(opened.message, myPrivateKey, passphrase);         // untrusted_external DATA
+await client.mailbox.makeAlias(apiKey, personId, { tag: "bsky", purpose: "Bluesky sign-up", planRef: "acct-7" });
+// refusals: err instanceof sdk.MailGrantError -> err.kind, err.sentence, err.next (and err.ask on mail_grant_required)
+
+await client.folders.archiveFiles(apiKey, folderId, messageIds, { archive: { name: "2026 invoices" }, dryRun: true });
+await client.folders.unarchiveFile(apiKey, folderId, messageId);        // restore; nothing is ever deleted
+```
+
+Editing the grant and approving or declining are the person's, not agent methods. See AGENTS.md.
+
 Six webhook events ride the same rail as `card_interaction`/`invoice_paid`
 (see **Webhook event types**, below): `onMandateOffered` (accept it with
 `ctx.accept()`), `onMandateActivated`/`onMandatePaused`/`onMandateRevoked`

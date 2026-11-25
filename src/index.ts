@@ -1,5 +1,7 @@
 export * from "./ids";
 export * from "./client";
+export * from "./mailgrant";
+export * from "./folderArchives";
 export * from "./crypto";
 export * from "./keyReset";
 export * from "./recovery";

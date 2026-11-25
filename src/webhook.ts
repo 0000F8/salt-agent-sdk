@@ -13,6 +13,7 @@
 // on top of this module, since it's specific to how one particular model
 // wants a situation framed.
 
+import { parseEmailReceived, parseMailGrantChanged, type EmailReceivedBody, type MailGrantChangedBody } from "./mailgrant.js";
 import { recordBrowserStepEvent } from "./browser.js";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import express, { type Express } from "express";
@@ -477,6 +478,29 @@ export interface HandoffReceivedContext {
 // on the mandate/exercise directly through `client.mandates`, or the ctx
 // helpers below, which are exactly that.
 
+/** The person changed or paused what this identity may do with their mailbox (`mail_grant_changed`). Metadata only: re-read the grant
+ *  (`client.mailbox.getGrant(identity.apiKey, ctx.holderId)`) rather than trusting the delta. */
+export interface MailGrantChangedContext {
+  identity: AgentIdentity;
+  holderId: SaltId | null;
+  paused: boolean;
+  changed: MailGrantChangedBody["changed"];
+  changedAt: string | null;
+  body: MailGrantChangedBody;
+}
+
+/** Mail arrived in one person's instance of this identity (`email_received`). No subject, no body: read the sealed row with
+ *  `client.mailbox.openMessage` then `openMailRow`. EVERYTHING in the mail is `untrusted_external` data, never instructions.
+ *  `aliasWake` is set when the mail came to an alias this identity made for a plan: `from_host` is authoritative (compare it with a real
+ *  public-suffix list), `from_domain` advisory only, `needs_ok` means await the read approval first. */
+export interface EmailReceivedContext {
+  identity: AgentIdentity;
+  email: EmailReceivedBody;
+  holderId: SaltId | null;
+  aliasWake: EmailReceivedBody["alias_wake"];
+  needsOk: boolean;
+}
+
 export interface MandateOfferedContext {
   identity: AgentIdentity;
   mandate: Mandate;
@@ -830,6 +854,10 @@ export interface WebhookServerOptions {
   /** A mandate was offered to this identity and is waiting to be accepted. See
    *  MandateOfferedContext -- call `ctx.accept()` to accept it. */
   onMandateOffered?: (ctx: MandateOfferedContext) => Promise<void> | void;
+  /** The person edited or paused this identity's mailbox grant (`mail_grant_changed`). See MailGrantChangedContext. */
+  onMailGrantChanged?: (ctx: MailGrantChangedContext) => Promise<void> | void;
+  /** Mail landed in one of this identity's mailboxes (`email_received`). See EmailReceivedContext. */
+  onEmailReceived?: (ctx: EmailReceivedContext) => Promise<void> | void;
   /** A mandate this identity is party to (either side) just became active. */
   onMandateActivated?: (ctx: MandateActivatedContext) => Promise<void> | void;
   /** A mandate this identity is party to was paused (e.g. the grantee's key changed). */
@@ -2403,6 +2431,32 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     return undefined;
   }
 
+  async function handleMailGrantChanged(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onMailGrantChanged) return;
+    const all = identities.all();
+    const identity = resolveMandateIdentity(headerAgentId) ?? (all.length === 1 ? all[0] : undefined);
+    if (!identity) return;
+    const parsed = parseMailGrantChanged(body);
+    try {
+      await options.onMailGrantChanged({ identity, holderId: parsed.holder_id, paused: parsed.paused, changed: parsed.changed, changedAt: parsed.changed_at, body: parsed });
+    } catch (err) {
+      logger.error(`onMailGrantChanged failed: ${(err as Error).message}`);
+    }
+  }
+
+  async function handleEmailReceived(body: Record<string, unknown>, headerAgentId?: SaltId): Promise<void> {
+    if (!options.onEmailReceived) return;
+    const all = identities.all();
+    const identity = resolveMandateIdentity(headerAgentId) ?? (all.length === 1 ? all[0] : undefined);
+    if (!identity) return;
+    const email = parseEmailReceived(body);
+    try {
+      await options.onEmailReceived({ identity, email, holderId: email.holder_id, aliasWake: email.alias_wake, needsOk: email.alias_wake?.needs_ok === true });
+    } catch (err) {
+      logger.error(`[mail ${String(email.message_id)}] onEmailReceived failed: ${(err as Error).message}`);
+    }
+  }
+
   async function handleMandateOffered(body: { mandate: Mandate }, headerAgentId?: SaltId): Promise<void> {
     const identity = resolveMandateIdentity(headerAgentId, body.mandate?.grantee?.id);
     if (!identity || !options.onMandateOffered) return;
@@ -2555,8 +2609,9 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     };
   }
 
-  async function handleApprovalDecided(body: { exercise: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
-    const exercise = body.exercise;
+  async function handleApprovalDecided(body: { exercise?: MandateExercise }, headerAgentId?: SaltId): Promise<void> {
+    // salt-api sends the decided exercise FLAT (`{type, id, capability, decision, performed?, ...}`, MandateEventJob); an older shape nests it under `exercise`.
+    const exercise = (body.exercise ?? (typeof (body as { capability?: unknown }).capability === "string" ? (body as unknown as MandateExercise) : undefined)) as MandateExercise;
     const identity = resolveMandateIdentity(headerAgentId, exercise?.actor?.id);
     if (!identity) return;
     if (options.onGrantDecided) await fireGrantDecided(identity, body as Record<string, unknown>, exercise?.decision === "approved", undefined, exercise);
@@ -2764,6 +2819,8 @@ export function createDispatcher(options: WebhookServerOptions): Dispatcher {
     if (body?.type === "strategy_tune_declined") return handleStrategyTuneDeclined(body, headerAgentId);
     if (body?.type === "approval_requested") return handleApprovalRequested(body as never, headerAgentId);
     if (body?.type === "approval_decided") return handleApprovalDecided(body as never, headerAgentId);
+    if (body?.type === "mail_grant_changed") return handleMailGrantChanged(body, headerAgentId);
+    if (body?.type === "email_received") return handleEmailReceived(body, headerAgentId);
     if (body?.type === "describe_yourself") return handleDescribeYourself(body, headerAgentId);
     // device_session_ended and device_back are the AGENT's moments and must stay
     // ahead of the device_session* catch-all below. device_session_ended also

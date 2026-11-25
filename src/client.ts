@@ -6,6 +6,11 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { sameId, type SaltId } from "./ids.js";
+import { SaltApiError } from "./apiError.js";
+import { buildMailbox } from "./mailgrant.js";
+import { buildFolders } from "./folderArchives.js";
+
+export { SaltApiError };
 import {
   parseCardSignatureHeader,
   verifySignedCard,
@@ -1455,38 +1460,6 @@ export interface ResetChatKeyResult {
   uncertified?: SaltId[];
 }
 
-export class SaltApiError extends Error {
-  status: number;
-  body: unknown;
-  /** Salt's machine-readable refusal code (`{error, code}`), when the body carries one. */
-  code?: string;
-  /** Seconds to wait, from `Retry-After`, on a 429 (e.g. `too_many_attempts` from the password-gated reset). */
-  retryAfterSeconds?: number;
-  /** The grant that would unlock a refused call, when the refusal names one (missing authority for an agent caller). */
-  grant?: GrantNeeded;
-  /** A ready request that files the ask for `grant`. Pass `err.ask.body` to `client.requestGrant`, adding `reason`. Absent when the call is the owner's to decide alone (e.g. a spending freeze). */
-  ask?: GrantAsk;
-
-  constructor(method: string, url: string, status: number, body: unknown) {
-    // Salt's refusals carry one plain sentence ({error: "..."}). Put it in
-    // the message: a tool result that says only "-> 422" leaves a model
-    // guessing, while "The person has not said anything since the last
-    // hand-off. Answer them yourself..." tells it what to do instead.
-    // POST /auth (self-registration) answers {status: {message}} instead.
-    const b = body && typeof body === "object" ? (body as { error?: unknown; status?: { message?: unknown } }) : undefined;
-    const sentence = typeof b?.error === "string" ? b.error : typeof b?.status?.message === "string" ? b.status.message : undefined;
-    const reason = sentence ? `: ${sentence}` : "";
-    super(`Salt API ${method} ${url} -> ${status}${reason}`);
-    this.name = "SaltApiError";
-    this.status = status;
-    this.body = body;
-    if (typeof (b as { code?: unknown } | undefined)?.code === "string") this.code = (b as { code: string }).code;
-    const env = body && typeof body === "object" ? (body as { grant?: unknown; ask?: unknown }) : undefined;
-    if (env?.grant && typeof env.grant === "object" && typeof (env.grant as { capability?: unknown }).capability === "string") this.grant = env.grant as GrantNeeded;
-    if (env?.ask && typeof env.ask === "object" && typeof (env.ask as { path?: unknown }).path === "string") this.ask = env.ask as GrantAsk;
-  }
-}
-
 /** 409 `stale_rules` from `setTeamRules` when you passed a `baseVersion` and the rules changed since. Carries the
  *  current `rules` and `updatedAt` (use it as the next `baseVersion`): merge your change onto them and send again. */
 export class StaleRulesError extends SaltApiError {
@@ -1641,7 +1614,7 @@ type RequestFn = <T>(
 ) => Promise<T>;
 
 /** Sent as `X-Salt-Client` on every request. Kept equal to package.json's version (a test checks). */
-export const SDK_VERSION = "0.41.0";
+export const SDK_VERSION = "0.42.0";
 const CLIENT_HEADER = `salt-agent-sdk/${SDK_VERSION}`;
 
 export function createSaltClient(options: SaltClientOptions) {
@@ -1778,6 +1751,10 @@ export function createSaltClient(options: SaltClientOptions) {
    *  over differs between the two callers. */
   function buildMethods(request: RequestFn) {
     return {
+    /** The agent's mail on a person's instance, under that person's grant (`mailbox.getGrant`, `listMessages`, `openMessage`, `makeAlias`, `waitForApproval`, ...). See mailgrant.ts. */
+    mailbox: buildMailbox(request),
+    /** A shared folder's archives: file files away under a name, list, restore. Never deletes. See folderArchives.ts. */
+    folders: buildFolders(request),
     /** A chat's members (with public keys), for encrypting a reply to everyone who should read it. */
     async getChatMembers(apiKey: string, chatId: SaltId): Promise<SaltUser[]> {
       const chat = await request<SaltChat>("GET", `/api/v1/chats/${chatId}?_=${Date.now()}`, apiKey);
