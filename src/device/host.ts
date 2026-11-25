@@ -52,6 +52,10 @@ import {
   normalizeAmend,
   normalizeProgress,
   normalizeStill,
+  normalizeAppsChanged,
+  APPS_CHANGED_MAX_IDS,
+  APPS_CHANGED_MAX_PER_MINUTE,
+  APPS_CHANGED_MIN_INTERVAL_MS,
   normalizeTaskResult,
   STILL_MAX_PER_MINUTE,
   STILL_MIN_INTERVAL_MS,
@@ -405,6 +409,13 @@ export interface DeviceHost {
    *  watch), `secure_field` (the session is paused for a secure field), `ended`. Throws
    *  `bad_args` for a malformed body and `too_large` over the per-message cap. */
   postStill(body: StillBody): Promise<{ posted: true } | { posted: false; reason: "too_soon" | "too_many" | "no_help" | "budget" | "paused" | "not_viewed" | "not_granted" | "ended" }>;
+  /** Tell the agent the Apps list changed (op `apps_changed`, unsolicited, no `re`; body `{at, changed}`,
+   *  bundle ids only). Needs `device.apps` in the session's grant, else `{posted:false, reason:"not_granted"}`
+   *  and nothing is sent. Rate-limited like stills (min gap `APPS_CHANGED_MIN_INTERVAL_MS`, 1 s; 30 a
+   *  minute): a call inside the gap is held and merged with the others (union of ids, first 50) into ONE
+   *  message sent when the gap ends (`reason:"coalesced"`). While paused the ids are dropped (`paused`).
+   *  `empty` when no usable id was given. `ended` after the session ended. Never throws on a bad id list. */
+  notifyAppsChanged(ids: readonly string[]): Promise<{ posted: true; changed: number } | { posted: false; reason: "coalesced" | "empty" | "not_granted" | "paused" | "ended" }>;
   /** The help request ids currently open on this session. */
   openHelpIds(): string[];
 }
@@ -440,6 +451,8 @@ export function createDeviceHost(
     /** Least gap between two stills (default STILL_MIN_INTERVAL_MS, 2 s). For tests: the 30-a-minute
      *  cap can only be reached below the default gap. */
     stillMinIntervalMs?: number;
+    /** Least gap between two `apps_changed` messages (default APPS_CHANGED_MIN_INTERVAL_MS, 1 s). For tests. */
+    appsChangedMinIntervalMs?: number;
   } = {}
 ): DeviceHost {
   const deviceLock = options.deviceLock ?? sharedDeviceLock;
@@ -1264,6 +1277,9 @@ export function createDeviceHost(
     if (ended) return;
     ended = true;
     amendInbox.clear();
+    if (appsChangedTimer) clearTimeout(appsChangedTimer);
+    appsChangedTimer = null;
+    appsChangedPending.clear();
     if (beatTimer) clearInterval(beatTimer);
     if (durationTimer) clearTimeout(durationTimer);
     beatTimer = durationTimer = null;
@@ -1472,6 +1488,64 @@ export function createDeviceHost(
     return { posted: true };
   }
 
+  // ---- apps_changed: the Apps list changed (device -> agent, unsolicited) ----
+  const appsChangedTimes: number[] = [];
+  const appsChangedPending = new Set<string>();
+  let appsChangedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  async function sendAppsChanged(): Promise<void> {
+    if (ended || appsChangedPending.size === 0) return;
+    const now = clock();
+    const body = normalizeAppsChanged({ at: now, changed: [...appsChangedPending] });
+    appsChangedPending.clear();
+    if (!body) return;
+    const plaintext = encodeDeviceMessage(
+      { v: DEVICE_PROTOCOL_VERSION, id: deviceMessageId(), seq: nextOutSeq(), op: "apps_changed", session: snapshot.sessionId },
+      body
+    );
+    appsChangedTimes.push(now);
+    await transport.postResult(plaintext, snapshot.readers);
+  }
+
+  /** Milliseconds until the next apps_changed may go out (0 = now). */
+  function appsChangedWait(now: number): number {
+    while (appsChangedTimes.length && now - appsChangedTimes[0] >= 60_000) appsChangedTimes.shift();
+    let wait = 0;
+    const last = appsChangedTimes[appsChangedTimes.length - 1];
+    if (last !== undefined) wait = Math.max(wait, (options.appsChangedMinIntervalMs ?? APPS_CHANGED_MIN_INTERVAL_MS) - (now - last));
+    if (appsChangedTimes.length >= APPS_CHANGED_MAX_PER_MINUTE) wait = Math.max(wait, 60_000 - (now - appsChangedTimes[0]));
+    return wait;
+  }
+
+  async function notifyAppsChanged(
+    ids: readonly string[]
+  ): Promise<{ posted: true; changed: number } | { posted: false; reason: "coalesced" | "empty" | "not_granted" | "paused" | "ended" }> {
+    if (ended) return { posted: false, reason: "ended" };
+    if (!snapshot.caps["device.apps"]) return { posted: false, reason: "not_granted" };
+    const norm = normalizeAppsChanged({ at: 0, changed: Array.isArray(ids) ? ids : [] });
+    if (!norm) return { posted: false, reason: "empty" };
+    // Never while paused, for any reason (the person has the computer). The ids are not kept.
+    if (pausedReason !== null) return { posted: false, reason: "paused" };
+    for (const id of norm.changed) if (appsChangedPending.size < APPS_CHANGED_MAX_IDS) appsChangedPending.add(id);
+    const wait = appsChangedWait(clock());
+    if (wait > 0) {
+      // Held: one timer sends the union of everything that arrives before it fires.
+      if (!appsChangedTimer) {
+        appsChangedTimer = setTimeout(() => {
+          appsChangedTimer = null;
+          sendAppsChanged().catch(() => {
+            /* a failed post is dropped: the agent re-reads apps_access on its next need */
+          });
+        }, wait);
+        (appsChangedTimer as { unref?: () => void }).unref?.();
+      }
+      return { posted: false, reason: "coalesced" };
+    }
+    const changed = appsChangedPending.size;
+    await sendAppsChanged();
+    return { posted: true, changed };
+  }
+
   function pointRefused(pointId: string, why: string): void {
     audit({ commandId: pointId, op: "point", decision: "refused", code: "forbidden", reason: why });
   }
@@ -1534,7 +1608,7 @@ export function createDeviceHost(
     return true;
   }
 
-  return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason, handleLaneMessage, handleDelivery, postStill, openHelpIds: () => [...openHelp.keys()] };
+  return { handleCommand, start, stop, actionsSpent: () => spent, pause, resume, pausedReason: () => pausedReason, handleLaneMessage, handleDelivery, postStill, notifyAppsChanged, openHelpIds: () => [...openHelp.keys()] };
 }
 
 const AGENT_OP_SET = new Set<DeviceOp>([

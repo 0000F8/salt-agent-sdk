@@ -18,6 +18,7 @@ test("vectors: the fixture is well formed", () => {
   assert.ok(FIXTURE.task_args.length >= 15);
   assert.ok(FIXTURE.progress.length >= 10);
   assert.ok(FIXTURE.task_result.length >= 10);
+  assert.ok(FIXTURE.apps_changed.length >= 10);
 });
 
 test("vectors: constants are the ones the fixture was written with", () => {
@@ -68,5 +69,11 @@ for (const v of FIXTURE.progress) {
 for (const v of FIXTURE.task_result) {
   test(`vectors: task_result — ${v.name}`, () => {
     assert.deepEqual(sdk.normalizeTaskResult(v.input), v.expect);
+  });
+}
+
+for (const v of FIXTURE.apps_changed) {
+  test(`vectors: apps_changed — ${v.name}`, () => {
+    assert.deepEqual(sdk.normalizeAppsChanged(v.input), v.expect);
   });
 }

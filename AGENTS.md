@@ -821,3 +821,11 @@ account (an admin sets it) and the switches open; a closed switch answers 404.
 - Types: `LiveSession`, `StreamCredential`, `PublishBlock`, `MediaAsset`,
   `VideoPost` in `src/media.ts`. Refusals are `SaltApiError` with the server's sentence.
 - Tests: `tests/media.test.js` (mocked fetch).
+
+## Device op `apps_changed` (0.41.0)
+
+Unsolicited device-to-agent op (like `still`/`pointed`), sent only to a session whose grant has `device.apps`.
+Body `{at: <epoch ms>, changed: [bundle ids]}`: ids only, max 50, each cut to 200 chars, repeats removed. Agent side:
+`device.onAppsChanged(fn)`, then `device.appsAccess()` for the detail. Host side: `host.notifyAppsChanged(ids)`
+(grant check, 1 s gap, 30 a minute, bursts coalesce into one message with the union of ids; `normalizeAppsChanged`
+allow-lists the body on both ends). It is NOT in `AGENT_OPS` or `DEVICE_RESULT_OPS`; it is in `DEVICE_UNSOLICITED_OPS`.

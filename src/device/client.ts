@@ -23,6 +23,7 @@ import {
   deviceMessageId,
   decodeDeviceMessage,
   encodeDeviceMessage,
+  normalizeAppsChanged,
   normalizePointed,
   normalizeProgress,
   normalizeStill,
@@ -47,6 +48,7 @@ import {
   type AppsResult,
   type AppsAccessResult,
   type DeviceSettingsResult,
+  type AppsChangedBody,
   type PointedBody,
   type Progress,
   type StillBody,
@@ -284,6 +286,10 @@ export interface DeviceClient {
   /** Show Me: the computer's answer to a person's point (op `pointed`). `pointId` is the SALT-POINT id it
    *  answers (the header's `re`). The body is allow-listed (`normalizePointed`). Returns an unsubscribe. */
   onPointed(cb: (pointed: PointedBody, pointId: string) => void): () => void;
+  /** The computer's Apps list changed (op `apps_changed`, unsolicited, only when the session's grant has
+   *  `device.apps`): `{at, changed: [bundle ids]}`, ids only. Re-read with `appsAccess()` for the detail.
+   *  The body is allow-listed (`normalizeAppsChanged`); a malformed one is dropped. Returns an unsubscribe. */
+  onAppsChanged(cb: (change: AppsChangedBody) => void): () => void;
   /** Session state changes: queued(position) / requested / active /
    *  paused(reason) / resumed / ended(reason). Returns an unsubscribe. */
   onState(cb: (s: DeviceState) => void): () => void;
@@ -308,6 +314,7 @@ export function createDeviceClient(
   const stateListeners: Array<(s: DeviceState) => void> = [];
   const stillListeners: Array<(s: StillBody) => void> = [];
   const pointedListeners: Array<(p: PointedBody, pointId: string) => void> = [];
+  const appsChangedListeners: Array<(c: AppsChangedBody) => void> = [];
   let openResolve: ((m: DeviceSessionMeta) => void) | null = null;
   let openReject: ((e: Error) => void) | null = null;
   let openTimer: ReturnType<typeof setTimeout> | null = null;
@@ -875,6 +882,11 @@ export function createDeviceClient(
       if (pointed) for (const cb of [...pointedListeners]) safely(() => cb(pointed, header.re as string));
       return true;
     }
+    if (header.op === "apps_changed" && header.re === undefined) {
+      const change = normalizeAppsChanged(body);
+      if (change) for (const cb of [...appsChangedListeners]) safely(() => cb(change));
+      return true;
+    }
     if (header.re === undefined) return false; // a result always answers a command id
     const p = pending.get(header.re);
     if (!p) return false;
@@ -966,6 +978,13 @@ export function createDeviceClient(
       return () => {
         const i = stillListeners.indexOf(cb);
         if (i >= 0) stillListeners.splice(i, 1);
+      };
+    },
+    onAppsChanged: (cb) => {
+      appsChangedListeners.push(cb);
+      return () => {
+        const i = appsChangedListeners.indexOf(cb);
+        if (i >= 0) appsChangedListeners.splice(i, 1);
       };
     },
     onPointed: (cb) => {

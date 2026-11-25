@@ -5,6 +5,10 @@ history. Starting here, notable changes to `salt-agent-sdk` are recorded
 against the version they ship in; `package.json`'s `version` is bumped
 separately from this file.
 
+## 0.41.0 — 2026-11-24
+
+- **Device op `apps_changed`: told when the Apps list changes.** A new unsolicited device-to-agent op (beside `still` and `pointed`, in `DEVICE_UNSOLICITED_OPS`), sent only to a session whose grant has `device.apps`. Body `AppsChangedBody` = `{at, changed}`: epoch ms and bundle ids only (max 50, each cut to 200 chars), never names, icons or usage. Agent: `device.onAppsChanged(fn)`. Host: `host.notifyAppsChanged(ids)` checks the grant, holds to `APPS_CHANGED_MIN_INTERVAL_MS` (1 s) and `APPS_CHANGED_MAX_PER_MINUTE` (30), and coalesces a burst into one message (union of ids). `normalizeAppsChanged` allow-lists the body. The shared envelope fixture gains `apps_changed` vectors and the new constants.
+
 ## 0.40.0 — 2026-11-18
 
 - **Firefox reach in the browser steps.** `BROWSER_ACTIONS` gains `locate route download cookies clipboard`, each with an args schema in `BROWSER_ACTION_SPECS`; `eval` takes `world` (`page` | `isolated`), `dialog` takes `mode` (`next` | `always`), `control` documents `tabs.hide` / `tabs.show`. A `download`'s bytes come back as `result.file {mime, base64, size}` (like `result.image`; `saved`/`filename` stay for `save: true`). New types `BrowserResultFields`, `BrowserFile`, `BrowserRect`, `BrowserLocateResult`, `BrowserDialogSeen`, `BrowserRoute`, `BrowserCookie`; `BrowserStepResult.result` is typed with them. `needs_permission` is a documented reason. `BrowserGrant` gains `identity` (`"person"` | `"own"`) and `hidden`. Tests in `tests/browser-step-reach.test.js`.

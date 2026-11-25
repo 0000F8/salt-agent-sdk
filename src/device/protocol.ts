@@ -55,10 +55,12 @@ export type DevicePauseReason = "person_active" | "secure_field" | "person" | "p
  *  `still` is unsolicited (no `re`): the device posts a downscaled picture of its
  *  screen into the lane while a help request is open. `pointed` answers a person's
  *  `[[SALT-POINT]]` (its `re` is the point id): what is under the spot they tapped.
+ *  `apps_changed` (0.41.0) is unsolicited too, sent to an agent whose grant has `device.apps`
+ *  when the computer's Apps list changes: ids only, never names or usage.
  *  They are kept out of `DEVICE_RESULT_OPS` on purpose: that list is pinned by the
  *  envelope-vector fixture shared byte for byte with saltapp-python. */
-export type DeviceUnsolicitedOp = "still" | "pointed";
-export const DEVICE_UNSOLICITED_OPS: readonly DeviceUnsolicitedOp[] = ["still", "pointed"];
+export type DeviceUnsolicitedOp = "still" | "pointed" | "apps_changed";
+export const DEVICE_UNSOLICITED_OPS: readonly DeviceUnsolicitedOp[] = ["still", "pointed", "apps_changed"];
 
 /** Commands an agent sends to a device. */
 export type DeviceOp =
@@ -843,6 +845,37 @@ export interface PointedBody {
   element: PointedElement | null;
   refused: PointedRefusal | null;
   words: string;
+}
+
+// ---- apps_changed: the Apps list changed (device -> agent, unsolicited) ------
+
+/** At most one `apps_changed` a second and 30 a minute per lane; a burst coalesces into one message. */
+export const APPS_CHANGED_MIN_INTERVAL_MS = 1_000;
+export const APPS_CHANGED_MAX_PER_MINUTE = 30;
+/** At most this many bundle ids in one message, each cut to `APPS_CHANGED_ID_MAX` characters. */
+export const APPS_CHANGED_MAX_IDS = 50;
+export const APPS_CHANGED_ID_MAX = 200;
+
+/** `{at, changed}`: when (epoch ms) and which apps (bundle ids) changed. Ids and the kind of
+ *  change only, never app names, icons or usage; the agent re-reads `apps_access` for the rest. */
+export interface AppsChangedBody {
+  at: number;
+  changed: string[];
+}
+
+/** An `apps_changed` body, allow-listed: `at` a non-negative whole number, `changed` an array whose
+ *  strings are kept (non-strings and empties dropped, each cut to 200 characters, repeats removed,
+ *  first 50 kept). Null when it is not one or no id is left. Extra fields are dropped. */
+export function normalizeAppsChanged(raw: unknown): AppsChangedBody | null {
+  if (!isRecord(raw)) return null;
+  const at = wholeNumber(raw.at);
+  if (at === null || at < 0 || !Array.isArray(raw.changed)) return null;
+  const seen = new Set<string>();
+  for (const v of raw.changed) {
+    if (seen.size >= APPS_CHANGED_MAX_IDS) break;
+    if (typeof v === "string" && v !== "") seen.add(clip(v, APPS_CHANGED_ID_MAX));
+  }
+  return seen.size === 0 ? null : { at, changed: [...seen] };
 }
 
 /** A still body, allow-listed with types checked; null when it is not one. Used by the agent

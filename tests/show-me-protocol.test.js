@@ -87,7 +87,7 @@ test("still and pointed ride the normal SALT-DEVICE envelope", () => {
   assert.equal(back.header.op, "still");
   assert.equal(back.header.re, undefined);
   assert.deepEqual(sdk.normalizeStill(back.body), still);
-  assert.deepEqual(sdk.DEVICE_UNSOLICITED_OPS, ["still", "pointed"]);
+  assert.deepEqual(sdk.DEVICE_UNSOLICITED_OPS, ["still", "pointed", "apps_changed"]);
 });
 
 test("normalizeStill rejects malformed bodies", () => {

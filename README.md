@@ -1290,6 +1290,21 @@ is being looked at or closed (`callbacks.onHelpOpened / onHelpViewing / onHelpCl
 `host.handleLaneMessage(text, senderId)`, which answers a `[[SALT-POINT]]` from a person over the device
 through `handlers.resolvePoint`. A device account answers a live watch call with `onDeviceCall` and `callBundle.ts`.
 
+### Told when the Apps list changes: `apps_changed`
+
+An agent whose session grants `device.apps` is told when the computer's Apps list changes, instead of
+re-asking `appsAccess()`. The op is unsolicited (no `re`) and carries ids only, never app names, icons or usage:
+
+```ts
+device.onAppsChanged(({ at, changed }) => { /* at: epoch ms; changed: bundle ids (max 50, each <= 200 chars) */ });
+// then, if you need the detail: const list = await device.appsAccess();
+```
+
+On the computer the app calls `host.notifyAppsChanged(ids)`. It sends nothing without `device.apps` in the grant
+(`{posted:false, reason:"not_granted"}`), at most one message a second and 30 a minute (`APPS_CHANGED_MIN_INTERVAL_MS`,
+`APPS_CHANGED_MAX_PER_MINUTE`); a burst is held and sent as ONE message with the union of the ids
+(`reason:"coalesced"`). Ids are dropped while the session is paused.
+
 ## Reference implementations
 
 - [`salt-claude-agent`](../salt-claude-agent) — full-featured agent built
